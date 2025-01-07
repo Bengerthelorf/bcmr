@@ -1,0 +1,25 @@
+[package]
+name = "bcmr"
+version = "0.1.0"
+edition = "2021"
+authors = ["Zane Leong"]
+description = "Better Copy Move Remove (BCMR) - A modern CLI tool for file operations with progress bar and advanced features"
+repository = "https://github.com/Bengerthelorf/bcmr"
+license = "GPL-3.0"
+keywords = ["cli", "copy", "move", "remove", "filesystem"]
+categories = ["command-line-utilities", "filesystem"]
+readme = "README.md"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+tokio = { version = "1.36", features = ["full"] }
+indicatif = "0.17"
+walkdir = "2.5"
+anyhow = "1.0"
+thiserror = "2.0.6"
+terminal_size = "0.3.0"
+ratatui = "0.26.1"
+crossterm = "0.27"
+parking_lot = "0.12"
+filetime = "0.2"
+libc = "0.2"
