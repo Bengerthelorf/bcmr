@@ -1,8 +1,9 @@
 mod cli;
 mod copy;
-mod r#move;  // Using raw identifier as 'move' is a keyword
-mod remove;  // New module for remove command
+mod r#move;
+mod remove;
 mod progress;
+mod init;
 
 use anyhow::Result;
 use cli::Commands;
@@ -116,6 +117,7 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
 
     // Modify signal handling logic
     let progress_for_signal = Arc::clone(&progress);
+
     tokio::spawn(async move {
         if let Ok(()) = ctrl_c().await {
             let _ = progress_for_signal.lock().finish();
@@ -302,6 +304,21 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
     Ok(())
 }
 
+fn handle_init_command(args: &Commands) -> Result<()> {
+    match args {
+        Commands::Init { shell, cmd, path, no_cmd } => {
+            // 生成初始化脚本
+            let script = init::generate_init_script(shell, cmd, path.as_ref(), *no_cmd);
+            
+            // 直接打印到标准输出，这样就可以被 eval 捕获
+            print!("{}", script);
+            
+            Ok(())
+        },
+        _ => unreachable!(),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = cli::parse_args();
@@ -310,6 +327,7 @@ async fn main() -> Result<()> {
         Commands::Copy { .. } => handle_copy_command(&cli.command).await?,
         Commands::Move { .. } => handle_move_command(&cli.command).await?,
         Commands::Remove { .. } => handle_remove_command(&cli.command).await?,
+        Commands::Init { .. } => handle_init_command(&cli.command)?,
     }
 
     Ok(())

@@ -31,8 +31,47 @@ The compiled binary will be available at `target/release/bcmr`.
 - 🛡️ Safe Confirmation System - Prevent accidental overwrites or deletions
 - 🎭 File Exclusion - Flexibly ignore unwanted files
 - 📊 Detailed Operation Info - Know exactly what's happening
+- 🔌 Shell Integration - Customize command names with flexible prefixes
 
 ## 📖 Detailed Usage Guide
+
+### Shell Integration
+
+BCMR provides flexible shell integration similar to zoxide. You can customize command names with prefixes or replace native commands.
+
+Basic syntax:
+
+```bash
+bcmr init [shell] [options]
+```
+
+Available options:
+
+- `--cmd <prefix>`: Set command prefix (e.g., 'b' creates bcp, bmv, brm)
+- `--no-cmd`: Don't create command aliases
+- `--uninstall`: Remove previously installed commands
+
+Examples:
+
+```bash
+# Add to your ~/.bashrc or ~/.zshrc:
+# Use custom prefix (creates testcp, testmv, testrm)
+eval "$(bcmr init zsh --cmd test)"
+
+# Replace native commands (creates cp, mv, rm)
+eval "$(bcmr init zsh --cmd '')"
+
+# Use 'b' prefix (creates bcp, bmv, brm)
+eval "$(bcmr init bash --cmd b)"
+
+# Uninstall commands (remove previously added commands)
+eval "$(bcmr init zsh --cmd test --uninstall)"
+```
+
+Supported shells:
+- Bash
+- Zsh
+- Fish
 
 ### Copy Command
 
@@ -138,17 +177,6 @@ bcmr remove -rf -v outdated_folder/
 
 # Remove with exclusions
 bcmr remove -r --exclude=*.important,*.backup trash/
-```
-
-## ⚙️ Shell Configuration
-
-For convenient usage of BCMR, you can set up these aliases in your shell:
-
-```bash
-# Add to ~/.bashrc or ~/.zshrc
-alias cp='bcmr copy'
-alias mv='bcmr move'
-alias rm='bcmr remove'
 ```
 
 ## 🤝 Contributing

@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -13,8 +13,43 @@ pub struct Cli {
     pub command: Commands,
 }
 
+#[derive(Clone, Debug, ValueEnum)]
+pub enum Shell {
+    Bash,
+    Zsh,
+    Fish,
+}
+
+impl std::fmt::Display for Shell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Shell::Bash => write!(f, "bash"),
+            Shell::Zsh => write!(f, "zsh"),
+            Shell::Fish => write!(f, "fish"),
+        }
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Initialize shell integration
+    Init {
+        /// Shell to initialize (bash, zsh, fish)
+        shell: Shell,
+
+        /// Command prefix to use (default: no prefix)
+        #[arg(long, default_value = "")]
+        cmd: String,
+
+        /// Path to add to PATH
+        #[arg(long)]
+        path: Option<PathBuf>,
+
+        /// No command prefix
+        #[arg(long)]
+        no_cmd: bool,
+    },
+
     /// Copy files or directories
     Copy {
         /// Source file or directory
@@ -45,8 +80,7 @@ pub enum Commands {
         #[arg(long, value_name = "PATTERN", value_delimiter = ',')]
         exclude: Option<Vec<String>>,
 
-        /// Hidden test mode with artificial delay (format: test_mode=<type>:<value>)
-        /// Example: test_mode=delay:10
+        /// Hidden test mode with artificial delay
         #[arg(long, hide = true)]
         test_mode: Option<String>,
     },
@@ -81,8 +115,7 @@ pub enum Commands {
         #[arg(long, value_name = "PATTERN", value_delimiter = ',')]
         exclude: Option<Vec<String>>,
 
-        /// Hidden test mode with artificial delay (format: test_mode=<type>:<value>)
-        /// Example: test_mode=delay:10
+        /// Hidden test mode with artificial delay
         #[arg(long, hide = true)]
         test_mode: Option<String>,
     },
@@ -151,6 +184,7 @@ impl Commands {
                     TestMode::None
                 }
             }
+            _ => TestMode::None,
         }
     }
 
@@ -165,6 +199,7 @@ impl Commands {
                     false
                 }
             }
+            _ => false,
         }
     }
 
@@ -172,6 +207,7 @@ impl Commands {
         match self {
             Commands::Copy { force, yes, .. } | Commands::Move { force, yes, .. } => *force && !*yes,
             Commands::Remove { force, interactive, .. } => !*force && *interactive,
+            Commands::Init { .. } => false, // Init command never needs overwrite prompts
         }
     }
 
@@ -179,14 +215,15 @@ impl Commands {
     pub fn get_source(&self) -> &PathBuf {
         match self {
             Commands::Copy { source, .. } | Commands::Move { source, .. } => source,
-            Commands::Remove { paths, .. } => &paths[0], // Return first path for remove command
+            Commands::Remove { paths, .. } => &paths[0],
+            _ => panic!("Command doesn't have a source path"),
         }
     }
 
     pub fn get_destination(&self) -> &PathBuf {
         match self {
             Commands::Copy { destination, .. } | Commands::Move { destination, .. } => destination,
-            Commands::Remove { paths, .. } => &paths[0], // Not really applicable for remove
+            _ => panic!("Command doesn't have a destination path"),
         }
     }
 
@@ -195,13 +232,14 @@ impl Commands {
             Commands::Copy { recursive, .. } | 
             Commands::Move { recursive, .. } |
             Commands::Remove { recursive, .. } => *recursive,
+            _ => false,
         }
     }
 
     pub fn is_preserve(&self) -> bool {
         match self {
             Commands::Copy { preserve, .. } | Commands::Move { preserve, .. } => *preserve,
-            Commands::Remove { .. } => false,
+            _ => false,
         }
     }
 
@@ -210,19 +248,10 @@ impl Commands {
             Commands::Copy { force, .. } | 
             Commands::Move { force, .. } |
             Commands::Remove { force, .. } => *force,
-        }
-    }
-    
-    #[allow(dead_code)]
-    pub fn get_operation_type(&self) -> &'static str {
-        match self {
-            Commands::Copy { .. } => "Copying",
-            Commands::Move { .. } => "Moving",
-            Commands::Remove { .. } => "Removing",
+            _ => false,
         }
     }
 
-    // New helper methods specific to remove command
     pub fn is_interactive(&self) -> bool {
         match self {
             Commands::Remove { interactive, .. } => *interactive,
@@ -248,6 +277,16 @@ impl Commands {
         match self {
             Commands::Remove { paths, .. } => Some(paths),
             _ => None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn get_operation_type(&self) -> &'static str {
+        match self {
+            Commands::Copy { .. } => "Copying",
+            Commands::Move { .. } => "Moving",
+            Commands::Remove { .. } => "Removing",
+            Commands::Init { .. } => "Initializing",
         }
     }
 }
