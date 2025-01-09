@@ -14,7 +14,7 @@ use ratatui::{
     text::{Line, Span},
 };
 
-/// 将字节数转换为人类可读的格式
+/// Converts a byte count into a human-readable format
 fn format_bytes(bytes: f64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * 1024.0;
