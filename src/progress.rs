@@ -14,6 +14,26 @@ use ratatui::{
     text::{Line, Span},
 };
 
+/// 将字节数转换为人类可读的格式
+fn format_bytes(bytes: f64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    const TB: f64 = GB * 1024.0;
+
+    if bytes < KB {
+        format!("{:.0} B", bytes)
+    } else if bytes < MB {
+        format!("{:.2} KiB", bytes / KB)
+    } else if bytes < GB {
+        format!("{:.2} MiB", bytes / MB)
+    } else if bytes < TB {
+        format!("{:.2} GiB", bytes / GB)
+    } else {
+        format!("{:.2} TiB", bytes / TB)
+    }
+}
+
 pub struct CopyProgress {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
     total_bytes: u64,
@@ -25,8 +45,8 @@ pub struct CopyProgress {
     last_bytes: u64,
     last_speed: f64,
     operation_type: String,
-    items_total: Option<usize>,    // New: Total number of items to process
-    items_processed: usize,        // New: Number of items processed
+    items_total: Option<usize>,    // Total number of items to process
+    items_processed: usize,        // Number of items processed
 }
 
 impl CopyProgress {
@@ -74,13 +94,12 @@ impl CopyProgress {
         }
 
         let bytes_per_sec = (self.current_bytes - self.last_bytes) as f64 / elapsed;
-        let speed = bytes_per_sec / (1024.0 * 1024.0);
-
+        
         // Use a smoother moving average
         if self.last_speed > 0.0 {
-            self.last_speed * 0.8 + speed * 0.2
+            self.last_speed * 0.8 + (bytes_per_sec / (1024.0 * 1024.0)) * 0.2
         } else {
-            speed
+            bytes_per_sec / (1024.0 * 1024.0)
         }
     }
 
@@ -196,19 +215,24 @@ impl CopyProgress {
 
             // Render progress details and speed on the same line
             let details = format!(
-                "{:.2} MiB / {:.2} MiB    Speed: {:.2} MiB/s",
-                current_bytes as f64 / 1024.0 / 1024.0,
-                total_bytes as f64 / 1024.0 / 1024.0,
-                speed
+                "{} / {}    Speed: {}/s",
+                format_bytes(current_bytes as f64),
+                format_bytes(total_bytes as f64),
+                format_bytes(speed * 1024.0 * 1024.0) // Convert MiB/s to bytes/s
             );
             let total_detail = Paragraph::new(Line::from(vec![
                 Span::raw(details)
             ]));
             f.render_widget(total_detail, main_layout[1]);
 
-            // Render current file
+            // Render current file status
+            let current_file_info = format!(
+                "Current File: {} ({})",
+                current_file,
+                format_bytes(current_file_size as f64)
+            );
             let current_block = Block::default()
-                .title(format!("Current File: {}", current_file))
+                .title(current_file_info)
                 .borders(Borders::ALL);
             f.render_widget(current_block, main_layout[2]);
 
