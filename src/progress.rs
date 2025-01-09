@@ -175,12 +175,12 @@ impl CopyProgress {
                 .margin(1)
                 .split(rect)[0]
         };
-
+        
         self.terminal.draw(|f| {
             let display_area = Rect {
                 x: 0,
                 y: 0,
-                width: f.size().width,
+                width: f.area().width,
                 height: if self.items_total.is_some() { 8 } else { 7 },
             };
 
