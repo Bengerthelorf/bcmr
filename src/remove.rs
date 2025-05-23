@@ -105,19 +105,14 @@ async fn confirm_remove(path: &Path, is_dir: bool) -> Result<bool> {
     use std::io::{self, Write};
     use crossterm::{
         execute,
-        terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType},
-        cursor::{Show, Hide, MoveTo},
+        terminal::{disable_raw_mode, enable_raw_mode},
+        cursor::{Show, Hide},
     };
     
     // Temporarily restore terminal to normal mode for input
     let mut stdout = io::stdout();
     disable_raw_mode()?;
-    execute!(
-        stdout,
-        Show,  // Show cursor
-        MoveTo(0, 8),  // Move below the progress display
-        Clear(ClearType::FromCursorDown)  // Clear any leftover output
-    )?;
+    execute!(stdout, Show)?;  // Show cursor
 
     print!("Remove {} '{}'? (y/N) ", if is_dir { "directory" } else { "file" }, path.display());
     stdout.flush()?;

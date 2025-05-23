@@ -80,6 +80,10 @@ pub enum Commands {
         #[arg(long, value_name = "PATTERN", value_delimiter = ',')]
         exclude: Option<Vec<String>>,
 
+        /// Use plain text progress
+        #[arg(long)]
+        plain_progress: bool,
+
         /// Hidden test mode with artificial delay
         #[arg(long, hide = true)]
         test_mode: Option<String>,
@@ -115,6 +119,10 @@ pub enum Commands {
         #[arg(long, value_name = "PATTERN", value_delimiter = ',')]
         exclude: Option<Vec<String>>,
 
+        /// Use plain text progress
+        #[arg(long)]
+        plain_progress: bool,
+
         /// Hidden test mode with artificial delay
         #[arg(long, hide = true)]
         test_mode: Option<String>,
@@ -149,6 +157,10 @@ pub enum Commands {
         /// Exclude files/directories that match these patterns
         #[arg(long, value_name = "PATTERN", value_delimiter = ',')]
         exclude: Option<Vec<String>>,
+
+        /// Use plain text progress
+        #[arg(long)]
+        plain_progress: bool,
 
         /// Hidden test mode with artificial delay
         #[arg(long, hide = true)]
@@ -208,6 +220,15 @@ impl Commands {
             Commands::Copy { force, yes, .. } | Commands::Move { force, yes, .. } => *force && !*yes,
             Commands::Remove { force, interactive, .. } => !*force && *interactive,
             Commands::Init { .. } => false, // Init command never needs overwrite prompts
+        }
+    }
+
+    pub fn is_plain_progress(&self) -> bool {
+        match self {
+            Commands::Copy { plain_progress, .. } | 
+            Commands::Move { plain_progress, .. } |
+            Commands::Remove { plain_progress, .. } => *plain_progress,
+            _ => false,
         }
     }
 

@@ -1,9 +1,9 @@
-use std::io::{self, stdout};
+use std::io::{self, stdout, Write};
 use std::time::{Duration, Instant};
 use crossterm::{
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode},
-    cursor::{Hide, Show, MoveTo},
+    terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType},
+    cursor::{Hide, Show, MoveTo, position},
     event::{self, Event, KeyCode},
 };
 use ratatui::{
@@ -34,8 +34,7 @@ fn format_bytes(bytes: f64) -> String {
     }
 }
 
-pub struct CopyProgress {
-    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+struct ProgressData {
     total_bytes: u64,
     current_bytes: u64,
     current_file: String,
@@ -49,17 +48,10 @@ pub struct CopyProgress {
     items_processed: usize,        // Number of items processed
 }
 
-impl CopyProgress {
-    pub fn new(total_bytes: u64) -> io::Result<Self> {
-        let mut stdout = stdout();
-        execute!(stdout, Hide)?;
-        enable_raw_mode()?;
-        
-        let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
-        
+impl ProgressData {
+    fn new(total_bytes: u64) -> Self {
         let now = Instant::now();
-        Ok(Self {
-            terminal,
+        Self {
             total_bytes,
             current_bytes: 0,
             current_file: String::new(),
@@ -71,74 +63,47 @@ impl CopyProgress {
             operation_type: String::new(),
             items_total: None,
             items_processed: 0,
-        })
+        }
     }
 
-    // New method to set total items
-    pub fn set_total_items(&mut self, total: usize) {
-        self.items_total = Some(total);
-        self.items_processed = 0;
-        self.redraw().unwrap();
-    }
-
-    // New method to increment processed items
-    pub fn inc_items_processed(&mut self) {
-        self.items_processed += 1;
-        self.redraw().unwrap();
-    }
-
-    fn calculate_speed(&self) -> f64 {
+    fn calculate_speed(&mut self) -> f64 {
         let elapsed = self.last_update.elapsed().as_secs_f64();
         if elapsed < 0.1 {
             return self.last_speed;
         }
 
         let bytes_per_sec = (self.current_bytes - self.last_bytes) as f64 / elapsed;
+        let speed = bytes_per_sec / (1024.0 * 1024.0);
         
-        // Use a smoother moving average
-        if self.last_speed > 0.0 {
-            self.last_speed * 0.8 + (bytes_per_sec / (1024.0 * 1024.0)) * 0.2
+        self.last_speed = if self.last_speed > 0.0 {
+            self.last_speed * 0.8 + speed * 0.2
         } else {
-            bytes_per_sec / (1024.0 * 1024.0)
-        }
+            speed
+        };
+
+        self.last_update = Instant::now();
+        self.last_bytes = self.current_bytes;
+        
+        self.last_speed
     }
+}
 
-    pub fn set_current_file(&mut self, file_name: &str, file_size: u64) {
-        self.current_file = file_name.to_string();
-        self.current_file_size = file_size;
-        self.current_file_progress = 0;
-        self.redraw().unwrap();
-    }
+// ratatui
+struct FancyProgress {
+    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    data: ProgressData,
+}
 
-    pub fn inc_current(&mut self, delta: u64) {
-        self.current_bytes += delta;
-        self.current_file_progress += delta;
-
-        let now = Instant::now();
-        let elapsed = now.duration_since(self.last_update).as_secs_f64();
-
-        // More frequent speed updates
-        if elapsed >= 0.1 {
-            let bytes_per_sec = (self.current_bytes - self.last_bytes) as f64 / elapsed;
-            let speed = bytes_per_sec / (1024.0 * 1024.0);
-
-            // Smoother speed updates
-            self.last_speed = if self.last_speed > 0.0 {
-                self.last_speed * 0.8 + speed * 0.2
-            } else {
-                speed
-            };
-
-            self.last_update = now;
-            self.last_bytes = self.current_bytes;
-        }
-
-        self.redraw().unwrap();
-    }
-
-    pub fn set_operation_type(&mut self, operation: &str) {
-        self.operation_type = operation.to_string();
-        self.redraw().unwrap();
+impl FancyProgress {
+    fn new(total_bytes: u64) -> io::Result<Self> {
+        let mut stdout = stdout();
+        execute!(stdout, Hide)?;
+        enable_raw_mode()?;
+        
+        let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
+        let data = ProgressData::new(total_bytes);
+        
+        Ok(Self { terminal, data })
     }
 
     fn redraw(&mut self) -> io::Result<()> {
@@ -147,26 +112,20 @@ impl CopyProgress {
             if let Event::Key(key) = event::read()? {
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL) {
                     self.finish()?;
-                    std::process::exit(130);  // Standard exit code for Ctrl+C
+                    std::process::exit(130);
                 }
             }
         }
 
-        // Pre-calculate all necessary values
-        let total_bytes = self.total_bytes;
-        let current_bytes = self.current_bytes;
-        let current_file = self.current_file.clone();
-        let current_file_size = self.current_file_size;
-        let current_file_progress = self.current_file_progress;
-        let speed = self.calculate_speed();
-        let operation = if self.operation_type.is_empty() {
+        let total_progress = (self.data.current_bytes as f64 / self.data.total_bytes.max(1) as f64 * 100.0) as u16;
+        let current_progress = (self.data.current_file_progress as f64 / self.data.current_file_size.max(1) as f64 * 100.0) as u16;
+        let speed = self.data.calculate_speed();
+
+        let operation = if self.data.operation_type.is_empty() {
             "Progress".to_string()
         } else {
-            format!("{} Progress", self.operation_type)
+            format!("{} Progress", self.data.operation_type)
         };
-
-        let total_progress = (current_bytes as f64 / total_bytes.max(1) as f64 * 100.0) as u16;
-        let current_progress = (current_file_progress as f64 / current_file_size.max(1) as f64 * 100.0) as u16;
 
         let calculate_inner_rect = |rect: Rect| -> Rect {
             Layout::default()
@@ -181,7 +140,7 @@ impl CopyProgress {
                 x: 0,
                 y: 0,
                 width: f.area().width,
-                height: if self.items_total.is_some() { 8 } else { 7 },
+                height: if self.data.items_total.is_some() { 8 } else { 7 },
             };
 
             let mut constraints = vec![
@@ -190,8 +149,7 @@ impl CopyProgress {
                 Constraint::Length(3),  // Current file
             ];
 
-            // Add extra space for items counter if needed
-            if self.items_total.is_some() {
+            if self.data.items_total.is_some() {
                 constraints.push(Constraint::Length(1));  // Items progress
             }
 
@@ -202,7 +160,7 @@ impl CopyProgress {
 
             // Render total progress
             let total_block = Block::default()
-                .title(operation)
+                .title(operation.clone())
                 .borders(Borders::ALL);
             f.render_widget(total_block, main_layout[0]);
 
@@ -213,12 +171,12 @@ impl CopyProgress {
                 .label(format!("{}%", total_progress));
             f.render_widget(gauge, calculate_inner_rect(main_layout[0]));
 
-            // Render progress details and speed on the same line
+            // Render progress details
             let details = format!(
                 "{} / {}    Speed: {}/s",
-                format_bytes(current_bytes as f64),
-                format_bytes(total_bytes as f64),
-                format_bytes(speed * 1024.0 * 1024.0) // Convert MiB/s to bytes/s
+                format_bytes(self.data.current_bytes as f64),
+                format_bytes(self.data.total_bytes as f64),
+                format_bytes(speed * 1024.0 * 1024.0)
             );
             let total_detail = Paragraph::new(Line::from(vec![
                 Span::raw(details)
@@ -228,8 +186,8 @@ impl CopyProgress {
             // Render current file status
             let current_file_info = format!(
                 "Current File: {} ({})",
-                current_file,
-                format_bytes(current_file_size as f64)
+                self.data.current_file,
+                format_bytes(self.data.current_file_size as f64)
             );
             let current_block = Block::default()
                 .title(current_file_info)
@@ -244,10 +202,10 @@ impl CopyProgress {
             f.render_widget(current_gauge, calculate_inner_rect(main_layout[2]));
 
             // Render items progress if available
-            if let Some(total_items) = self.items_total {
+            if let Some(total_items) = self.data.items_total {
                 let items_progress = format!(
                     "Items processed: {} / {}",
-                    self.items_processed,
+                    self.data.items_processed,
                     total_items
                 );
                 let items_detail = Paragraph::new(Line::from(vec![
@@ -260,14 +218,262 @@ impl CopyProgress {
         Ok(())
     }
 
-    pub fn finish(&mut self) -> io::Result<()> {
+    fn finish(&mut self) -> io::Result<()> {
         execute!(
             self.terminal.backend_mut(),
             Show,
-            MoveTo(0, if self.items_total.is_some() { 8 } else { 7 })
+            MoveTo(0, if self.data.items_total.is_some() { 8 } else { 7 })
         )?;
         disable_raw_mode()?;
         Ok(())
+    }
+}
+
+// Plain progress using simple text
+struct PlainProgress {
+    data: ProgressData,
+    start_row: u16,
+    start_col: u16,
+    raw_mode_enabled: bool,
+    initialized: bool,
+}
+
+impl PlainProgress {
+    fn new(total_bytes: u64) -> io::Result<Self> {
+        let data = ProgressData::new(total_bytes);
+        Ok(Self {
+            data,
+            start_row: 0,
+            start_col: 0,
+            raw_mode_enabled: false,
+            initialized: false,
+        })
+    }
+
+    fn initialize(&mut self) -> io::Result<()> {
+        if self.initialized {
+            return Ok(());
+        }
+
+        let (col, row) = position()?;
+        self.start_col = col;
+        self.start_row = row;
+
+        enable_raw_mode()?;
+        execute!(stdout(), Hide)?;
+        self.raw_mode_enabled = true;
+        self.initialized = true;
+
+        Ok(())
+    }
+
+    fn create_progress_bar(&self, percent: u16, width: usize) -> String {
+        let filled = (width * percent as usize / 100).min(width);
+        let empty = width - filled;
+        
+        let mut bar = String::with_capacity(width);
+        for _ in 0..filled {
+            bar.push('=');
+        }
+        for _ in 0..empty {
+            bar.push('-');
+        }
+        bar
+    }
+
+    fn redraw(&mut self) -> io::Result<()> {
+        if !self.initialized {
+            self.initialize()?;
+        }
+
+        // Check for Ctrl+C
+        if event::poll(Duration::from_millis(0))? {
+            if let Event::Key(key) = event::read()? {
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL) {
+                    self.finish()?;
+                    std::process::exit(130);
+                }
+            }
+        }
+
+        let mut stdout = stdout();
+        
+        let total_progress = (self.data.current_bytes as f64 / self.data.total_bytes.max(1) as f64 * 100.0) as u16;
+        let current_progress = (self.data.current_file_progress as f64 / self.data.current_file_size.max(1) as f64 * 100.0) as u16;
+        let speed = self.data.calculate_speed();
+
+        let operation = if self.data.operation_type.is_empty() {
+            "Progress".to_string()
+        } else {
+            format!("{} Progress", self.data.operation_type)
+        };
+
+        execute!(stdout, MoveTo(self.start_col, self.start_row))?;
+
+        let total_line = format!(
+            "{}: [{}] {}% | {} / {} | Speed: {}/s",
+            operation,
+            self.create_progress_bar(total_progress, 30),
+            total_progress,
+            format_bytes(self.data.current_bytes as f64),
+            format_bytes(self.data.total_bytes as f64),
+            format_bytes(speed * 1024.0 * 1024.0)
+        );
+        write!(stdout, "{}", total_line)?;
+        execute!(stdout, Clear(ClearType::UntilNewLine))?;
+
+        execute!(stdout, MoveTo(self.start_col, self.start_row + 1))?;
+        let file_line = format!(
+            "File: {} [{}] {}%",
+            self.data.current_file,
+            self.create_progress_bar(current_progress, 30),
+            current_progress
+        );
+        write!(stdout, "{}", file_line)?;
+        execute!(stdout, Clear(ClearType::UntilNewLine))?;
+
+        if let Some(total_items) = self.data.items_total {
+            execute!(stdout, MoveTo(self.start_col, self.start_row + 2))?;
+            let items_line = format!(
+                "Items: {} / {}",
+                self.data.items_processed,
+                total_items
+            );
+            write!(stdout, "{}", items_line)?;
+            execute!(stdout, Clear(ClearType::UntilNewLine))?;
+        }
+
+        stdout.flush()?;
+        Ok(())
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        if self.raw_mode_enabled {
+            let lines_used = if self.data.items_total.is_some() { 3 } else { 2 };
+            execute!(stdout(), Show, MoveTo(0, self.start_row + lines_used))?;
+            disable_raw_mode()?;
+            self.raw_mode_enabled = false;
+            println!();
+        }
+        Ok(())
+    }
+}
+
+// Public interface
+pub struct CopyProgress {
+    inner: Box<dyn ProgressRenderer>,
+}
+
+trait ProgressRenderer: Send {
+    fn set_total_items(&mut self, total: usize);
+    fn inc_items_processed(&mut self);
+    fn set_current_file(&mut self, file_name: &str, file_size: u64);
+    fn inc_current(&mut self, delta: u64);
+    fn set_operation_type(&mut self, operation: &str);
+    fn finish(&mut self) -> io::Result<()>;
+}
+
+impl ProgressRenderer for FancyProgress {
+    fn set_total_items(&mut self, total: usize) {
+        self.data.items_total = Some(total);
+        let _ = self.redraw();
+    }
+
+    fn inc_items_processed(&mut self) {
+        self.data.items_processed += 1;
+        let _ = self.redraw();
+    }
+
+    fn set_current_file(&mut self, file_name: &str, file_size: u64) {
+        self.data.current_file = file_name.to_string();
+        self.data.current_file_size = file_size;
+        self.data.current_file_progress = 0;
+        let _ = self.redraw();
+    }
+
+    fn inc_current(&mut self, delta: u64) {
+        self.data.current_bytes += delta;
+        self.data.current_file_progress += delta;
+        let _ = self.redraw();
+    }
+
+    fn set_operation_type(&mut self, operation: &str) {
+        self.data.operation_type = operation.to_string();
+        let _ = self.redraw();
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        self.finish()
+    }
+}
+
+impl ProgressRenderer for PlainProgress {
+    fn set_total_items(&mut self, total: usize) {
+        self.data.items_total = Some(total);
+        let _ = self.redraw();
+    }
+
+    fn inc_items_processed(&mut self) {
+        self.data.items_processed += 1;
+        let _ = self.redraw();
+    }
+
+    fn set_current_file(&mut self, file_name: &str, file_size: u64) {
+        self.data.current_file = file_name.to_string();
+        self.data.current_file_size = file_size;
+        self.data.current_file_progress = 0;
+        let _ = self.redraw();
+    }
+
+    fn inc_current(&mut self, delta: u64) {
+        self.data.current_bytes += delta;
+        self.data.current_file_progress += delta;
+        let _ = self.redraw();
+    }
+
+    fn set_operation_type(&mut self, operation: &str) {
+        self.data.operation_type = operation.to_string();
+        let _ = self.redraw();
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        self.finish()
+    }
+}
+
+impl CopyProgress {
+    pub fn new(total_bytes: u64, plain_mode: bool) -> io::Result<Self> {
+        let inner: Box<dyn ProgressRenderer> = if plain_mode {
+            Box::new(PlainProgress::new(total_bytes)?)
+        } else {
+            Box::new(FancyProgress::new(total_bytes)?)
+        };
+        
+        Ok(Self { inner })
+    }
+
+    pub fn set_total_items(&mut self, total: usize) {
+        self.inner.set_total_items(total);
+    }
+
+    pub fn inc_items_processed(&mut self) {
+        self.inner.inc_items_processed();
+    }
+
+    pub fn set_current_file(&mut self, file_name: &str, file_size: u64) {
+        self.inner.set_current_file(file_name, file_size);
+    }
+
+    pub fn inc_current(&mut self, delta: u64) {
+        self.inner.inc_current(delta);
+    }
+
+    pub fn set_operation_type(&mut self, operation: &str) {
+        self.inner.set_operation_type(operation);
+    }
+
+    pub fn finish(&mut self) -> io::Result<()> {
+        self.inner.finish()
     }
 }
 
