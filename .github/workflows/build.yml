@@ -52,23 +52,20 @@ jobs:
         include:
           # Linux x86_64 - Static linked (musl)
           - target: x86_64-unknown-linux-musl
-            os: ubuntu-20.04
+            os: ubuntu-latest
             name: bcmr-x86_64-linux
-            cross: false
             strip: true
             
           # macOS x86_64 (Intel)
           - target: x86_64-apple-darwin
             os: macos-latest
             name: bcmr-x86_64-macos
-            cross: false
             strip: true
             
           # macOS ARM64 (Apple Silicon)
           - target: aarch64-apple-darwin
             os: macos-latest
             name: bcmr-aarch64-macos
-            cross: false
             strip: true
 
     steps:
@@ -100,8 +97,8 @@ jobs:
       - name: Build binary
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Strip binary (Unix)
-        if: matrix.strip && runner.os != 'Windows'
+      - name: Strip binary
+        if: matrix.strip
         run: |
           case ${{ matrix.target }} in
             aarch64-apple-darwin)
@@ -114,6 +111,11 @@ jobs:
               strip target/${{ matrix.target }}/release/bcmr
               ;;
           esac
+
+      - name: Prepare binary
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/bcmr dist/
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
@@ -145,11 +147,7 @@ jobs:
           cd dist
           for dir in */; do
             cd "$dir"
-            if [ -f bcmr.exe ]; then
-              zip -r "../${dir%/}.zip" bcmr.exe
-            else
-              tar czf "../${dir%/}.tar.gz" bcmr
-            fi
+            tar czf "../${dir%/}.tar.gz" bcmr
             cd ..
           done
 
@@ -182,9 +180,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: |
-            dist/*.tar.gz
-            dist/*.zip
+          files: dist/*.tar.gz
           body_path: CHANGELOG.md
           draft: false
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
