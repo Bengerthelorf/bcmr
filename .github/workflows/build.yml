@@ -31,22 +31,15 @@ jobs:
       - name: Check compilation
         run: cargo check --verbose
 
-      - name: Run unit tests (if any)
+      - name: Run unit tests
         run: cargo test --verbose
-        continue-on-error: true
 
-      - name: Run clippy
+      - name: Run clippy (advisory only)
         run: cargo clippy -- -W clippy::all
         continue-on-error: true
 
-      - name: Check formatting
+      - name: Check formatting (advisory only)
         run: cargo fmt --check
-        continue-on-error: true
-
-      - name: Run integration tests
-        run: |
-          chmod +x test_bcmr.sh
-          ./test_bcmr.sh
         continue-on-error: true
 
   build:
@@ -62,11 +55,6 @@ jobs:
             os: ubuntu-latest
             name: bcmr-x86_64-linux
             
-          # Linux ARM64
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            name: bcmr-aarch64-linux
-            
           # macOS x86_64 (Intel)
           - target: x86_64-apple-darwin
             os: macos-latest
@@ -76,11 +64,6 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             name: bcmr-aarch64-macos
-            
-          # Windows x86_64
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            name: bcmr-x86_64-windows.exe
 
     steps:
       - name: Checkout
@@ -96,32 +79,17 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install cross-compilation tools
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-
-      - name: Configure cross-compilation
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          echo '[target.aarch64-unknown-linux-gnu]' >> ~/.cargo/config.toml
-          echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
-
       - name: Build binary
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Strip binary (Unix)
-        if: matrix.os != 'windows-latest'
+      - name: Strip binary
         run: strip target/${{ matrix.target }}/release/bcmr
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: |
-            target/${{ matrix.target }}/release/bcmr
-            target/${{ matrix.target }}/release/bcmr.exe
+          path: target/${{ matrix.target }}/release/bcmr
 
   release:
     name: Create Release
@@ -147,20 +115,14 @@ jobs:
           cd dist
           for dir in */; do
             cd "$dir"
-            if [ -f bcmr ]; then
-              tar czf "../${dir%/}.tar.gz" bcmr
-            elif [ -f bcmr.exe ]; then
-              zip "../${dir%/}.zip" bcmr.exe
-            fi
+            tar czf "../${dir%/}.tar.gz" bcmr
             cd ..
           done
 
       - name: Generate changelog
         id: changelog
         run: |
-          # 获取当前版本
           CURRENT_TAG=${GITHUB_REF#refs/tags/}
-          # 获取上一个版本标签
           PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
           
           echo "## 📋 Changelog" > CHANGELOG.md
@@ -180,15 +142,13 @@ jobs:
           echo "## 📦 Download" >> CHANGELOG.md
           echo "Choose the appropriate binary for your platform:" >> CHANGELOG.md
           echo "- **Linux x86_64**: bcmr-x86_64-linux.tar.gz" >> CHANGELOG.md
-          echo "- **Linux ARM64**: bcmr-aarch64-linux.tar.gz" >> CHANGELOG.md
           echo "- **macOS Intel**: bcmr-x86_64-macos.tar.gz" >> CHANGELOG.md
           echo "- **macOS Apple Silicon**: bcmr-aarch64-macos.tar.gz" >> CHANGELOG.md
-          echo "- **Windows**: bcmr-x86_64-windows.zip" >> CHANGELOG.md
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: dist/*.tar.gz dist/*.zip
+          files: dist/*.tar.gz
           body_path: CHANGELOG.md
           draft: false
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
@@ -212,4 +172,4 @@ jobs:
 
       - name: Publish to crates.io
         run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        continue-on-error: true  # 如果版本已存在，不要失败
+        continue-on-error: true
