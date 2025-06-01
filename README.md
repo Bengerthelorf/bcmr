@@ -32,6 +32,7 @@ The compiled binary will be available at `target/release/bcmr`.
 - 🎭 File Exclusion - Flexibly ignore unwanted files
 - 📊 Detailed Operation Info - Know exactly what's happening
 - 🔌 Shell Integration - Customize command names with flexible prefixes
+- 🎮 Two Progress Display Modes - Plain text (default) or fancy TUI display
 
 ## 📖 Detailed Usage Guide
 
@@ -69,6 +70,7 @@ eval "$(bcmr init zsh --cmd test --uninstall)"
 ```
 
 Supported shells:
+
 - Bash
 - Zsh
 - Fish
@@ -88,6 +90,7 @@ Available options:
 - `-f, --force`: Force overwrite existing files
 - `-y, --yes`: Skip confirmation when using force
 - `--exclude=<pattern>`: Exclude files matching pattern (comma-separated)
+- `--fancy-progress`: Use fancy TUI progress display (default is plain text)
 
 Examples:
 
@@ -106,6 +109,9 @@ bcmr copy -f -y source.txt destination.txt
 
 # Copy with exclusions
 bcmr copy -r --exclude=.git,*.tmp src/ dest/
+
+# Copy with fancy progress display
+bcmr copy -r --fancy-progress large_folder/ backup/
 ```
 
 ### Move Command
@@ -123,6 +129,7 @@ Available options:
 - `-f, --force`: Force overwrite existing files
 - `-y, --yes`: Skip overwrite confirmation
 - `--exclude=<pattern>`: Exclude matching files
+- `--fancy-progress`: Use fancy TUI progress display (default is plain text)
 
 Examples:
 
@@ -138,6 +145,9 @@ bcmr move -f --preserve config.json /etc/
 
 # Move with exclusions
 bcmr move -r --exclude=node_modules,*.log project/ new_place/
+
+# Move with fancy progress display
+bcmr move -r --fancy-progress large_folder/ new_location/
 ```
 
 ### Remove Command
@@ -156,6 +166,7 @@ Available options:
 - `-v, --verbose`: Show detailed removal process
 - `-d`: Remove empty directories
 - `--exclude=<pattern>`: Exclude matching files
+- `--fancy-progress`: Use fancy TUI progress display (default is plain text)
 
 Examples:
 
@@ -177,7 +188,19 @@ bcmr remove -rf -v outdated_folder/
 
 # Remove with exclusions
 bcmr remove -r --exclude=*.important,*.backup trash/
+
+# Remove with fancy progress display
+bcmr remove -r --fancy-progress large_folder/
 ```
+
+### Progress Display Modes
+
+BCMR offers two progress display modes:
+
+1. **Plain Text Mode (Default)**: Simple text-based progress bars that work in any terminal
+2. **Fancy TUI Mode**: Rich terminal UI with enhanced visual elements
+
+Use `--fancy-progress` flag to enable the fancy TUI mode for a more visually appealing experience.
 
 ## 🤝 Contributing
 

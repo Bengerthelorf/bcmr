@@ -80,9 +80,9 @@ pub enum Commands {
         #[arg(long, value_name = "PATTERN", value_delimiter = ',')]
         exclude: Option<Vec<String>>,
 
-        /// Use plain text progress
+        /// Use fancy progress display (default is plain text)
         #[arg(long)]
-        plain_progress: bool,
+        fancy_progress: bool,
 
         /// Hidden test mode with artificial delay
         #[arg(long, hide = true)]
@@ -119,9 +119,9 @@ pub enum Commands {
         #[arg(long, value_name = "PATTERN", value_delimiter = ',')]
         exclude: Option<Vec<String>>,
 
-        /// Use plain text progress
+        /// Use fancy progress display (default is plain text)
         #[arg(long)]
-        plain_progress: bool,
+        fancy_progress: bool,
 
         /// Hidden test mode with artificial delay
         #[arg(long, hide = true)]
@@ -158,9 +158,9 @@ pub enum Commands {
         #[arg(long, value_name = "PATTERN", value_delimiter = ',')]
         exclude: Option<Vec<String>>,
 
-        /// Use plain text progress
+        /// Use fancy progress display (default is plain text)
         #[arg(long)]
-        plain_progress: bool,
+        fancy_progress: bool,
 
         /// Hidden test mode with artificial delay
         #[arg(long, hide = true)]
@@ -223,11 +223,11 @@ impl Commands {
         }
     }
 
-    pub fn is_plain_progress(&self) -> bool {
+    pub fn is_fancy_progress(&self) -> bool {
         match self {
-            Commands::Copy { plain_progress, .. } | 
-            Commands::Move { plain_progress, .. } |
-            Commands::Remove { plain_progress, .. } => *plain_progress,
+            Commands::Copy { fancy_progress, .. } | 
+            Commands::Move { fancy_progress, .. } |
+            Commands::Remove { fancy_progress, .. } => *fancy_progress,
             _ => false,
         }
     }

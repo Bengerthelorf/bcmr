@@ -101,7 +101,8 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
 
     // Calculate total size
     let total_size = copy::get_total_size(args.get_source(), args.is_recursive(), args).await?;
-    let progress = Arc::new(Mutex::new(CopyProgress::new(total_size, args.is_plain_progress())?));
+    // 修改这里：使用 !args.is_fancy_progress() 来决定是否使用plain模式
+    let progress = Arc::new(Mutex::new(CopyProgress::new(total_size, !args.is_fancy_progress())?));
 
     // Set initial file/directory name
     let display_name = args
@@ -171,7 +172,7 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
     }
 
     let total_size = r#move::get_total_size(args.get_source(), args.is_recursive(), args).await?;
-    let progress = Arc::new(Mutex::new(CopyProgress::new(total_size, args.is_plain_progress())?));
+    let progress = Arc::new(Mutex::new(CopyProgress::new(total_size, !args.is_fancy_progress())?));
 
     let display_name = args
         .get_source()
@@ -239,7 +240,8 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         .sum();
 
     // Initialize progress display
-    let progress = Arc::new(Mutex::new(CopyProgress::new(total_size, args.is_plain_progress())?));
+    // 修改这里：使用 !args.is_fancy_progress() 来决定是否使用plain模式
+    let progress = Arc::new(Mutex::new(CopyProgress::new(total_size, !args.is_fancy_progress())?));
     
     // Set operation type
     progress.lock().set_operation_type("Removing");
