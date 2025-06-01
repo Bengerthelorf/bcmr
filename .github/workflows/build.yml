@@ -3,10 +3,11 @@ name: Build and Release
 on:
   push:
     branches: [ main, master ]
-  
-  push:
     tags:
       - 'v*.*.*'
+  
+  pull_request:
+    branches: [ main, master ]
   
   workflow_dispatch:
 
@@ -199,4 +200,4 @@ jobs:
 
       - name: Publish to crates.io
         run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        continue-on-error: true
+        continue-on-error: true  # 如果版本已存在，不要失败
