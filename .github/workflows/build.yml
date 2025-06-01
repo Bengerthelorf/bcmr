@@ -50,20 +50,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+          # Linux x86_64 - Static linked (musl)
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-20.04
             name: bcmr-x86_64-linux
+            cross: false
+            strip: true
             
           # macOS x86_64 (Intel)
           - target: x86_64-apple-darwin
             os: macos-latest
             name: bcmr-x86_64-macos
+            cross: false
+            strip: true
             
           # macOS ARM64 (Apple Silicon)
           - target: aarch64-apple-darwin
             os: macos-latest
             name: bcmr-aarch64-macos
+            cross: false
+            strip: true
 
     steps:
       - name: Checkout
@@ -74,22 +80,46 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install musl tools (Linux)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
 
+      - name: Configure build environment
+        shell: bash
+        run: |
+          echo "TARGET_FLAGS=--target ${{ matrix.target }}" >> $GITHUB_ENV
+          echo "TARGET_DIR=./target/${{ matrix.target }}" >> $GITHUB_ENV
+
       - name: Build binary
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Strip binary
-        run: strip target/${{ matrix.target }}/release/bcmr
+      - name: Strip binary (Unix)
+        if: matrix.strip && runner.os != 'Windows'
+        run: |
+          case ${{ matrix.target }} in
+            aarch64-apple-darwin)
+              strip target/${{ matrix.target }}/release/bcmr
+              ;;
+            x86_64-apple-darwin)
+              strip target/${{ matrix.target }}/release/bcmr
+              ;;
+            x86_64-unknown-linux-musl)
+              strip target/${{ matrix.target }}/release/bcmr
+              ;;
+          esac
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: target/${{ matrix.target }}/release/bcmr
+          path: dist/*
 
   release:
     name: Create Release
@@ -115,7 +145,11 @@ jobs:
           cd dist
           for dir in */; do
             cd "$dir"
-            tar czf "../${dir%/}.tar.gz" bcmr
+            if [ -f bcmr.exe ]; then
+              zip -r "../${dir%/}.zip" bcmr.exe
+            else
+              tar czf "../${dir%/}.tar.gz" bcmr
+            fi
             cd ..
           done
 
@@ -141,14 +175,16 @@ jobs:
           echo "" >> CHANGELOG.md
           echo "## 📦 Download" >> CHANGELOG.md
           echo "Choose the appropriate binary for your platform:" >> CHANGELOG.md
-          echo "- **Linux x86_64**: bcmr-x86_64-linux.tar.gz" >> CHANGELOG.md
+          echo "- **Linux x86_64**: bcmr-x86_64-linux.tar.gz (statically linked, compatible with most Linux distributions)" >> CHANGELOG.md
           echo "- **macOS Intel**: bcmr-x86_64-macos.tar.gz" >> CHANGELOG.md
           echo "- **macOS Apple Silicon**: bcmr-aarch64-macos.tar.gz" >> CHANGELOG.md
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: dist/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
           body_path: CHANGELOG.md
           draft: false
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
