@@ -6,13 +6,6 @@ use crossterm::{
     cursor::{Hide, Show, MoveTo, position},
     event::{self, Event, KeyCode},
 };
-use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
-    widgets::{Block, Borders, Gauge, Paragraph},
-    Terminal, backend::CrosstermBackend,
-    text::{Line, Span},
-};
 
 /// Converts a byte count into a human-readable format
 fn format_bytes(bytes: f64) -> String {
@@ -88,26 +81,68 @@ impl ProgressData {
     }
 }
 
-// ratatui
+// Fancy progress using crossterm for better positioning
 struct FancyProgress {
-    terminal: Terminal<CrosstermBackend<io::Stdout>>,
     data: ProgressData,
+    start_row: u16,
+    start_col: u16,
+    raw_mode_enabled: bool,
+    initialized: bool,
+    finished: bool,
 }
 
 impl FancyProgress {
     fn new(total_bytes: u64) -> io::Result<Self> {
-        let mut stdout = stdout();
-        execute!(stdout, Hide)?;
-        enable_raw_mode()?;
-        
-        let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
         let data = ProgressData::new(total_bytes);
+        Ok(Self {
+            data,
+            start_row: 0,
+            start_col: 0,
+            raw_mode_enabled: false,
+            initialized: false,
+            finished: false,
+        })
+    }
+
+    fn initialize(&mut self) -> io::Result<()> {
+        if self.initialized {
+            return Ok(());
+        }
+
+        // Try to get cursor position, fallback to (0,0) if not available
+        match position() {
+            Ok((col, row)) => {
+                self.start_col = col;
+                self.start_row = row;
+            }
+            Err(_) => {
+                // Fallback for non-interactive environments
+                self.start_col = 0;
+                self.start_row = 0;
+            }
+        }
+
+        // Try to enable raw mode, but don't fail if it's not available
+        let _ = enable_raw_mode();
+        let _ = execute!(stdout(), Hide);
         
-        Ok(Self { terminal, data })
+        self.raw_mode_enabled = true;
+        self.initialized = true;
+
+        Ok(())
     }
 
     fn redraw(&mut self) -> io::Result<()> {
-        // Check Ctrl+C
+        if !self.initialized {
+            self.initialize()?;
+        }
+
+        // Ensure we have some minimum data to display
+        if self.data.current_file.is_empty() {
+            self.data.current_file = "File".to_string();
+        }
+
+        // Check for Ctrl+C
         if event::poll(Duration::from_millis(0))? {
             if let Event::Key(key) = event::read()? {
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL) {
@@ -127,104 +162,151 @@ impl FancyProgress {
             format!("{} Progress", self.data.operation_type)
         };
 
-        let calculate_inner_rect = |rect: Rect| -> Rect {
-            Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(1)])
-                .margin(1)
-                .split(rect)[0]
-        };
+        let mut stdout = stdout();
         
-        self.terminal.draw(|f| {
-            let display_area = Rect {
-                x: 0,
-                y: 0,
-                width: f.area().width,
-                height: if self.data.items_total.is_some() { 8 } else { 7 },
-            };
+        // Use full terminal width for the progress display
+        use terminal_size::{Width, Height, terminal_size};
+        let (term_width, _) = terminal_size().unwrap_or((Width(80), Height(24)));
+        let box_width = term_width.0 as usize;
+        
+        // Calculate progress bar width based on available space
+        let progress_bar_width = (box_width.saturating_sub(20)).max(20); // Reserve space for text
+        let bar_width = progress_bar_width;
 
-            let mut constraints = vec![
-                Constraint::Length(3),  // Total progress
-                Constraint::Length(1),  // Total progress details
-                Constraint::Length(3),  // Current file
-            ];
+        // Draw fancy box with Unicode characters
+        let current_row = self.start_row;
+        
+        // Top border of main progress
+        execute!(stdout, MoveTo(0, current_row))?;
+        write!(stdout, "┌{}┐", "─".repeat(box_width.saturating_sub(2)))?;
+        execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
-            if self.data.items_total.is_some() {
-                constraints.push(Constraint::Length(1));  // Items progress
-            }
+        // Operation title
+        execute!(stdout, MoveTo(0, current_row + 1))?;
+        // Draw left border and title
+        write!(stdout, "│ {}", operation)?;
+        // Draw right border at terminal edge
+        execute!(stdout, MoveTo(term_width.0 - 1, current_row + 1))?;
+        write!(stdout, "│")?;
+        execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
-            let main_layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints(constraints)
-                .split(display_area);
+        // Progress bar
+        execute!(stdout, MoveTo(0, current_row + 2))?;
+        let filled_width = (bar_width * total_progress as usize / 100).min(bar_width);
+        let empty_width = bar_width - filled_width;
+        let progress_content = format!(
+            " [{}{}] {}% ",
+            "█".repeat(filled_width),
+            "░".repeat(empty_width),
+            total_progress
+        );
+        // Draw left border and content
+        write!(stdout, "│{}", progress_content)?;
+        // Draw right border at terminal edge
+        execute!(stdout, MoveTo(term_width.0 - 1, current_row + 2))?;
+        write!(stdout, "│")?;
+        execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
-            // Render total progress
-            let total_block = Block::default()
-                .title(operation.clone())
-                .borders(Borders::ALL);
-            f.render_widget(total_block, main_layout[0]);
+        // Progress details
+        execute!(stdout, MoveTo(0, current_row + 3))?;
+        let details_content = format!(
+            " {} / {} | Speed: {}/s",
+            format_bytes(self.data.current_bytes as f64),
+            format_bytes(self.data.total_bytes as f64),
+            format_bytes(speed * 1024.0 * 1024.0)
+        );
+        // Draw left border and details
+        write!(stdout, "│{}", details_content)?;
+        // Draw right border at terminal edge
+        execute!(stdout, MoveTo(term_width.0 - 1, current_row + 3))?;
+        write!(stdout, "│")?;
+        execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
-            let gauge = Gauge::default()
-                .block(Block::default())
-                .gauge_style(Style::default().fg(Color::Cyan))
-                .percent(total_progress)
-                .label(format!("{}%", total_progress));
-            f.render_widget(gauge, calculate_inner_rect(main_layout[0]));
+        // Bottom border of main progress / top of file progress
+        execute!(stdout, MoveTo(0, current_row + 4))?;
+        write!(stdout, "├{}┤", "─".repeat(box_width.saturating_sub(2)))?;
+        execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
-            // Render progress details
-            let details = format!(
-                "{} / {}    Speed: {}/s",
-                format_bytes(self.data.current_bytes as f64),
-                format_bytes(self.data.total_bytes as f64),
-                format_bytes(speed * 1024.0 * 1024.0)
-            );
-            let total_detail = Paragraph::new(Line::from(vec![
-                Span::raw(details)
-            ]));
-            f.render_widget(total_detail, main_layout[1]);
+        // Current file info
+        execute!(stdout, MoveTo(0, current_row + 5))?;
+        let file_info = format!("Current: {} ({})", 
+            self.data.current_file, 
+            format_bytes(self.data.current_file_size as f64)
+        );
+        let truncated_info = if file_info.len() > box_width.saturating_sub(4) {
+            format!("{}...", &file_info[..box_width.saturating_sub(7)])
+        } else {
+            file_info
+        };
+        // Draw left border and file info
+        write!(stdout, "│ {}", truncated_info)?;
+        // Draw right border at terminal edge
+        execute!(stdout, MoveTo(term_width.0 - 1, current_row + 5))?;
+        write!(stdout, "│")?;
+        execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
-            // Render current file status
-            let current_file_info = format!(
-                "Current File: {} ({})",
-                self.data.current_file,
-                format_bytes(self.data.current_file_size as f64)
-            );
-            let current_block = Block::default()
-                .title(current_file_info)
-                .borders(Borders::ALL);
-            f.render_widget(current_block, main_layout[2]);
+        // Current file progress bar - always show this
+        execute!(stdout, MoveTo(0, current_row + 6))?;
+        let file_filled_width = (bar_width * current_progress as usize / 100).min(bar_width);
+        let file_empty_width = bar_width.saturating_sub(file_filled_width);
+        let file_progress_content = format!(
+            " [{}{}] {}% ",
+            "█".repeat(file_filled_width),
+            "░".repeat(file_empty_width),
+            current_progress
+        );
+        // Draw left border and file progress
+        write!(stdout, "│{}", file_progress_content)?;
+        // Draw right border at terminal edge
+        execute!(stdout, MoveTo(term_width.0 - 1, current_row + 6))?;
+        write!(stdout, "│")?;
+        execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
-            let current_gauge = Gauge::default()
-                .block(Block::default())
-                .gauge_style(Style::default().fg(Color::Cyan))
-                .percent(current_progress)
-                .label(format!("{}%", current_progress));
-            f.render_widget(current_gauge, calculate_inner_rect(main_layout[2]));
+        let mut last_row = current_row + 7;
 
-            // Render items progress if available
-            if let Some(total_items) = self.data.items_total {
-                let items_progress = format!(
-                    "Items processed: {} / {}",
-                    self.data.items_processed,
-                    total_items
-                );
-                let items_detail = Paragraph::new(Line::from(vec![
-                    Span::raw(items_progress)
-                ]));
-                f.render_widget(items_detail, main_layout[3]);
-            }
-        })?;
+        // Items progress if available  
+        if let Some(total_items) = self.data.items_total {
+            execute!(stdout, MoveTo(0, last_row))?;
+            write!(stdout, "├{}┤", "─".repeat(box_width.saturating_sub(2)))?;
+            execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
+            execute!(stdout, MoveTo(0, last_row + 1))?;
+            let items_info = format!("Items: {} / {}", self.data.items_processed, total_items);
+            // Draw left border and items info
+            write!(stdout, "│ {}", items_info)?;
+            // Draw right border at terminal edge
+            execute!(stdout, MoveTo(term_width.0 - 1, last_row + 1))?;
+            write!(stdout, "│")?;
+            execute!(stdout, Clear(ClearType::UntilNewLine))?;
+            last_row += 2;
+        }
+
+        // Bottom border
+        execute!(stdout, MoveTo(0, last_row))?;
+        write!(stdout, "└{}┘", "─".repeat(box_width.saturating_sub(2)))?;
+        execute!(stdout, Clear(ClearType::UntilNewLine))?;
+
+        stdout.flush()?;
         Ok(())
     }
 
     fn finish(&mut self) -> io::Result<()> {
-        execute!(
-            self.terminal.backend_mut(),
-            Show,
-            MoveTo(0, if self.data.items_total.is_some() { 8 } else { 7 })
-        )?;
-        disable_raw_mode()?;
+        if self.finished {
+            return Ok(());
+        }
+        
+        // Make sure to show final progress state
+        let _ = self.redraw();
+        
+        if self.raw_mode_enabled {
+            let lines_used = if self.data.items_total.is_some() { 10 } else { 8 };
+            execute!(stdout(), Show, MoveTo(0, self.start_row + lines_used))?;
+            disable_raw_mode()?;
+            self.raw_mode_enabled = false;
+            println!();
+        }
+        
+        self.finished = true;
         Ok(())
     }
 }
@@ -388,13 +470,18 @@ impl ProgressRenderer for FancyProgress {
         self.data.current_file = file_name.to_string();
         self.data.current_file_size = file_size;
         self.data.current_file_progress = 0;
+        // Always redraw to show the initial progress display
         let _ = self.redraw();
     }
 
     fn inc_current(&mut self, delta: u64) {
         self.data.current_bytes += delta;
         self.data.current_file_progress += delta;
-        let _ = self.redraw();
+        // Only redraw every 1MB to reduce flicker and improve visibility
+        if self.data.current_bytes % (1024 * 1024) == 0 || 
+           self.data.current_bytes >= self.data.total_bytes {
+            let _ = self.redraw();
+        }
     }
 
     fn set_operation_type(&mut self, operation: &str) {
