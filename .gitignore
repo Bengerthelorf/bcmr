@@ -1,3 +1,7 @@
 /target
 
 .DS_Store
+
+# Test files and logs
+tests/
+*.log
