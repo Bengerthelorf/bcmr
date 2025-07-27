@@ -168,6 +168,8 @@ impl FancyProgress {
         use terminal_size::{Width, Height, terminal_size};
         let (term_width, _) = terminal_size().unwrap_or((Width(80), Height(24)));
         let box_width = term_width.0 as usize;
+        // Some terminals don't handle the rightmost column well, so use width-2
+        let right_border_col = (term_width.0).saturating_sub(2);
         
         // Calculate progress bar width based on available space
         let progress_bar_width = (box_width.saturating_sub(20)).max(20); // Reserve space for text
@@ -178,15 +180,15 @@ impl FancyProgress {
         
         // Top border of main progress
         execute!(stdout, MoveTo(0, current_row))?;
-        write!(stdout, "┌{}┐", "─".repeat(box_width.saturating_sub(2)))?;
+        write!(stdout, "┌{}┐", "─".repeat(right_border_col as usize - 1))?;
         execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
         // Operation title
         execute!(stdout, MoveTo(0, current_row + 1))?;
         // Draw left border and title
         write!(stdout, "│ {}", operation)?;
-        // Draw right border at terminal edge
-        execute!(stdout, MoveTo(term_width.0 - 1, current_row + 1))?;
+        // Draw right border at safe position
+        execute!(stdout, MoveTo(right_border_col, current_row + 1))?;
         write!(stdout, "│")?;
         execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
@@ -203,7 +205,7 @@ impl FancyProgress {
         // Draw left border and content
         write!(stdout, "│{}", progress_content)?;
         // Draw right border at terminal edge
-        execute!(stdout, MoveTo(term_width.0 - 1, current_row + 2))?;
+        execute!(stdout, MoveTo(right_border_col, current_row + 2))?;
         write!(stdout, "│")?;
         execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
@@ -218,13 +220,13 @@ impl FancyProgress {
         // Draw left border and details
         write!(stdout, "│{}", details_content)?;
         // Draw right border at terminal edge
-        execute!(stdout, MoveTo(term_width.0 - 1, current_row + 3))?;
+        execute!(stdout, MoveTo(right_border_col, current_row + 3))?;
         write!(stdout, "│")?;
         execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
         // Bottom border of main progress / top of file progress
         execute!(stdout, MoveTo(0, current_row + 4))?;
-        write!(stdout, "├{}┤", "─".repeat(box_width.saturating_sub(2)))?;
+        write!(stdout, "├{}┤", "─".repeat(right_border_col as usize - 1))?;
         execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
         // Current file info
@@ -241,7 +243,7 @@ impl FancyProgress {
         // Draw left border and file info
         write!(stdout, "│ {}", truncated_info)?;
         // Draw right border at terminal edge
-        execute!(stdout, MoveTo(term_width.0 - 1, current_row + 5))?;
+        execute!(stdout, MoveTo(right_border_col, current_row + 5))?;
         write!(stdout, "│")?;
         execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
@@ -258,7 +260,7 @@ impl FancyProgress {
         // Draw left border and file progress
         write!(stdout, "│{}", file_progress_content)?;
         // Draw right border at terminal edge
-        execute!(stdout, MoveTo(term_width.0 - 1, current_row + 6))?;
+        execute!(stdout, MoveTo(right_border_col, current_row + 6))?;
         write!(stdout, "│")?;
         execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
@@ -267,7 +269,7 @@ impl FancyProgress {
         // Items progress if available  
         if let Some(total_items) = self.data.items_total {
             execute!(stdout, MoveTo(0, last_row))?;
-            write!(stdout, "├{}┤", "─".repeat(box_width.saturating_sub(2)))?;
+            write!(stdout, "├{}┤", "─".repeat(right_border_col as usize - 1))?;
             execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
             execute!(stdout, MoveTo(0, last_row + 1))?;
@@ -275,7 +277,7 @@ impl FancyProgress {
             // Draw left border and items info
             write!(stdout, "│ {}", items_info)?;
             // Draw right border at terminal edge
-            execute!(stdout, MoveTo(term_width.0 - 1, last_row + 1))?;
+            execute!(stdout, MoveTo(right_border_col, last_row + 1))?;
             write!(stdout, "│")?;
             execute!(stdout, Clear(ClearType::UntilNewLine))?;
             last_row += 2;
@@ -283,7 +285,7 @@ impl FancyProgress {
 
         // Bottom border
         execute!(stdout, MoveTo(0, last_row))?;
-        write!(stdout, "└{}┘", "─".repeat(box_width.saturating_sub(2)))?;
+        write!(stdout, "└{}┘", "─".repeat(right_border_col as usize - 1))?;
         execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
         stdout.flush()?;
