@@ -27,6 +27,18 @@ fn format_bytes(bytes: f64) -> String {
     }
 }
 
+/// Formats a duration in seconds into a human-readable HH:MM:SS or MM:SS string
+fn format_eta(seconds: u64) -> String {
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let secs = seconds % 60;
+    if hours > 0 {
+        format!("{:02}:{:02}:{:02}", hours, minutes, secs)
+    } else {
+        format!("{:02}:{:02}", minutes, secs)
+    }
+}
+
 struct ProgressData {
     total_bytes: u64,
     current_bytes: u64,
@@ -78,6 +90,23 @@ impl ProgressData {
         self.last_bytes = self.current_bytes;
         
         self.last_speed
+    }
+
+    fn estimate_eta(&self) -> Option<Duration> {
+        if self.total_bytes == 0 || self.current_bytes >= self.total_bytes {
+            return Some(Duration::from_secs(0));
+        }
+        // last_speed is in MiB/s
+        if self.last_speed <= 0.0 {
+            return None;
+        }
+        let remaining_bytes = self.total_bytes.saturating_sub(self.current_bytes) as f64;
+        let bytes_per_sec = self.last_speed * 1024.0 * 1024.0; // convert MiB/s -> B/s
+        if bytes_per_sec <= 0.0 {
+            return None;
+        }
+        let secs = (remaining_bytes / bytes_per_sec).ceil() as u64;
+        Some(Duration::from_secs(secs))
     }
 }
 
@@ -155,6 +184,7 @@ impl FancyProgress {
         let total_progress = (self.data.current_bytes as f64 / self.data.total_bytes.max(1) as f64 * 100.0) as u16;
         let current_progress = (self.data.current_file_progress as f64 / self.data.current_file_size.max(1) as f64 * 100.0) as u16;
         let speed = self.data.calculate_speed();
+        let eta_opt = self.data.estimate_eta();
 
         let operation = if self.data.operation_type.is_empty() {
             "Progress".to_string()
@@ -211,11 +241,23 @@ impl FancyProgress {
 
         // Progress details
         execute!(stdout, MoveTo(0, current_row + 3))?;
+        let eta_str = match eta_opt {
+            Some(d) => {
+                if d.as_secs() == 0 && self.data.current_bytes < self.data.total_bytes {
+                    "--".to_string()
+                } else {
+                    format_eta(d.as_secs())
+                }
+            }
+            None => "--".to_string(),
+        };
+
         let details_content = format!(
-            " {} / {} | Speed: {}/s",
+            " {} / {} | Speed: {}/s | ETA: {}",
             format_bytes(self.data.current_bytes as f64),
             format_bytes(self.data.total_bytes as f64),
-            format_bytes(speed * 1024.0 * 1024.0)
+            format_bytes(speed * 1024.0 * 1024.0),
+            eta_str
         );
         // Draw left border and details
         write!(stdout, "│{}", details_content)?;
@@ -385,6 +427,7 @@ impl PlainProgress {
         let total_progress = (self.data.current_bytes as f64 / self.data.total_bytes.max(1) as f64 * 100.0) as u16;
         let current_progress = (self.data.current_file_progress as f64 / self.data.current_file_size.max(1) as f64 * 100.0) as u16;
         let speed = self.data.calculate_speed();
+        let eta_opt = self.data.estimate_eta();
 
         let operation = if self.data.operation_type.is_empty() {
             "Progress".to_string()
@@ -394,14 +437,26 @@ impl PlainProgress {
 
         execute!(stdout, MoveTo(self.start_col, self.start_row))?;
 
+        let eta_str = match eta_opt {
+            Some(d) => {
+                if d.as_secs() == 0 && self.data.current_bytes < self.data.total_bytes {
+                    "--".to_string()
+                } else {
+                    format_eta(d.as_secs())
+                }
+            }
+            None => "--".to_string(),
+        };
+
         let total_line = format!(
-            "{}: [{}] {}% | {} / {} | Speed: {}/s",
+            "{}: [{}] {}% | {} / {} | Speed: {}/s | ETA: {}",
             operation,
             self.create_progress_bar(total_progress, 30),
             total_progress,
             format_bytes(self.data.current_bytes as f64),
             format_bytes(self.data.total_bytes as f64),
-            format_bytes(speed * 1024.0 * 1024.0)
+            format_bytes(speed * 1024.0 * 1024.0),
+            eta_str
         );
         write!(stdout, "{}", total_line)?;
         execute!(stdout, Clear(ClearType::UntilNewLine))?;

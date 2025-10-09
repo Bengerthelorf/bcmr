@@ -25,6 +25,7 @@ The compiled binary will be available at `target/release/bcmr`.
 ## ✨ Features
 
 - 🎯 Real-time Progress Bar - No more guessing how long it'll take
+- ⏳ ETA Display - See estimated time remaining
 - 🔄 Recursive Directory Operations - Handle entire folders with one command
 - 🎨 Attribute Preservation - Keep timestamps, permissions, and more
 - ⚡ Asynchronous I/O - Faster file operations
