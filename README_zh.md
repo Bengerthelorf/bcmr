@@ -34,9 +34,10 @@ cargo build --release
 
 ## ✨ 特性
 
-- 🎯 实时进度条 - 不再盲目等待
-- ⏳ ETA 显示 - 查看预计剩余时间
-- 🔄 递归目录操作 - 一条命令处理整个文件夹
+- 🎯- **进度条**:
+  - **默认**: 现代化的行内 (Inline) 渐变色进度条，含速度和 ETA。
+  - **TUI 模式**: 使用 `--tui` 或 `-t` 开启全屏盒子界面。
+- **高性能**: 优化的缓冲区大小和并行 I/O。🔄 递归目录操作 - 一条命令处理整个文件夹
 - 🎨 属性保留 - 保留时间戳、权限等信息
 - ⚡ 异步 I/O - 更快的文件操作
 - 🛡️ 安全确认机制 - 防止意外覆盖或删除
@@ -88,19 +89,22 @@ eval "$(bcmr init bash --cmd b)"
 
 基本语法：
 
-```bash
-bcmr copy [options] <source>... <destination>
+```baUsage: bcmr copy [OPTIONS] <SOURCES>... <DESTINATION>
+
+Arguments:
+  <SOURCES>...   源文件/目录
+  <DESTINATION>  目标目录
+
+Options:
+  -r, --recursive            递归复制目录
+  -p, --preserve             保留文件属性
+  -f, --force                覆盖已存在的文件
+  -y, --yes                  跳过覆盖确认
+  -e, --exclude <PATTERN>    排除匹配正则的文件/目录
+  -t, --tui                  开启 TUI 模式 (盒子界面)
+  -n, --dry-run              试运行 (不产生更改)
+  -h, --help                 打印帮助信息
 ```
-
-可用选项：
-
-- `-r, --recursive`: 递归复制目录
-- `--preserve`: 保留文件属性 (时间戳, 权限)
-- `-f, --force`: 强制覆盖现有文件
-- `-y, --yes`: 使用强制模式时跳过确认
-- `-n, --dry-run`: 预览操作而不进行实际更改
-- `--exclude=<pattern>`: 排除匹配正则表达式的文件 (逗号分隔)
-- `--fancy-progress`: 使用华丽的 TUI 进度显示 (默认为纯文本)
 
 示例：
 

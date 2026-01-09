@@ -113,7 +113,7 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
 
     // Calculate total size
     let total_size = copy::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
-    let progress = Arc::new(Mutex::new(CopyProgress::new(total_size, !args.is_fancy_progress())?));
+    let progress = Arc::new(Mutex::new(CopyProgress::new(total_size, args.is_tui_mode())?));
 
     // Initialize progress display
     if let Some(first) = sources.first() {
@@ -227,7 +227,7 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
     }
 
     let total_size = r#move::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
-    let progress = Arc::new(Mutex::new(CopyProgress::new(total_size, !args.is_fancy_progress())?));
+    let progress = Arc::new(Mutex::new(CopyProgress::new(total_size, args.is_tui_mode())?));
 
     if let Some(first) = sources.first() {
          let display_name = first
@@ -334,7 +334,7 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         .sum();
 
     // Initialize progress display
-    let progress = Arc::new(Mutex::new(CopyProgress::new(total_size, !args.is_fancy_progress())?));
+    let progress = Arc::new(Mutex::new(CopyProgress::new(total_size, args.is_tui_mode())?));
     
     // Set operation type
     progress.lock().set_operation_type("Removing");

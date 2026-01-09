@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType},
-    cursor::{Hide, Show, MoveTo, position},
+    cursor::{Hide, Show, MoveTo, MoveToColumn, position},
     event::{self, Event, KeyCode},
     style::{Color, SetForegroundColor, Attribute, SetAttribute},
 };
@@ -169,8 +169,8 @@ impl ProgressData {
     }
 }
 
-// Fancy progress using crossterm for better positioning
-struct FancyProgress {
+// TUI progress using crossterm for box interface
+struct TuiProgress {
     data: ProgressData,
     start_row: u16,
     start_col: u16,
@@ -179,7 +179,7 @@ struct FancyProgress {
     finished: bool,
 }
 
-impl FancyProgress {
+impl TuiProgress {
     fn new(total_bytes: u64) -> io::Result<Self> {
         let data = ProgressData::new(total_bytes);
         Ok(Self {
@@ -460,23 +460,17 @@ impl FancyProgress {
     }
 }
 
-// Plain progress using simple text
-struct PlainProgress {
+// Inline progress using simple text with colors and carriage return
+struct InlineProgress {
     data: ProgressData,
-    start_row: u16,
-    start_col: u16,
-    raw_mode_enabled: bool,
     initialized: bool,
 }
 
-impl PlainProgress {
+impl InlineProgress {
     fn new(total_bytes: u64) -> io::Result<Self> {
         let data = ProgressData::new(total_bytes);
         Ok(Self {
             data,
-            start_row: 0,
-            start_col: 0,
-            raw_mode_enabled: false,
             initialized: false,
         })
     }
@@ -485,84 +479,26 @@ impl PlainProgress {
         if self.initialized {
             return Ok(());
         }
-
-        let required_height = if self.data.items_total.is_some() { 4 } else { 3 };
-
-        let (_, term_height) = terminal_size::terminal_size()
-            .map(|(w, h)| (w.0, h.0))
-            .unwrap_or((80, 24));
-
-        let (mut col, mut row) = position().unwrap_or((0, 0));
-
-        // If we are too close to the bottom, scroll up
-        if row + required_height > term_height {
-             let lines_to_scroll = (row + required_height).saturating_sub(term_height);
-            for _ in 0..lines_to_scroll {
-                println!();
-            }
-            let (new_col, new_row) = position().unwrap_or((0, 0));
-            col = new_col;
-            row = new_row;
-            
-             if row + required_height > term_height {
-                row = term_height.saturating_sub(required_height);
-            }
-        }
-
-        self.start_col = col;
-        self.start_row = row;
-
-        enable_raw_mode()?;
-        execute!(stdout(), Hide)?;
-        self.raw_mode_enabled = true;
         self.initialized = true;
-
         Ok(())
     }
 
-    fn create_progress_bar(&self, percent: u16, width: usize) -> String {
-        let filled = (width * percent as usize / 100).min(width);
-        let empty = width - filled;
-        
-        let mut bar = String::with_capacity(width);
-        for _ in 0..filled {
-            bar.push('=');
-        }
-        for _ in 0..empty {
-            bar.push('-');
-        }
-        bar
-    }
+
 
     fn redraw(&mut self) -> io::Result<()> {
         if !self.initialized {
             self.initialize()?;
         }
 
-        // Check for Ctrl+C
-        if event::poll(Duration::from_millis(0))? {
-            if let Event::Key(key) = event::read()? {
-                if key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL) {
-                    self.finish()?;
-                    std::process::exit(130);
-                }
-            }
-        }
-
-        let mut stdout = stdout();
-        
         let total_progress = (self.data.current_bytes as f64 / self.data.total_bytes.max(1) as f64 * 100.0) as u16;
-        let current_progress = (self.data.current_file_progress as f64 / self.data.current_file_size.max(1) as f64 * 100.0) as u16;
         let speed = self.data.calculate_speed();
         let eta_opt = self.data.estimate_eta();
 
         let operation = if self.data.operation_type.is_empty() {
             "Progress".to_string()
         } else {
-            format!("{} Progress", self.data.operation_type)
+            self.data.operation_type.clone()
         };
-
-        execute!(stdout, MoveTo(self.start_col, self.start_row))?;
 
         let eta_str = match eta_opt {
             Some(d) => {
@@ -575,59 +511,77 @@ impl PlainProgress {
             None => "--".to_string(),
         };
 
-        let total_line = format!(
-            "{}: [{}] {}%",
-            operation,
-            self.create_progress_bar(total_progress, 40),
-            total_progress,
-        );
-        write!(stdout, "{}", total_line)?;
-        execute!(stdout, Clear(ClearType::UntilNewLine))?;
+        let (term_width, _) = terminal_size::terminal_size()
+            .map(|(w, h)| (w.0, h.0))
+            .unwrap_or((80, 24));
+        let term_width = term_width as usize;
 
-        execute!(stdout, MoveTo(self.start_col, self.start_row + 1))?;
-        let stats_line = format!(
-            "{} / {} | Speed: {}/s | ETA: {}",
-            format_bytes(self.data.current_bytes as f64),
-            format_bytes(self.data.total_bytes as f64),
-            format_bytes(speed * 1024.0 * 1024.0),
-            eta_str
-        );
-        write!(stdout, "{}", stats_line)?;
-        execute!(stdout, Clear(ClearType::UntilNewLine))?;
+        // Inline format: Op: [====...] 50% | 1.2MB/s | ETA: 00:05 | File...
+        
+        // Let's use crossterm to print this line with colors
+        // We use \r to overwrite line.
+        let mut stdout = stdout();
+        execute!(stdout, MoveToColumn(0))?;
 
-        execute!(stdout, MoveTo(self.start_col, self.start_row + 2))?;
-        let file_line = format!(
-            "File: {} [{}] {}%",
-            self.data.current_file,
-            self.create_progress_bar(current_progress, 30),
-            current_progress
-        );
-        write!(stdout, "{}", file_line)?;
-        execute!(stdout, Clear(ClearType::UntilNewLine))?;
+        // Print Operation
+        execute!(stdout, SetForegroundColor(Color::Cyan), SetAttribute(Attribute::Bold))?;
+        write!(stdout, "{}: ", operation)?;
 
-        if let Some(total_items) = self.data.items_total {
-            execute!(stdout, MoveTo(self.start_col, self.start_row + 3))?;
-            let items_line = format!(
-                "Items: {} / {}",
-                self.data.items_processed,
-                total_items
-            );
-            write!(stdout, "{}", items_line)?;
-            execute!(stdout, Clear(ClearType::UntilNewLine))?;
+        // Bar
+        let bar_width = 20;
+        execute!(stdout, SetAttribute(Attribute::Reset), SetForegroundColor(Color::White))?;
+        write!(stdout, "[")?;
+        
+        let filled = (bar_width * total_progress as usize / 100).min(bar_width);
+        let empty = bar_width - filled;
+        
+        // Gradient for filled part
+        let theme = &CONFIG.progress.theme;
+        for i in 0..filled {
+             let progress_fraction = i as f32 / bar_width as f32;
+             let color = get_gradient_color(&theme.bar_gradient, progress_fraction);
+             execute!(stdout, SetForegroundColor(color))?;
+             write!(stdout, "{}", theme.bar_complete_char)?;
+        }
+        execute!(stdout, SetForegroundColor(Color::DarkGrey))?;
+        write!(stdout, "{}", theme.bar_incomplete_char.repeat(empty))?;
+        
+        execute!(stdout, SetForegroundColor(Color::White))?;
+        write!(stdout, "] {}% ", total_progress)?;
+
+        // Stats
+        execute!(stdout, SetForegroundColor(Color::Yellow))?;
+        write!(stdout, "| ")?;
+        execute!(stdout, SetForegroundColor(Color::Green))?;
+        write!(stdout, "{}/s", format_bytes(speed * 1024.0 * 1024.0))?;
+        execute!(stdout, SetForegroundColor(Color::Yellow))?;
+        write!(stdout, " | ETA: ")?;
+        execute!(stdout, SetForegroundColor(Color::Cyan))?;
+        write!(stdout, "{} ", eta_str)?;
+
+        // Filename (truncated)
+        let used_len = operation.len() + 2 + 1 + bar_width + 1 + 5 + 3 + 10 + 9 + eta_str.len() + 1; // Approx
+        // Recalculate precisely if needed, but safe overhead is fine.
+        let remaining = term_width.saturating_sub(used_len).saturating_sub(5); // -5 buffer
+        if remaining > 0 {
+             let file_info = &self.data.current_file;
+             if !file_info.is_empty() {
+                 execute!(stdout, SetForegroundColor(Color::DarkGrey))?;
+                 if file_info.len() > remaining {
+                     write!(stdout, "| {}...", &file_info[..remaining.saturating_sub(3)])?;
+                 } else {
+                     write!(stdout, "| {}", file_info)?;
+                 }
+             }
         }
 
+        execute!(stdout, Clear(ClearType::UntilNewLine), SetAttribute(Attribute::Reset))?;
         stdout.flush()?;
         Ok(())
     }
 
     fn finish(&mut self) -> io::Result<()> {
-        if self.raw_mode_enabled {
-            let lines_used = if self.data.items_total.is_some() { 4 } else { 3 };
-            execute!(stdout(), Show, MoveTo(0, self.start_row + lines_used))?;
-            disable_raw_mode()?;
-            self.raw_mode_enabled = false;
-            println!();
-        }
+        println!(); // Move to next line on finish
         Ok(())
     }
 }
@@ -647,7 +601,7 @@ trait ProgressRenderer: Send {
     fn finish(&mut self) -> io::Result<()>;
 }
 
-impl ProgressRenderer for FancyProgress {
+impl ProgressRenderer for TuiProgress {
     fn set_total_items(&mut self, total: usize) {
         self.data.items_total = Some(total);
         let _ = self.redraw();
@@ -690,7 +644,7 @@ impl ProgressRenderer for FancyProgress {
     }
 }
 
-impl ProgressRenderer for PlainProgress {
+impl ProgressRenderer for InlineProgress {
     fn set_total_items(&mut self, total: usize) {
         self.data.items_total = Some(total);
         let _ = self.redraw();
@@ -720,13 +674,7 @@ impl ProgressRenderer for PlainProgress {
     }
 
     fn tick(&mut self) {
-        // For plain progress, we might not want to redraw constantly on tick 
-        // to avoid flooding stdout, but we DO need to check for Ctrl+C logic if it lies in redraw.
-        // Inspecting PlainProgress::redraw, it DOES check for Ctrl+C.
-        // However, printing a new line every 100ms in plain mode is bad.
-        // Plain mode redraw handles cursor movement?
-        // Plain mode uses `MoveTo`, so it assumes a capable terminal.
-        // So yes, we can call redraw.
+        // Redraw on tick to update ETA/Speed
         let _ = self.redraw();
     }
 
@@ -736,11 +684,11 @@ impl ProgressRenderer for PlainProgress {
 }
 
 impl CopyProgress {
-    pub fn new(total_bytes: u64, plain_mode: bool) -> io::Result<Self> {
-        let inner: Box<dyn ProgressRenderer> = if plain_mode {
-            Box::new(PlainProgress::new(total_bytes)?)
+    pub fn new(total_bytes: u64, tui_mode: bool) -> io::Result<Self> {
+        let inner: Box<dyn ProgressRenderer> = if tui_mode {
+            Box::new(TuiProgress::new(total_bytes)?)
         } else {
-            Box::new(FancyProgress::new(total_bytes)?)
+            Box::new(InlineProgress::new(total_bytes)?)
         };
         
         Ok(Self { inner })

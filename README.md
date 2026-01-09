@@ -98,7 +98,10 @@ Available options:
 - `-y, --yes`: Skip confirmation when using force
 - `-n, --dry-run`: Preview operation without making changes
 - `--exclude=<pattern>`: Exclude files matching Regex pattern (comma-separated)
-- `--fancy-progress`: Use fancy TUI progress display (default is plain text)
+- **Progress Bar**:
+  - **Default**: Modern inline progress bar with gradients and ETA.
+  - **TUI Mode**: Full box interface with `--tui` or `-t`.
+- **Performance**: Optimized buffer sizes and parallel I/O for maximum throughput.
 
 Examples:
 

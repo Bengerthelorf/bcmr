@@ -61,33 +61,33 @@ pub enum Commands {
         #[arg(short, long)]
         recursive: bool,
 
-        /// Preserve file attributes (mode, ownership, timestamps)
-        #[arg(long)]
+        /// Preserve file attributes
+        #[arg(short, long)]
         preserve: bool,
 
-        /// Force overwrite destination if exists
-        #[arg(short = 'f', long)]
+        /// Overwrite existing files
+        #[arg(short, long)]
         force: bool,
 
         /// Skip confirmation prompt when using force
         #[arg(short = 'y', long = "yes")]
         yes: bool,
 
-        /// Exclude files/directories that match these regex patterns
-        #[arg(long, value_name = "PATTERN", value_delimiter = ',')]
+        /// Exclude paths matching regex pattern
+        #[arg(short = 'e', long)]
         exclude: Option<Vec<String>>,
 
-        /// Use fancy progress display (default is plain text)
-        #[arg(long)]
-        fancy_progress: bool,
+        /// Enable TUI mode (box interface)
+        #[arg(short, long)]
+        tui: bool,
 
-        /// Perform a trial run with no changes made
+        /// Run in dry-run mode (no changes)
         #[arg(short = 'n', long)]
         dry_run: bool,
-
-        /// Hidden test mode with artificial delay
-        #[arg(long, hide = true)]
-        test_mode: Option<String>,
+        
+        /// Hidden test mode for simulation
+        #[arg(long, hide = true, value_parser = parse_test_mode)]
+        test_mode: Option<TestMode>,
     },
     
     /// Move files or directories
@@ -101,33 +101,33 @@ pub enum Commands {
         #[arg(short, long)]
         recursive: bool,
 
-        /// Preserve file attributes (mode, ownership, timestamps)
-        #[arg(long)]
+        /// Preserve file attributes
+        #[arg(short, long)]
         preserve: bool,
 
-        /// Force overwrite destination if exists
-        #[arg(short = 'f', long)]
+        /// Overwrite existing files
+        #[arg(short, long)]
         force: bool,
 
         /// Skip confirmation prompt when using force
         #[arg(short = 'y', long = "yes")]
         yes: bool,
 
-        /// Exclude files/directories that match these regex patterns
-        #[arg(long, value_name = "PATTERN", value_delimiter = ',')]
+        /// Exclude paths matching regex pattern
+        #[arg(short = 'e', long)]
         exclude: Option<Vec<String>>,
 
-        /// Use fancy progress display (default is plain text)
-        #[arg(long)]
-        fancy_progress: bool,
+        /// Enable TUI mode (box interface)
+        #[arg(short, long)]
+        tui: bool,
 
-        /// Perform a trial run with no changes made
+        /// Run in dry-run mode (no changes)
         #[arg(short = 'n', long)]
         dry_run: bool,
 
-        /// Hidden test mode with artificial delay
-        #[arg(long, hide = true)]
-        test_mode: Option<String>,
+        /// Hidden test mode for simulation
+        #[arg(long, hide = true, value_parser = parse_test_mode)]
+        test_mode: Option<TestMode>,
     },
 
     /// Remove files or directories
@@ -160,17 +160,17 @@ pub enum Commands {
         #[arg(long, value_name = "PATTERN", value_delimiter = ',')]
         exclude: Option<Vec<String>>,
 
-        /// Use fancy progress display (default is plain text)
-        #[arg(long)]
-        fancy_progress: bool,
+        /// Enable TUI mode (box interface)
+        #[arg(short, long)]
+        tui: bool,
 
-        /// Perform a trial run with no changes made
+        /// Run in dry-run mode (no changes)
         #[arg(short = 'n', long)]
         dry_run: bool,
 
-        /// Hidden test mode with artificial delay
-        #[arg(long, hide = true)]
-        test_mode: Option<String>,
+        /// Hidden test mode for simulation
+        #[arg(long, hide = true, value_parser = parse_test_mode)]
+        test_mode: Option<TestMode>,
     },
 }
 
@@ -187,20 +187,7 @@ impl Commands {
             Commands::Copy { test_mode, .. } | 
             Commands::Move { test_mode, .. } |
             Commands::Remove { test_mode, .. } => {
-                if let Some(test_mode) = test_mode {
-                    let parts: Vec<&str> = test_mode.split(':').collect();
-                    if parts.len() == 2 {
-                        match (parts[0], parts[1].parse::<u64>()) {
-                            ("delay", Ok(ms)) => TestMode::Delay(ms),
-                            ("speed_limit", Ok(bps)) => TestMode::SpeedLimit(bps),
-                            _ => TestMode::None,
-                        }
-                    } else {
-                        TestMode::None
-                    }
-                } else {
-                    TestMode::None
-                }
+                test_mode.clone().unwrap_or(TestMode::None)
             }
             _ => TestMode::None,
         }
@@ -235,11 +222,11 @@ impl Commands {
         }
     }
 
-    pub fn is_fancy_progress(&self) -> bool {
+    pub fn is_tui_mode(&self) -> bool {
         match self {
-            Commands::Copy { fancy_progress, .. } | 
-            Commands::Move { fancy_progress, .. } |
-            Commands::Remove { fancy_progress, .. } => *fancy_progress,
+            Commands::Copy { tui, .. } | 
+            Commands::Move { tui, .. } |
+            Commands::Remove { tui, .. } => *tui,
             _ => false,
         }
     }
@@ -331,4 +318,17 @@ impl Commands {
 
 pub fn parse_args() -> Cli {
     Cli::parse()
+}
+
+fn parse_test_mode(s: &str) -> Result<TestMode, String> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() == 2 {
+        match (parts[0], parts[1].parse::<u64>()) {
+            ("delay", Ok(ms)) => Ok(TestMode::Delay(ms)),
+            ("speed_limit", Ok(bps)) => Ok(TestMode::SpeedLimit(bps)),
+            _ => Err(format!("Invalid test mode format: {}", s)),
+        }
+    } else {
+        Ok(TestMode::None)
+    }
 }
