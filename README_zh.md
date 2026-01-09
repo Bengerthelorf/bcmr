@@ -79,18 +79,22 @@ bcmr copy [OPTIONS] <SOURCES>... <DESTINATION>
 ```
 
 Arguments:
+
+```bash
   <SOURCES>...   源文件/目录
   <DESTINATION>  目标目录
+```
 
 Options:
-  -r, --recursive            递归复制目录
-  -p, --preserve             保留文件属性
-  -f, --force                覆盖已存在的文件
-  -y, --yes                  跳过覆盖确认
-  -e, --exclude <PATTERN>    排除匹配正则的文件/目录
-  -t, --tui                  使用纯文本模式
-  -n, --dry-run              试运行 (不产生更改)
-  -h, --help                 打印帮助信息
+
+- `-r, --recursive`: 递归复制目录
+- `-p, --preserve`: 保留文件属性
+- `-f, --force`: 覆盖已存在的文件
+- `-y, --yes`: 跳过覆盖确认
+- `-e, --exclude <PATTERN>`: 排除匹配正则的文件/目录
+- `-t, --tui`: 使用纯文本模式
+- `-n, --dry-run`: 试运行 (不产生更改)
+- `-h, --help`: 打印帮助信息
 
 示例：
 
@@ -184,7 +188,7 @@ bcmr remove *.log
 
 # 递归删除目录
 bcmr remove -r old_project/
-186: 
+
 # Dry run (安全检查)
 bcmr remove -r -n potentially_important_folder/
 
@@ -221,8 +225,6 @@ title_color = "#9E8BCA"
 [progress.layout]
 box_style = "rounded"    # "rounded" (default), "double", "heavy", "single"
 ```
-
-默认模式将使用这些设置以获得更佳的视觉体验。
 
 ## 许可证
 

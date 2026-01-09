@@ -10,10 +10,8 @@ Making file operations simpler and more modern! BCMR is a command-line tool writ
 
 ### Using Install Script
 
-Use `ghfast` proxy for faster download:
-
 ```bash
-curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/Bengerthelorf/bcmr/main/install.sh | bash
+curl -fsSL https://https://raw.githubusercontent.com/Bengerthelorf/bcmr/main/install.sh | bash
 ```
 
 ### Using Cargo
@@ -79,18 +77,22 @@ bcmr copy [OPTIONS] <SOURCES>... <DESTINATION>
 ```
 
 Arguments:
+
+```bash
   <SOURCES>...   Source files/directories
   <DESTINATION>  Target directory
+```
 
 Options:
-  -r, --recursive            Recursively copy directories
-  -p, --preserve             Preserve file attributes
-  -f, --force                Overwrite existing files
-  -y, --yes                  Skip overwrite confirmation
-  -e, --exclude <PATTERN>    Exclude files/directories matching regex
-  -t, --tui                  Use plain text mode
-  -n, --dry-run              Dry run (no changes)
-  -h, --help                 Print help information
+
+- `-r, --recursive`: Recursively copy directories
+- `-p, --preserve`: Preserve file attributes
+- `-f, --force`: Overwrite existing files
+- `-y, --yes`: Skip overwrite confirmation
+- `-e, --exclude <PATTERN>`: Exclude files/directories matching regex
+- `-t, --tui`: Use plain text mode
+- `-n, --dry-run`: Dry run (no changes)
+- `-h, --help`: Print help information
 
 Examples:
 
@@ -221,8 +223,6 @@ title_color = "#9E8BCA"
 [progress.layout]
 box_style = "rounded"    # "rounded" (default), "double", "heavy", "single"
 ```
-
-The default mode will use these settings for a better visual experience.
 
 ## License
 
