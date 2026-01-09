@@ -138,20 +138,43 @@ impl FancyProgress {
             return Ok(());
         }
 
-        // Try to get cursor position, fallback to (0,0) if not available
-        match position() {
-            Ok((col, row)) => {
-                self.start_col = col;
-                self.start_row = row;
+        // Calculate required height based on content
+        let required_height = if self.data.items_total.is_some() { 10 } else { 8 };
+
+        // Ensure we have enough space at the bottom
+        let (_, term_height) = terminal_size::terminal_size()
+            .map(|(w, h)| (w.0, h.0))
+            .unwrap_or((80, 24));
+        
+        let (_col, mut row) = position().unwrap_or((0, 0));
+
+        // If we are too close to the bottom, scroll up
+        if row + required_height > term_height {
+            let lines_to_scroll = (row + required_height).saturating_sub(term_height);
+            for _ in 0..lines_to_scroll {
+                println!();
             }
-            Err(_) => {
-                // Fallback for non-interactive environments
-                self.start_col = 0;
-                self.start_row = 0;
+            // After printing newlines, our row effectively moves up relative to the viewport
+            // But actually the cursor is now at the bottom.
+            // We want to start drawing 'lines_to_scroll' lines above the current position?
+            // No, simpler: Print required_height newlines to force scroll, then move cursor up.
+            
+            // Let's rely on standard scrolling behavior:
+            let (_new_col, new_row) = position().unwrap_or((0, 0));
+            // Recalculate if we are still at the bottom
+            row = new_row;
+            if row + required_height > term_height {
+                // We are at the bottom. The space is effectively "above" us now because we scrolled.
+                // We need to set start_row so that start_row + height <= term_height.
+                // So start_row should be term_height - required_height.
+                row = term_height.saturating_sub(required_height);
             }
         }
+        
+        self.start_col = 0; // Always start at column 0 for clean look
+        self.start_row = row;
 
-        // Try to enable raw mode, but don't fail if it's not available
+        // Try to enable raw mode
         let _ = enable_raw_mode();
         let _ = execute!(stdout(), Hide);
         
@@ -381,7 +404,29 @@ impl PlainProgress {
             return Ok(());
         }
 
-        let (col, row) = position()?;
+        let required_height = if self.data.items_total.is_some() { 3 } else { 2 };
+
+        let (_, term_height) = terminal_size::terminal_size()
+            .map(|(w, h)| (w.0, h.0))
+            .unwrap_or((80, 24));
+
+        let (mut col, mut row) = position().unwrap_or((0, 0));
+
+        // If we are too close to the bottom, scroll up
+        if row + required_height > term_height {
+             let lines_to_scroll = (row + required_height).saturating_sub(term_height);
+            for _ in 0..lines_to_scroll {
+                println!();
+            }
+            let (new_col, new_row) = position().unwrap_or((0, 0));
+            col = new_col;
+            row = new_row;
+            
+             if row + required_height > term_height {
+                row = term_height.saturating_sub(required_height);
+            }
+        }
+
         self.start_col = col;
         self.start_row = row;
 
