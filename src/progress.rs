@@ -404,7 +404,7 @@ impl PlainProgress {
             return Ok(());
         }
 
-        let required_height = if self.data.items_total.is_some() { 3 } else { 2 };
+        let required_height = if self.data.items_total.is_some() { 4 } else { 3 };
 
         let (_, term_height) = terminal_size::terminal_size()
             .map(|(w, h)| (w.0, h.0))
@@ -494,19 +494,26 @@ impl PlainProgress {
         };
 
         let total_line = format!(
-            "{}: [{}] {}% | {} / {} | Speed: {}/s | ETA: {}",
+            "{}: [{}] {}%",
             operation,
-            self.create_progress_bar(total_progress, 30),
+            self.create_progress_bar(total_progress, 40),
             total_progress,
-            format_bytes(self.data.current_bytes as f64),
-            format_bytes(self.data.total_bytes as f64),
-            format_bytes(speed * 1024.0 * 1024.0),
-            eta_str
         );
         write!(stdout, "{}", total_line)?;
         execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
         execute!(stdout, MoveTo(self.start_col, self.start_row + 1))?;
+        let stats_line = format!(
+            "{} / {} | Speed: {}/s | ETA: {}",
+            format_bytes(self.data.current_bytes as f64),
+            format_bytes(self.data.total_bytes as f64),
+            format_bytes(speed * 1024.0 * 1024.0),
+            eta_str
+        );
+        write!(stdout, "{}", stats_line)?;
+        execute!(stdout, Clear(ClearType::UntilNewLine))?;
+
+        execute!(stdout, MoveTo(self.start_col, self.start_row + 2))?;
         let file_line = format!(
             "File: {} [{}] {}%",
             self.data.current_file,
@@ -517,7 +524,7 @@ impl PlainProgress {
         execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
         if let Some(total_items) = self.data.items_total {
-            execute!(stdout, MoveTo(self.start_col, self.start_row + 2))?;
+            execute!(stdout, MoveTo(self.start_col, self.start_row + 3))?;
             let items_line = format!(
                 "Items: {} / {}",
                 self.data.items_processed,
@@ -533,7 +540,7 @@ impl PlainProgress {
 
     fn finish(&mut self) -> io::Result<()> {
         if self.raw_mode_enabled {
-            let lines_used = if self.data.items_total.is_some() { 3 } else { 2 };
+            let lines_used = if self.data.items_total.is_some() { 4 } else { 3 };
             execute!(stdout(), Show, MoveTo(0, self.start_row + lines_used))?;
             disable_raw_mode()?;
             self.raw_mode_enabled = false;
