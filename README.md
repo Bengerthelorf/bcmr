@@ -199,7 +199,30 @@ bcmr remove -r --fancy-progress large_folder/
 BCMR offers two progress display modes:
 
 1. **Plain Text Mode (Default)**: Simple text-based progress bars that work in any terminal
-2. **Fancy TUI Mode**: Rich terminal UI with enhanced visual elements
+2. **Fancy TUI Mode**: Rich terminal UI with enhanced visual elements and gradients
+
+#### Fancy Mode Configuration
+
+You can fully customize the fancy progress bar by creating a configuration file at `~/.config/bcmr/config.toml`:
+
+```toml
+[progress]
+# Set the style to "fancy" to potentially make it default in future versions (currently requires flag)
+style = "fancy"
+
+[progress.theme]
+# Define a gradient for the progress bar (Hex colors) - Default is a Morandi purple gradient
+bar_gradient = ["#CABBE9", "#7E6EAC"] 
+bar_complete_char = "█"
+bar_incomplete_char = "░"
+text_color = "reset"       # "reset" adapts to your terminal background
+border_color = "#9E8BCA"
+title_color = "#9E8BCA"
+
+[progress.layout]
+# Options: rounded, double, heavy, single
+box_style = "rounded"
+```
 
 Use `--fancy-progress` flag to enable the fancy TUI mode for a more visually appealing experience.
 

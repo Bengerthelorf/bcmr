@@ -5,7 +5,10 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType},
     cursor::{Hide, Show, MoveTo, position},
     event::{self, Event, KeyCode},
+    style::{Color, SetForegroundColor, Attribute, SetAttribute},
 };
+use crate::config::CONFIG;
+
 
 /// Converts a byte count into a human-readable format
 fn format_bytes(bytes: f64) -> String {
@@ -37,6 +40,62 @@ fn format_eta(seconds: u64) -> String {
     } else {
         format!("{:02}:{:02}", minutes, secs)
     }
+}
+
+fn parse_hex_color(hex: &str) -> Color {
+    if hex.starts_with('#') && hex.len() == 7 {
+        let r = u8::from_str_radix(&hex[1..3], 16).unwrap_or(255);
+        let g = u8::from_str_radix(&hex[3..5], 16).unwrap_or(255);
+        let b = u8::from_str_radix(&hex[5..7], 16).unwrap_or(255);
+        Color::Rgb { r, g, b }
+    } else {
+        match hex.to_lowercase().as_str() {
+            "black" => Color::Black,
+            "red" => Color::Red,
+            "green" => Color::Green,
+            "yellow" => Color::Yellow,
+            "blue" => Color::Blue,
+            "magenta" => Color::Magenta,
+            "cyan" => Color::Cyan,
+            "white" => Color::White,
+            "reset" => Color::Reset,
+            _ => Color::White,
+        }
+    }
+}
+
+fn interpolate_color(c1: Color, c2: Color, t: f32) -> Color {
+    match (c1, c2) {
+        (Color::Rgb { r: r1, g: g1, b: b1 }, Color::Rgb { r: r2, g: g2, b: b2 }) => {
+            let r = (r1 as f32 + (r2 as f32 - r1 as f32) * t) as u8;
+            let g = (g1 as f32 + (g2 as f32 - g1 as f32) * t) as u8;
+            let b = (b1 as f32 + (b2 as f32 - b1 as f32) * t) as u8;
+            Color::Rgb { r, g, b }
+        },
+        _ => c1, 
+    }
+}
+
+fn get_gradient_color(colors: &[String], progress: f32) -> Color {
+    if colors.is_empty() {
+        return Color::White;
+    }
+    if colors.len() == 1 {
+        return parse_hex_color(&colors[0]);
+    }
+
+    let segments = colors.len() - 1;
+    let segment_len = 1.0 / segments as f32;
+    
+    let segment_idx = (progress / segment_len).floor() as usize;
+    let segment_idx = segment_idx.min(segments - 1);
+    
+    let t = (progress - (segment_idx as f32 * segment_len)) / segment_len;
+    
+    let c1 = parse_hex_color(&colors[segment_idx]);
+    let c2 = parse_hex_color(&colors[segment_idx + 1]);
+    
+    interpolate_color(c1, c2, t)
 }
 
 struct ProgressData {
@@ -204,8 +263,8 @@ impl FancyProgress {
             }
         }
 
-        let total_progress = (self.data.current_bytes as f64 / self.data.total_bytes.max(1) as f64 * 100.0) as u16;
-        let current_progress = (self.data.current_file_progress as f64 / self.data.current_file_size.max(1) as f64 * 100.0) as u16;
+        let total_progress = (self.data.current_bytes as f64 / self.data.total_bytes.max(1) as f64 * 100.0).min(100.0) as u16;
+        let current_progress = (self.data.current_file_progress as f64 / self.data.current_file_size.max(1) as f64 * 100.0).min(100.0) as u16;
         let speed = self.data.calculate_speed();
         let eta_opt = self.data.estimate_eta();
 
@@ -221,136 +280,155 @@ impl FancyProgress {
         use terminal_size::{Width, Height, terminal_size};
         let (term_width, _) = terminal_size().unwrap_or((Width(80), Height(24)));
         let box_width = term_width.0 as usize;
-        // Some terminals don't handle the rightmost column well, so use width-2
         let right_border_col = (term_width.0).saturating_sub(2);
         
-        // Calculate progress bar width based on available space
-        let progress_bar_width = (box_width.saturating_sub(20)).max(20); // Reserve space for text
-        let bar_width = progress_bar_width;
-
-        // Draw fancy box with Unicode characters
-        let current_row = self.start_row;
+        // Load configuration
+        let theme = &CONFIG.progress.theme;
+        let layout = &CONFIG.progress.layout;
         
-        // Top border of main progress
-        execute!(stdout, MoveTo(0, current_row))?;
-        write!(stdout, "┌{}┐", "─".repeat(right_border_col as usize - 1))?;
-        execute!(stdout, Clear(ClearType::UntilNewLine))?;
-
-        // Operation title
-        execute!(stdout, MoveTo(0, current_row + 1))?;
-        // Draw left border and title
-        write!(stdout, "│ {}", operation)?;
-        // Draw right border at safe position
-        execute!(stdout, MoveTo(right_border_col, current_row + 1))?;
-        write!(stdout, "│")?;
-        execute!(stdout, Clear(ClearType::UntilNewLine))?;
-
-        // Progress bar
-        execute!(stdout, MoveTo(0, current_row + 2))?;
-        let filled_width = (bar_width * total_progress as usize / 100).min(bar_width);
-        let empty_width = bar_width - filled_width;
-        let progress_content = format!(
-            " [{}{}] {}% ",
-            "█".repeat(filled_width),
-            "░".repeat(empty_width),
-            total_progress
-        );
-        // Draw left border and content
-        write!(stdout, "│{}", progress_content)?;
-        // Draw right border at terminal edge
-        execute!(stdout, MoveTo(right_border_col, current_row + 2))?;
-        write!(stdout, "│")?;
-        execute!(stdout, Clear(ClearType::UntilNewLine))?;
-
-        // Progress details
-        execute!(stdout, MoveTo(0, current_row + 3))?;
-        let eta_str = match eta_opt {
-            Some(d) => {
-                if d.as_secs() == 0 && self.data.current_bytes < self.data.total_bytes {
-                    "--".to_string()
-                } else {
-                    format_eta(d.as_secs())
-                }
-            }
-            None => "--".to_string(),
+        // Define box characters based on style
+        let (top_left, top_right, bottom_left, bottom_right, horizontal, vertical) = match layout.box_style.as_str() {
+            "double" => ('╔', '╗', '╚', '╝', '═', '║'),
+            "heavy" => ('┏', '┓', '┗', '┛', '━', '┃'),
+            "single" => ('┌', '┐', '└', '┘', '─', '│'),
+            _ => ('╭', '╮', '╰', '╯', '─', '│'), // rounded is default
         };
 
-        let details_content = format!(
-            " {} / {} | Speed: {}/s | ETA: {}",
+        let border_color = parse_hex_color(&theme.border_color);
+        let title_color = parse_hex_color(&theme.title_color);
+        let text_color = parse_hex_color(&theme.text_color);
+
+        // Draw fancy box
+        let current_row = self.start_row;
+        
+        // --- Top Border ---
+        execute!(stdout, MoveTo(0, current_row), SetForegroundColor(border_color))?;
+        write!(stdout, "{}{} {}", top_left, horizontal, operation)?; // Start of title box
+        
+        // Draw title
+        execute!(stdout, SetForegroundColor(title_color), SetAttribute(Attribute::Bold))?;
+        write!(stdout, "{}", operation)?;
+        
+        // Continue border
+        execute!(stdout, SetAttribute(Attribute::Reset), SetForegroundColor(border_color))?;
+        // Calculate remaining length: total width - (corner + horiz + space + title + space + corner)
+        // Actually we just overwrite the rest.
+        // Let's keep it simple: Top border spans purely, title is inside or overlay?
+        // Design mock showed: ╭─ Copying ──────────────────╮
+        
+        let title_len = operation.len();
+        
+        // Reset and just draw the top line with title embedded
+        execute!(stdout, MoveTo(0, current_row), SetForegroundColor(border_color))?;
+        write!(stdout, "{}{} ", top_left, horizontal)?;
+        execute!(stdout, SetForegroundColor(title_color), SetAttribute(Attribute::Bold))?;
+        write!(stdout, "{}", operation)?;
+        execute!(stdout, SetAttribute(Attribute::Reset), SetForegroundColor(border_color))?;
+        
+        let remaining_len = box_width.saturating_sub(title_len + 4); 
+        write!(stdout, " {}" , horizontal.to_string().repeat(remaining_len.saturating_sub(1)))?;
+        execute!(stdout, MoveTo(right_border_col, current_row))?;
+        write!(stdout, "{}", top_right)?;
+        execute!(stdout, Clear(ClearType::UntilNewLine))?;
+
+        // Variables for content rendering
+        let bar_width = (box_width.saturating_sub(20)).max(20);
+
+        // Helper to draw a line with borders
+        // Fix: Pass stdout as argument to avoid borrow checker issues
+        let draw_line_content = |out: &mut io::Stdout, row_offset: u16, content: &str| -> io::Result<()> {
+            execute!(out, MoveTo(0, current_row + row_offset), SetForegroundColor(border_color))?;
+            write!(out, "{} ", vertical)?;
+            execute!(out, SetForegroundColor(text_color))?;
+            write!(out, "{}", content)?;
+            execute!(out, MoveTo(right_border_col, current_row + row_offset), SetForegroundColor(border_color))?;
+            write!(out, "{}", vertical)?;
+            execute!(out, Clear(ClearType::UntilNewLine))?;
+            Ok(())
+        };
+
+        // --- Line 1: Main Progress Bar ---
+        execute!(stdout, MoveTo(0, current_row + 1), SetForegroundColor(border_color))?;
+        write!(stdout, "{} Total:   [", vertical)?;
+        
+        // Render Gradient Bar
+        let filled_len = (bar_width * total_progress as usize / 100).min(bar_width);
+        let empty_len = bar_width - filled_len;
+        
+        for i in 0..filled_len {
+            let progress_fraction = i as f32 / bar_width as f32;
+            let color = get_gradient_color(&theme.bar_gradient, progress_fraction);
+            execute!(stdout, SetForegroundColor(color))?;
+            write!(stdout, "{}", theme.bar_complete_char)?;
+        }
+        
+        execute!(stdout, SetForegroundColor(parse_hex_color("#444444")))?; // Dim color for empty
+        write!(stdout, "{}", theme.bar_incomplete_char.repeat(empty_len))?;
+        
+        execute!(stdout, SetForegroundColor(text_color))?;
+        write!(stdout, "] {}%", total_progress)?;
+        
+        execute!(stdout, MoveTo(right_border_col, current_row + 1), SetForegroundColor(border_color))?;
+        write!(stdout, "{}", vertical)?;
+        execute!(stdout, Clear(ClearType::UntilNewLine))?;
+
+        // --- Line 2: Details (Size, Speed, ETA) ---
+        let eta_str = match eta_opt {
+            Some(d) => format_eta(d.as_secs()),
+            None => "--".to_string(),
+        };
+        
+        let details = format!(
+            "Detail:  {} / {} | {}/s | ETA: {}",
             format_bytes(self.data.current_bytes as f64),
             format_bytes(self.data.total_bytes as f64),
             format_bytes(speed * 1024.0 * 1024.0),
             eta_str
         );
-        // Draw left border and details
-        write!(stdout, "│{}", details_content)?;
-        // Draw right border at terminal edge
-        execute!(stdout, MoveTo(right_border_col, current_row + 3))?;
-        write!(stdout, "│")?;
-        execute!(stdout, Clear(ClearType::UntilNewLine))?;
+        draw_line_content(&mut stdout, 2, &details)?;
 
-        // Bottom border of main progress / top of file progress
-        execute!(stdout, MoveTo(0, current_row + 4))?;
-        write!(stdout, "├{}┤", "─".repeat(right_border_col as usize - 1))?;
-        execute!(stdout, Clear(ClearType::UntilNewLine))?;
+        // --- Line 3: Spacer ---
+        draw_line_content(&mut stdout, 3, "")?;
 
-        // Current file info
-        execute!(stdout, MoveTo(0, current_row + 5))?;
-        let file_info = format!("Current: {} ({})", 
-            self.data.current_file, 
-            format_bytes(self.data.current_file_size as f64)
-        );
-        let truncated_info = if file_info.len() > box_width.saturating_sub(4) {
-            format!("{}...", &file_info[..box_width.saturating_sub(7)])
+        // --- Line 4: Current File Name ---
+        let file_info = format!("Current: {}", self.data.current_file);
+        // Truncate if too long (account for borders and padding)
+        let max_text_width = box_width.saturating_sub(4);
+        let display_file_info = if file_info.len() > max_text_width {
+            format!("{}...", &file_info[..max_text_width.saturating_sub(3)])
         } else {
             file_info
         };
-        // Draw left border and file info
-        write!(stdout, "│ {}", truncated_info)?;
-        // Draw right border at terminal edge
-        execute!(stdout, MoveTo(right_border_col, current_row + 5))?;
-        write!(stdout, "│")?;
-        execute!(stdout, Clear(ClearType::UntilNewLine))?;
+        draw_line_content(&mut stdout, 4, &display_file_info)?;
 
-        // Current file progress bar - always show this
-        execute!(stdout, MoveTo(0, current_row + 6))?;
-        let file_filled_width = (bar_width * current_progress as usize / 100).min(bar_width);
-        let file_empty_width = bar_width.saturating_sub(file_filled_width);
-        let file_progress_content = format!(
-            " [{}{}] {}% ",
-            "█".repeat(file_filled_width),
-            "░".repeat(file_empty_width),
-            current_progress
-        );
-        // Draw left border and file progress
-        write!(stdout, "│{}", file_progress_content)?;
-        // Draw right border at terminal edge
-        execute!(stdout, MoveTo(right_border_col, current_row + 6))?;
-        write!(stdout, "│")?;
-        execute!(stdout, Clear(ClearType::UntilNewLine))?;
+        // --- Line 5: Current File Bar ---
+        execute!(stdout, MoveTo(0, current_row + 5), SetForegroundColor(border_color))?;
+        write!(stdout, "{}          [", vertical)?; // Indent to match "Current: " roughly? No, let's align with main bar "Total:   " is 9 chars
+        
+        // For file bar, use a simpler single color or same gradient? Let's use same gradient logic for consistency
+        let filled_len = (bar_width * current_progress as usize / 100).min(bar_width);
+        let empty_len = bar_width - filled_len;
 
-        let mut last_row = current_row + 7;
-
-        // Items progress if available  
-        if let Some(total_items) = self.data.items_total {
-            execute!(stdout, MoveTo(0, last_row))?;
-            write!(stdout, "├{}┤", "─".repeat(right_border_col as usize - 1))?;
-            execute!(stdout, Clear(ClearType::UntilNewLine))?;
-
-            execute!(stdout, MoveTo(0, last_row + 1))?;
-            let items_info = format!("Items: {} / {}", self.data.items_processed, total_items);
-            // Draw left border and items info
-            write!(stdout, "│ {}", items_info)?;
-            // Draw right border at terminal edge
-            execute!(stdout, MoveTo(right_border_col, last_row + 1))?;
-            write!(stdout, "│")?;
-            execute!(stdout, Clear(ClearType::UntilNewLine))?;
-            last_row += 2;
+        for i in 0..filled_len {
+            let progress_fraction = i as f32 / bar_width as f32;
+            let color = get_gradient_color(&theme.bar_gradient, progress_fraction);
+            execute!(stdout, SetForegroundColor(color))?;
+            write!(stdout, "{}", theme.bar_complete_char)?;
         }
+        execute!(stdout, SetForegroundColor(parse_hex_color("#444444")))?;
+        write!(stdout, "{}", theme.bar_incomplete_char.repeat(empty_len))?;
+        
+        execute!(stdout, SetForegroundColor(text_color))?;
+        write!(stdout, "] {}%", current_progress)?;
 
-        // Bottom border
-        execute!(stdout, MoveTo(0, last_row))?;
-        write!(stdout, "└{}┘", "─".repeat(right_border_col as usize - 1))?;
+        execute!(stdout, MoveTo(right_border_col, current_row + 5), SetForegroundColor(border_color))?;
+        write!(stdout, "{}", vertical)?;
+        execute!(stdout, Clear(ClearType::UntilNewLine))?;
+
+        // --- Bottom Border ---
+        execute!(stdout, MoveTo(0, current_row + 6), SetForegroundColor(border_color))?;
+        write!(stdout, "{}{}{}", bottom_left, horizontal.to_string().repeat(right_border_col.saturating_sub(1) as usize), bottom_right)?;
+        execute!(stdout, SetAttribute(Attribute::Reset))?; 
         execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
         stdout.flush()?;

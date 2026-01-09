@@ -4,6 +4,7 @@ mod r#move;
 mod remove;
 mod progress;
 mod init;
+mod config;
 
 use anyhow::Result;
 use cli::Commands;
@@ -334,3 +335,4 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
