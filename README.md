@@ -99,8 +99,8 @@ Available options:
 - `-n, --dry-run`: Preview operation without making changes
 - `--exclude=<pattern>`: Exclude files matching Regex pattern (comma-separated)
 - **Progress Bar**:
-  - **Default**: Modern inline progress bar with gradients and ETA.
-  - **TUI Mode**: Full box interface with `--tui` or `-t`.
+  - **Default**: Modern TUI box interface with gradients and detailed stats.
+  - **TUI Mode**: Classic inline 3-line display with `--tui` or `-t`.
 - **Performance**: Optimized buffer sizes and parallel I/O for maximum throughput.
 
 Examples:
@@ -144,7 +144,7 @@ Available options:
 - `-y, --yes`: Skip overwrite confirmation
 - `-n, --dry-run`: Preview operation without making changes
 - `--exclude=<pattern>`: Exclude matching files (Regex)
-- `--fancy-progress`: Use fancy TUI progress display (default is plain text)
+- `--tui`: Use classic inline progress display (default is fancy box)
 
 Examples:
 
@@ -182,7 +182,7 @@ Available options:
 - `-d`: Remove empty directories
 - `-n, --dry-run`: Preview operation without making changes
 - `--exclude=<pattern>`: Exclude matching files (Regex)
-- `--fancy-progress`: Use fancy TUI progress display (default is plain text)
+- `--tui`: Use classic inline progress display (default is fancy box)
 
 Examples:
 
@@ -210,8 +210,8 @@ bcmr remove -r --exclude="\.important$","\.backup$" trash/
 
 BCMR offers two progress display modes:
 
-1. **Plain Text Mode (Default)**: Simple text-based progress bars that work in any terminal
-2. **Fancy TUI Mode**: Rich terminal UI with enhanced visual elements and gradients
+1. **Fancy TUI Mode (Default)**: Rich terminal UI with enhanced visual elements and gradients.
+2. **Classic TUI Mode**: Simple inline text-based progress bars (enable with `--tui` or `-t`).
 
 #### Fancy Mode Configuration
 
@@ -219,7 +219,7 @@ You can fully customize the fancy progress bar by creating a configuration file 
 
 ```toml
 [progress]
-# Set the style to "fancy" to potentially make it default in future versions (currently requires flag)
+# Style settings for the default fancy mode
 style = "fancy"
 
 [progress.theme]
@@ -236,7 +236,7 @@ title_color = "#9E8BCA"
 box_style = "rounded"
 ```
 
-Use `--fancy-progress` flag to enable the fancy TUI mode for a more visually appealing experience.
+The default mode uses these settings for a visually appealing experience.
 
 ## 📝 License
 
