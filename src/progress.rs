@@ -244,6 +244,10 @@ impl FancyProgress {
     }
 
     fn redraw(&mut self) -> io::Result<()> {
+        if self.finished {
+            return Ok(());
+        }
+
         if !self.initialized {
             self.initialize()?;
         }
@@ -639,6 +643,7 @@ trait ProgressRenderer: Send {
     fn set_current_file(&mut self, file_name: &str, file_size: u64);
     fn inc_current(&mut self, delta: u64);
     fn set_operation_type(&mut self, operation: &str);
+    fn tick(&mut self);
     fn finish(&mut self) -> io::Result<()>;
 }
 
@@ -676,6 +681,10 @@ impl ProgressRenderer for FancyProgress {
         let _ = self.redraw();
     }
 
+    fn tick(&mut self) {
+        let _ = self.redraw();
+    }
+
     fn finish(&mut self) -> io::Result<()> {
         self.finish()
     }
@@ -707,6 +716,17 @@ impl ProgressRenderer for PlainProgress {
 
     fn set_operation_type(&mut self, operation: &str) {
         self.data.operation_type = operation.to_string();
+        let _ = self.redraw();
+    }
+
+    fn tick(&mut self) {
+        // For plain progress, we might not want to redraw constantly on tick 
+        // to avoid flooding stdout, but we DO need to check for Ctrl+C logic if it lies in redraw.
+        // Inspecting PlainProgress::redraw, it DOES check for Ctrl+C.
+        // However, printing a new line every 100ms in plain mode is bad.
+        // Plain mode redraw handles cursor movement?
+        // Plain mode uses `MoveTo`, so it assumes a capable terminal.
+        // So yes, we can call redraw.
         let _ = self.redraw();
     }
 
@@ -744,6 +764,10 @@ impl CopyProgress {
 
     pub fn set_operation_type(&mut self, operation: &str) {
         self.inner.set_operation_type(operation);
+    }
+
+    pub fn tick(&mut self) {
+        self.inner.tick();
     }
 
     pub fn finish(&mut self) -> io::Result<()> {

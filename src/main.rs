@@ -131,6 +131,17 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
     // Modify signal handling logic
     let progress_for_signal = Arc::clone(&progress);
 
+    // Spawn ticker for progress updates and event polling
+    let progress_ticker = Arc::clone(&progress);
+    let ticker_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(100));
+        loop {
+            interval.tick().await;
+            progress_ticker.lock().tick();
+        }
+    });
+
+    // Spawn separate Ctrl+C handler as backup
     tokio::spawn(async move {
         if let Ok(()) = ctrl_c().await {
             let _ = progress_for_signal.lock().finish();
@@ -168,6 +179,9 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
             break;
         }
     }
+
+    // Stop the ticker
+    ticker_handle.abort();
 
     // Ensure proper cleanup upon completion or error
     let mut progress = progress.lock();
@@ -231,6 +245,16 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
     let progress_for_file = Arc::clone(&progress);
     let progress_for_signal = Arc::clone(&progress);
 
+    // Spawn ticker
+    let progress_ticker = Arc::clone(&progress);
+    let ticker_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(100));
+        loop {
+            interval.tick().await;
+            progress_ticker.lock().tick();
+        }
+    });
+
     tokio::spawn(async move {
         if let Ok(()) = ctrl_c().await {
             let _ = progress_for_signal.lock().finish();
@@ -265,6 +289,8 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
             break;
         }
     }
+
+    ticker_handle.abort();
 
     let mut progress = progress.lock();
     progress.finish()?;
@@ -331,6 +357,16 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
     #[allow(unused_mut)]
     let (tx, mut rx) = tokio::sync::oneshot::channel();
     
+    // Spawn ticker
+    let progress_ticker = Arc::clone(&progress);
+    let ticker_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(100));
+        loop {
+            interval.tick().await;
+            progress_ticker.lock().tick();
+        }
+    });
+
     tokio::spawn(async move {
         if let Ok(()) = ctrl_c().await {
             let _ = progress_for_signal.lock().finish();
@@ -356,6 +392,7 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
             file_callback,
         ) => {
             // Clean up and handle any errors
+            ticker_handle.abort(); // Abort first
             let mut progress = progress.lock();
             if let Err(e) = result {
                 progress.finish()?;
@@ -364,6 +401,7 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
             progress.finish()?;
         }
         _ = rx => {
+            ticker_handle.abort();
             println!("\nOperation cancelled by user.");
             return Ok(());
         }

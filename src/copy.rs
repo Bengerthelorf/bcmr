@@ -85,16 +85,18 @@ pub async fn check_overwrites(
     Ok(files_to_overwrite)
 }
 
-pub async fn get_total_size(
-    sources: &[PathBuf],
+// Helper function to run running blocking directory traversal
+fn get_total_size_sync(
+    sources: Vec<PathBuf>,
     recursive: bool,
-    cli: &Commands,
-    excludes: &[regex::Regex],
+    excludes: Vec<regex::Regex>,
 ) -> Result<u64> {
     let mut total_size = 0;
 
     for src in sources {
-        if cli.should_exclude(&src.to_string_lossy(), excludes) {
+        // Simple exclude check without CLI dependency
+        let src_str = src.to_string_lossy();
+        if excludes.iter().any(|re| re.is_match(&src_str)) {
             continue;
         }
 
@@ -103,7 +105,8 @@ pub async fn get_total_size(
                 let entry = entry?;
                 let path = entry.path();
                 if path.is_file() {
-                    if !cli.should_exclude(&path.to_string_lossy(), excludes) {
+                    let path_str = path.to_string_lossy();
+                    if !excludes.iter().any(|re| re.is_match(&path_str)) {
                         total_size += entry.metadata()?.len();
                     }
                 }
@@ -114,6 +117,22 @@ pub async fn get_total_size(
     }
 
     Ok(total_size)
+}
+
+pub async fn get_total_size(
+    sources: &[PathBuf],
+    recursive: bool,
+    _cli: &Commands, // We don't use simple string exclude anymore, only compiled regexes
+    excludes: &[regex::Regex],
+) -> Result<u64> {
+    let sources = sources.to_vec();
+    let recursive = recursive;
+    let excludes = excludes.to_vec();
+
+    tokio::task::spawn_blocking(move || {
+        get_total_size_sync(sources, recursive, excludes)
+    })
+    .await?
 }
 
 pub struct ProgressCallback<F> {

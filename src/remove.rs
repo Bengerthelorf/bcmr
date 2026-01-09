@@ -14,16 +14,19 @@ pub struct FileToRemove {
     pub size: u64,
 }
 
-pub async fn check_removes(
-    paths: &[PathBuf],
+// Helper for synchronous check logic
+fn check_removes_sync(
+    paths: Vec<PathBuf>,
     recursive: bool,
-    cli: &Commands,
-    excludes: &[regex::Regex],
+    dir_only: bool,
+    force: bool,
+    excludes: Vec<regex::Regex>,
 ) -> Result<Vec<FileToRemove>> {
     let mut files_to_remove = Vec::new();
 
     for path in paths {
-        if cli.should_exclude(&path.to_string_lossy(), excludes) {
+        let path_str = path.to_string_lossy();
+        if excludes.iter().any(|re| re.is_match(&path_str)) {
             continue;
         }
 
@@ -35,15 +38,15 @@ pub async fn check_removes(
                 size: metadata.len(),
             });
         } else if path.is_dir() {
-            if !recursive && !cli.is_dir_only() {
+            if !recursive && !dir_only {
                 bail!("Cannot remove '{}': Is a directory (use -r for recursive removal)", path.display());
             }
 
             // For directories, check if they're empty when -d is used
-            if cli.is_dir_only() {
-                // Use read_dir and try to read first entry to check if directory is empty
-                let mut read_dir = fs::read_dir(path).await?;
-                if read_dir.next_entry().await?.is_some() {
+            if dir_only {
+                // Use read_dir (blocking syscall, acceptable in spawn_blocking)
+                let mut read_dir = std::fs::read_dir(&path)?;
+                if read_dir.next().is_some() {
                     bail!("Cannot remove '{}': Directory not empty", path.display());
                 }
                 files_to_remove.push(FileToRemove {
@@ -54,13 +57,14 @@ pub async fn check_removes(
                 continue;
             }
 
-            // For recursive removal, get all files and directories
+            // For recursive removal
             if recursive {
                 for entry in WalkDir::new(path).contents_first(true) {
                     let entry = entry?;
                     let path = entry.path();
+                    let path_str = path.to_string_lossy();
                     
-                    if cli.should_exclude(&path.to_string_lossy(), excludes) {
+                    if excludes.iter().any(|re| re.is_match(&path_str)) {
                         continue;
                     }
 
@@ -73,7 +77,7 @@ pub async fn check_removes(
                 }
             }
         } else {
-            if !cli.is_force() {
+            if !force {
                 bail!("Cannot remove '{}': No such file or directory", path.display());
             }
         }
@@ -82,17 +86,34 @@ pub async fn check_removes(
     Ok(files_to_remove)
 }
 
-#[allow(dead_code)]
-pub async fn get_total_size(
+pub async fn check_removes(
     paths: &[PathBuf],
     recursive: bool,
     cli: &Commands,
     excludes: &[regex::Regex],
+) -> Result<Vec<FileToRemove>> {
+    let paths = paths.to_vec();
+    let recursive = recursive;
+    let dir_only = cli.is_dir_only();
+    let force = cli.is_force();
+    let excludes = excludes.to_vec();
+
+    tokio::task::spawn_blocking(move || {
+        check_removes_sync(paths, recursive, dir_only, force, excludes)
+    })
+    .await?
+}
+
+fn get_total_size_sync(
+    paths: Vec<PathBuf>,
+    recursive: bool,
+    excludes: Vec<regex::Regex>,
 ) -> Result<u64> {
     let mut total_size = 0;
 
     for path in paths {
-        if cli.should_exclude(&path.to_string_lossy(), excludes) {
+        let path_str = path.to_string_lossy();
+        if excludes.iter().any(|re| re.is_match(&path_str)) {
             continue;
         }
 
@@ -101,7 +122,9 @@ pub async fn get_total_size(
         } else if recursive && path.is_dir() {
             for entry in WalkDir::new(path).min_depth(1) {
                 let entry = entry?;
-                if entry.path().is_file() && !cli.should_exclude(&entry.path().to_string_lossy(), excludes) {
+                let p = entry.path();
+                let p_str = p.to_string_lossy();
+                if p.is_file() && !excludes.iter().any(|re| re.is_match(&p_str)) {
                     total_size += entry.metadata()?.len();
                 }
             }
@@ -109,6 +132,23 @@ pub async fn get_total_size(
     }
 
     Ok(total_size)
+}
+
+#[allow(dead_code)]
+pub async fn get_total_size(
+    paths: &[PathBuf],
+    recursive: bool,
+    _cli: &Commands,
+    excludes: &[regex::Regex],
+) -> Result<u64> {
+    let paths = paths.to_vec();
+    let recursive = recursive;
+    let excludes = excludes.to_vec();
+
+    tokio::task::spawn_blocking(move || {
+        get_total_size_sync(paths, recursive, excludes)
+    })
+    .await?
 }
 
 async fn confirm_remove(path: &Path, is_dir: bool) -> Result<bool> {
