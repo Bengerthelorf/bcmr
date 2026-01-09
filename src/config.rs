@@ -34,7 +34,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             progress: ProgressConfig {
-                style: "plain".to_string(),
+                style: "fancy".to_string(),
                 theme: ThemeConfig {
                     bar_complete_char: "█".to_string(),
                     bar_incomplete_char: "░".to_string(),

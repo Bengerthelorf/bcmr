@@ -117,7 +117,7 @@ pub enum Commands {
         #[arg(short = 'e', long)]
         exclude: Option<Vec<String>>,
 
-        /// Enable TUI mode (box interface)
+        /// Enable inline TUI mode (classic 3-line display)
         #[arg(short, long)]
         tui: bool,
 

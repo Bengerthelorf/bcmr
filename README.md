@@ -1,4 +1,4 @@
-# 🚀 BCMR (Better Copy Move Remove)
+# BCMR (Better Copy Move Remove)
 
 [English](README.md) | [中文](README_zh.md)
 
@@ -6,12 +6,14 @@ Making file operations simpler and more modern! BCMR is a command-line tool writ
 
 ![Demo](img/demo.gif)
 
-## 📥 Installation
+## Installation
 
-### Using Install Script (Recommended)
+### Using Install Script
+
+Use `ghfast` proxy for faster download:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Bengerthelorf/bcmr/main/install.sh | bash
+curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/Bengerthelorf/bcmr/main/install.sh | bash
 ```
 
 ### Using Cargo
@@ -30,21 +32,7 @@ cargo build --release
 
 The compiled binary will be available at `target/release/bcmr`.
 
-## ✨ Features
-
-- 🎯 Real-time Progress Bar - No more guessing how long it'll take
-- ⏳ ETA Display - See estimated time remaining
-- 🔄 Recursive Directory Operations - Handle entire folders with one command
-- 🎨 Attribute Preservation - Keep timestamps, permissions, and more
-- ⚡ Asynchronous I/O - Faster file operations
-- 🛡️ Safe Confirmation System - Prevent accidental overwrites or deletions
-- 🎭 Regex File Exclusion - Flexibly ignore unwanted files using Regular Expressions
-- 🔍 Dry Run Mode - Preview operations without making changes
-- 📊 Detailed Operation Info - Know exactly what's happening
-- 🔌 Shell Integration - Customize command names with flexible prefixes
-- 🎮 Two Progress Display Modes - Plain text (default) or fancy TUI display
-
-## 📖 Detailed Usage Guide
+## Detailed Usage Guide
 
 ### Shell Integration
 
@@ -82,26 +70,27 @@ Supported shells:
 - Zsh
 - Fish
 
-### Copy Command
+### Copy Command (Copy)
 
 Basic syntax:
 
 ```bash
-bcmr copy [options] <source>... <destination>
+bcmr copy [OPTIONS] <SOURCES>... <DESTINATION>
 ```
 
-Available options:
+Arguments:
+  <SOURCES>...   Source files/directories
+  <DESTINATION>  Target directory
 
-- `-r, --recursive`: Copy directories recursively
-- `--preserve`: Preserve file attributes (timestamps, permissions)
-- `-f, --force`: Force overwrite existing files
-- `-y, --yes`: Skip confirmation when using force
-- `-n, --dry-run`: Preview operation without making changes
-- `--exclude=<pattern>`: Exclude files matching Regex pattern (comma-separated)
-- **Progress Bar**:
-  - **Default**: Modern TUI box interface with gradients and detailed stats.
-  - **TUI Mode**: Classic inline 3-line display with `--tui` or `-t`.
-- **Performance**: Optimized buffer sizes and parallel I/O for maximum throughput.
+Options:
+  -r, --recursive            Recursively copy directories
+  -p, --preserve             Preserve file attributes
+  -f, --force                Overwrite existing files
+  -y, --yes                  Skip overwrite confirmation
+  -e, --exclude <PATTERN>    Exclude files/directories matching regex
+  -t, --tui                  Use plain text mode
+  -n, --dry-run              Dry run (no changes)
+  -h, --help                 Print help information
 
 Examples:
 
@@ -109,13 +98,13 @@ Examples:
 # Copy a single file
 bcmr copy document.txt backup/
 
-# Copy multiple files (Shell Globbing works!)
+# Copy multiple files (Shell Globbing supported!)
 bcmr copy *.txt *.md backup/
 
 # Recursively copy a directory
 bcmr copy -r projects/ backup/
 
-# Dry run (preview what would be copied)
+# Dry run (Preview what will be copied)
 bcmr copy -r -n projects/ backup/
 
 # Copy with attribute preservation
@@ -128,7 +117,7 @@ bcmr copy -f -y source.txt destination.txt
 bcmr copy -r --exclude="\.git","\.tmp$" src/ dest/
 ```
 
-### Move Command
+### Move Command (Move)
 
 Basic syntax:
 
@@ -138,13 +127,13 @@ bcmr move [options] <source>... <destination>
 
 Available options:
 
-- `-r, --recursive`: Move directories recursively
-- `--preserve`: Preserve file attributes
+- `-r, --recursive`: Recursively move directories
+- `-p, --preserve`: Preserve file attributes
 - `-f, --force`: Force overwrite existing files
 - `-y, --yes`: Skip overwrite confirmation
 - `-n, --dry-run`: Preview operation without making changes
-- `--exclude=<pattern>`: Exclude matching files (Regex)
-- `--tui`: Use classic inline progress display (default is fancy box)
+- `-e, --exclude=<pattern>`: Exclude matching files (Regex)
+- `-t, --tui`: Use plain text mode
 
 Examples:
 
@@ -165,7 +154,7 @@ bcmr move -n old_project/ new_location/
 bcmr move -r --exclude="^node_modules","\.log$" project/ new_place/
 ```
 
-### Remove Command
+### Remove Command (Remove)
 
 Basic syntax:
 
@@ -179,10 +168,10 @@ Available options:
 - `-f, --force`: Force removal without confirmation
 - `-i, --interactive`: Prompt before each removal
 - `-v, --verbose`: Show detailed removal process
-- `-d`: Remove empty directories
+- `-d, --dir`: Remove empty directories
 - `-n, --dry-run`: Preview operation without making changes
 - `--exclude=<pattern>`: Exclude matching files (Regex)
-- `--tui`: Use classic inline progress display (default is fancy box)
+- `-t, --tui`: Use plain text mode
 
 Examples:
 
@@ -208,36 +197,33 @@ bcmr remove -r --exclude="\.important$","\.backup$" trash/
 
 ### Progress Display Modes
 
-BCMR offers two progress display modes:
+BCMR provides two progress display modes:
 
-1. **Fancy TUI Mode (Default)**: Rich terminal UI with enhanced visual elements and gradients.
-2. **Classic TUI Mode**: Simple inline text-based progress bars (enable with `--tui` or `-t`).
+**fancy mode (Default)** and **plain text mode** (enable with `--tui` or `-t`).
 
-#### Fancy Mode Configuration
+#### Configuration
 
-You can fully customize the fancy progress bar by creating a configuration file at `~/.config/bcmr/config.toml`:
+You can fully customize the progress bar by creating a configuration file at `~/.config/bcmr/config.toml`:
 
 ```toml
 [progress]
-# Style settings for the default fancy mode
-style = "fancy"
+style = "fancy"          # "fancy" (default), "plain" (same as --tui)
 
 [progress.theme]
-# Define a gradient for the progress bar (Hex colors) - Default is a Morandi purple gradient
+# Define progress bar gradient (Hex colors) - Default is a Morandi purple gradient
 bar_gradient = ["#CABBE9", "#7E6EAC"] 
 bar_complete_char = "█"
 bar_incomplete_char = "░"
-text_color = "reset"       # "reset" adapts to your terminal background
+text_color = "reset"     # "reset" (default), "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white", or Hex "#RRGGBB"
 border_color = "#9E8BCA"
 title_color = "#9E8BCA"
 
 [progress.layout]
-# Options: rounded, double, heavy, single
-box_style = "rounded"
+box_style = "rounded"    # "rounded" (default), "double", "heavy", "single"
 ```
 
-The default mode uses these settings for a visually appealing experience.
+The default mode will use these settings for a better visual experience.
 
-## 📝 License
+## License
 
 GPL-3.0 © [Zane Leong](https://github.com/Bengerthelorf)

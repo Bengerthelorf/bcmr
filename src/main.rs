@@ -14,6 +14,11 @@ use std::io::{self, Write};
 use std::sync::Arc;
 use tokio::signal::ctrl_c;
 use tokio::time::Duration;
+use crate::config::CONFIG;
+
+fn is_plain_mode_enabled(args: &Commands) -> bool {
+    args.is_tui_mode() || CONFIG.progress.style.eq_ignore_ascii_case("plain")
+}
 
 async fn confirm_overwrite(files: &[copy::FileToOverwrite]) -> Result<bool> {
     println!("\nThe following items will be overwritten:");
@@ -113,7 +118,7 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
 
     // Calculate total size
     let total_size = copy::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
-    let progress = Arc::new(Mutex::new(CopyProgress::new(total_size, args.is_tui_mode())?));
+    let progress = Arc::new(Mutex::new(CopyProgress::new(total_size, is_plain_mode_enabled(args))?));
 
     // Initialize progress display
     if let Some(first) = sources.first() {
@@ -227,7 +232,7 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
     }
 
     let total_size = r#move::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
-    let progress = Arc::new(Mutex::new(CopyProgress::new(total_size, args.is_tui_mode())?));
+    let progress = Arc::new(Mutex::new(CopyProgress::new(total_size, is_plain_mode_enabled(args))?));
 
     if let Some(first) = sources.first() {
          let display_name = first
@@ -334,7 +339,7 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         .sum();
 
     // Initialize progress display
-    let progress = Arc::new(Mutex::new(CopyProgress::new(total_size, args.is_tui_mode())?));
+    let progress = Arc::new(Mutex::new(CopyProgress::new(total_size, is_plain_mode_enabled(args))?));
     
     // Set operation type
     progress.lock().set_operation_type("Removing");

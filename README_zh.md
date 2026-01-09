@@ -1,4 +1,4 @@
-# 🚀 BCMR (Better Copy Move Remove)
+# BCMR (Better Copy Move Remove)
 
 [English](README.md) | [中文](README_zh.md)
 
@@ -6,9 +6,9 @@
 
 ![Demo](img/demo.gif)
 
-## 📥 安装
+## 安装
 
-### 使用安装脚本 (国内推荐)
+### 使用安装脚本
 
 使用 `ghfast` 代理加速下载：
 
@@ -32,22 +32,7 @@ cargo build --release
 
 编译后的二进制文件位于 `target/release/bcmr`。
 
-## ✨ 特性
-
-- 🎯- **进度条**:
-  - **默认**: 现代化的 TUI 盒子界面，含渐变色和详细统计。
-  - **TUI 模式**: 使用 `--tui` 或 `-t` 开启经典的行内三行显示模式。
-- **高性能**: 优化的缓冲区大小和并行 I/O。🔄 递归目录操作 - 一条命令处理整个文件夹
-- 🎨 属性保留 - 保留时间戳、权限等信息
-- ⚡ 异步 I/O - 更快的文件操作
-- 🛡️ 安全确认机制 - 防止意外覆盖或删除
-- 🎭 正则筛选排除 - 使用正则表达式灵活忽略不需要的文件
-- 🔍 Dry Run 模式 - 预览操作而不实际执行
-- 📊 详细操作信息 - 清楚了解正在发生什么
-- 🔌 Shell 集成 - 使用灵活的前缀自定义命令名称
-- 🎮 两种进度显示模式 - 纯文本（默认）或华丽的 TUI 显示
-
-## 📖 详细使用指南
+## 详细使用指南
 
 ### Shell 集成
 
@@ -89,7 +74,9 @@ eval "$(bcmr init bash --cmd b)"
 
 基本语法：
 
-```baUsage: bcmr copy [OPTIONS] <SOURCES>... <DESTINATION>
+```bash
+bcmr copy [OPTIONS] <SOURCES>... <DESTINATION>
+```
 
 Arguments:
   <SOURCES>...   源文件/目录
@@ -101,10 +88,9 @@ Options:
   -f, --force                覆盖已存在的文件
   -y, --yes                  跳过覆盖确认
   -e, --exclude <PATTERN>    排除匹配正则的文件/目录
-  -t, --tui                  开启行内 TUI 模式 (经典显示)
+  -t, --tui                  使用纯文本模式
   -n, --dry-run              试运行 (不产生更改)
   -h, --help                 打印帮助信息
-```
 
 示例：
 
@@ -142,12 +128,12 @@ bcmr move [options] <source>... <destination>
 可用选项：
 
 - `-r, --recursive`: 递归移动目录
-- `--preserve`: 保留文件属性
+- `-p, --preserve`: 保留文件属性
 - `-f, --force`: 强制覆盖现有文件
 - `-y, --yes`: 跳过覆盖确认
 - `-n, --dry-run`: 预览操作而不进行实际更改
-- `--exclude=<pattern>`: 排除匹配正则表达式的文件
-- `--tui`: 使用经典的行内进度显示 (默认为华丽 TUI 盒子)
+- `-e, --exclude=<pattern>`: 排除匹配正则表达式的文件
+- `-t, --tui`: 使用纯文本模式
 
 示例：
 
@@ -182,10 +168,10 @@ bcmr remove [options] <path>...
 - `-f, --force`: 强制删除且不确认
 - `-i, --interactive`: 删除每个文件前进行提示
 - `-v, --verbose`: 显示详细删除过程
-- `-d`: 删除空目录
+- `-d, --dir`: 删除空目录
 - `-n, --dry-run`: 预览操作而不进行实际更改
 - `--exclude=<pattern>`: 排除匹配正则表达式的文件
-- `--tui`: 使用经典的行内进度显示 (默认为华丽 TUI 盒子)
+- `-t, --tui`: 使用纯文本模式
 
 示例：
 
@@ -198,7 +184,7 @@ bcmr remove *.log
 
 # 递归删除目录
 bcmr remove -r old_project/
-
+186: 
 # Dry run (安全检查)
 bcmr remove -r -n potentially_important_folder/
 
@@ -213,34 +199,31 @@ bcmr remove -r --exclude="\.important$","\.backup$" trash/
 
 BCMR 提供两种进度显示模式：
 
-1. **华丽 TUI 模式 (默认)**: 具有增强视觉元素和渐变的丰富终端 UI。
-2. **经典 TUI 模式**: 简单的行内文本进度条 (使用 `--tui` 或 `-t` 开启)。
+**fancy 模式 (默认)** 和 **纯文本模式** (使用 `--tui` 或 `-t` 开启)。
 
-#### 华丽模式配置
+#### 配置
 
-你可以通过创建配置文件 `~/.config/bcmr/config.toml` 来完全自定义华丽进度条：
+你可以通过创建配置文件 `~/.config/bcmr/config.toml` 来完全自定义进度条：
 
 ```toml
 [progress]
-# 默认华丽模式的样式设置
-style = "fancy"
+style = "fancy"          # "fancy" (default), "plain" (same as --tui)
 
 [progress.theme]
 # 定义进度条渐变 (十六进制颜色) - 默认为莫兰迪紫色渐变
 bar_gradient = ["#CABBE9", "#7E6EAC"] 
 bar_complete_char = "█"
 bar_incomplete_char = "░"
-text_color = "reset"       # "reset" 适应你的终端背景
+text_color = "reset"     # "reset" (default), "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white", or Hex "#RRGGBB"
 border_color = "#9E8BCA"
 title_color = "#9E8BCA"
 
 [progress.layout]
-# 选项: rounded (圆角), double (双线), heavy (粗线), single (单线)
-box_style = "rounded"
+box_style = "rounded"    # "rounded" (default), "double", "heavy", "single"
 ```
 
 默认模式将使用这些设置以获得更佳的视觉体验。
 
-## 📝 许可证
+## 许可证
 
 GPL-3.0 © [Zane Leong](https://github.com/Bengerthelorf)
