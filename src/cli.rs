@@ -52,13 +52,10 @@ pub enum Commands {
 
     /// Copy files or directories
     Copy {
-        /// Source file or directory
-        #[arg(value_name = "SOURCE")]
-        source: PathBuf,
-
-        /// Destination file or directory
-        #[arg(value_name = "DESTINATION")]
-        destination: PathBuf,
+        /// Source files and destination directory
+        /// Last argument is the destination
+        #[arg(required = true, num_args = 2..)]
+        paths: Vec<PathBuf>,
 
         /// Recursively copy directories
         #[arg(short, long)]
@@ -76,13 +73,17 @@ pub enum Commands {
         #[arg(short = 'y', long = "yes")]
         yes: bool,
 
-        /// Exclude files/directories that match these patterns
+        /// Exclude files/directories that match these regex patterns
         #[arg(long, value_name = "PATTERN", value_delimiter = ',')]
         exclude: Option<Vec<String>>,
 
         /// Use fancy progress display (default is plain text)
         #[arg(long)]
         fancy_progress: bool,
+
+        /// Perform a trial run with no changes made
+        #[arg(short = 'n', long)]
+        dry_run: bool,
 
         /// Hidden test mode with artificial delay
         #[arg(long, hide = true)]
@@ -91,13 +92,10 @@ pub enum Commands {
     
     /// Move files or directories
     Move {
-        /// Source file or directory
-        #[arg(value_name = "SOURCE")]
-        source: PathBuf,
-
-        /// Destination file or directory
-        #[arg(value_name = "DESTINATION")]
-        destination: PathBuf,
+        /// Source files and destination directory
+        /// Last argument is the destination
+        #[arg(required = true, num_args = 2..)]
+        paths: Vec<PathBuf>,
 
         /// Recursively move directories
         #[arg(short, long)]
@@ -115,13 +113,17 @@ pub enum Commands {
         #[arg(short = 'y', long = "yes")]
         yes: bool,
 
-        /// Exclude files/directories that match these patterns
+        /// Exclude files/directories that match these regex patterns
         #[arg(long, value_name = "PATTERN", value_delimiter = ',')]
         exclude: Option<Vec<String>>,
 
         /// Use fancy progress display (default is plain text)
         #[arg(long)]
         fancy_progress: bool,
+
+        /// Perform a trial run with no changes made
+        #[arg(short = 'n', long)]
+        dry_run: bool,
 
         /// Hidden test mode with artificial delay
         #[arg(long, hide = true)]
@@ -154,13 +156,17 @@ pub enum Commands {
         #[arg(short = 'd', long)]
         dir: bool,
 
-        /// Exclude files/directories that match these patterns
+        /// Exclude files/directories that match these regex patterns
         #[arg(long, value_name = "PATTERN", value_delimiter = ',')]
         exclude: Option<Vec<String>>,
 
         /// Use fancy progress display (default is plain text)
         #[arg(long)]
         fancy_progress: bool,
+
+        /// Perform a trial run with no changes made
+        #[arg(short = 'n', long)]
+        dry_run: bool,
 
         /// Hidden test mode with artificial delay
         #[arg(long, hide = true)]
@@ -200,19 +206,25 @@ impl Commands {
         }
     }
 
-    pub fn should_exclude(&self, path: &str) -> bool {
-        match self {
+    pub fn compile_excludes(&self) -> Result<Vec<regex::Regex>, regex::Error> {
+        let patterns = match self {
             Commands::Copy { exclude, .. } | 
             Commands::Move { exclude, .. } |
-            Commands::Remove { exclude, .. } => {
-                if let Some(patterns) = exclude {
-                    patterns.iter().any(|pattern| path.contains(pattern))
-                } else {
-                    false
-                }
-            }
-            _ => false,
+            Commands::Remove { exclude, .. } => exclude.as_ref(),
+            _ => None,
+        };
+
+        if let Some(patterns) = patterns {
+            patterns.iter()
+                .map(|p| regex::Regex::new(p))
+                .collect()
+        } else {
+            Ok(Vec::new())
         }
+    }
+
+    pub fn should_exclude(&self, path: &str, compiled_excludes: &[regex::Regex]) -> bool {
+        compiled_excludes.iter().any(|re| re.is_match(path))
     }
 
     pub fn should_prompt_for_overwrite(&self) -> bool {
@@ -232,19 +244,24 @@ impl Commands {
         }
     }
 
-    // Helper methods to get common fields
-    pub fn get_source(&self) -> &PathBuf {
+    pub fn is_dry_run(&self) -> bool {
         match self {
-            Commands::Copy { source, .. } | Commands::Move { source, .. } => source,
-            Commands::Remove { paths, .. } => &paths[0],
-            _ => panic!("Command doesn't have a source path"),
+            Commands::Copy { dry_run, .. } | 
+            Commands::Move { dry_run, .. } |
+            Commands::Remove { dry_run, .. } => *dry_run,
+            _ => false,
         }
     }
 
-    pub fn get_destination(&self) -> &PathBuf {
+    // Helper method to split paths into sources and destination
+    pub fn get_sources_and_dest(&self) -> (&[PathBuf], &PathBuf) {
         match self {
-            Commands::Copy { destination, .. } | Commands::Move { destination, .. } => destination,
-            _ => panic!("Command doesn't have a destination path"),
+            Commands::Copy { paths, .. } | 
+            Commands::Move { paths, .. } => {
+                let (dest, sources) = paths.split_last().expect("Clap should ensure at least 2 args");
+                (sources, dest)
+            }
+            _ => panic!("Command does not have source/dest structure"),
         }
     }
 

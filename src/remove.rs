@@ -14,11 +14,16 @@ pub struct FileToRemove {
     pub size: u64,
 }
 
-pub async fn check_removes(paths: &[PathBuf], recursive: bool, cli: &Commands) -> Result<Vec<FileToRemove>> {
+pub async fn check_removes(
+    paths: &[PathBuf],
+    recursive: bool,
+    cli: &Commands,
+    excludes: &[regex::Regex],
+) -> Result<Vec<FileToRemove>> {
     let mut files_to_remove = Vec::new();
 
     for path in paths {
-        if cli.should_exclude(&path.to_string_lossy()) {
+        if cli.should_exclude(&path.to_string_lossy(), excludes) {
             continue;
         }
 
@@ -55,7 +60,7 @@ pub async fn check_removes(paths: &[PathBuf], recursive: bool, cli: &Commands) -
                     let entry = entry?;
                     let path = entry.path();
                     
-                    if cli.should_exclude(&path.to_string_lossy()) {
+                    if cli.should_exclude(&path.to_string_lossy(), excludes) {
                         continue;
                     }
 
@@ -78,11 +83,16 @@ pub async fn check_removes(paths: &[PathBuf], recursive: bool, cli: &Commands) -
 }
 
 #[allow(dead_code)]
-pub async fn get_total_size(paths: &[PathBuf], recursive: bool, cli: &Commands) -> Result<u64> {
+pub async fn get_total_size(
+    paths: &[PathBuf],
+    recursive: bool,
+    cli: &Commands,
+    excludes: &[regex::Regex],
+) -> Result<u64> {
     let mut total_size = 0;
 
     for path in paths {
-        if cli.should_exclude(&path.to_string_lossy()) {
+        if cli.should_exclude(&path.to_string_lossy(), excludes) {
             continue;
         }
 
@@ -91,7 +101,7 @@ pub async fn get_total_size(paths: &[PathBuf], recursive: bool, cli: &Commands) 
         } else if recursive && path.is_dir() {
             for entry in WalkDir::new(path).min_depth(1) {
                 let entry = entry?;
-                if entry.path().is_file() && !cli.should_exclude(&entry.path().to_string_lossy()) {
+                if entry.path().is_file() && !cli.should_exclude(&entry.path().to_string_lossy(), excludes) {
                     total_size += entry.metadata()?.len();
                 }
             }
@@ -132,11 +142,12 @@ pub async fn remove_path(
     is_dir: bool,
     test_mode: TestMode,
     cli: &Commands,
+    excludes: &[regex::Regex],
     progress_state: Arc<Mutex<ProgressState>>,
     progress_callback: impl Fn(u64) + Send + Sync,
     on_new_file: impl Fn(&str, u64) + Send + Sync,
 ) -> Result<()> {
-    if cli.should_exclude(&path.to_string_lossy()) {
+    if cli.should_exclude(&path.to_string_lossy(), excludes) {
         return Ok(());
     }
 
@@ -153,6 +164,10 @@ pub async fn remove_path(
         .to_string();
 
     if path.is_dir() && (cli.is_recursive() || cli.is_dir_only()) {
+        if cli.is_dry_run() {
+             println!("Would remove directory '{}' and contents", path.display());
+        }
+
         on_new_file(&file_name, 0);
 
         // First, collect all entries
@@ -170,7 +185,7 @@ pub async fn remove_path(
         for entry in entries {
             let entry_path = entry.path();
             
-            if cli.should_exclude(&entry_path.to_string_lossy()) {
+            if cli.should_exclude(&entry_path.to_string_lossy(), excludes) {
                 continue;
             }
 
@@ -216,10 +231,14 @@ pub async fn remove_path(
             }
 
             // Remove the entry
-            if entry.file_type().is_file() {
-                fs::remove_file(entry_path).await?;
-            } else if entry.file_type().is_dir() {
-                fs::remove_dir(entry_path).await?;
+            if !cli.is_dry_run() {
+                if entry.file_type().is_file() {
+                    fs::remove_file(entry_path).await?;
+                } else if entry.file_type().is_dir() {
+                    fs::remove_dir(entry_path).await?;
+                }
+            } else {
+                 println!("Would remove '{}'", entry_path.display());
             }
 
             // Update progress only for actual entries (not the root directory)
@@ -233,6 +252,11 @@ pub async fn remove_path(
         }
 
     } else if path.is_file() {
+        if cli.is_dry_run() {
+            println!("Would remove file '{}'", path.display());
+            return Ok(());
+        }
+
         let size = path.metadata()?.len();
         on_new_file(&file_name, size);
 
@@ -298,12 +322,13 @@ pub async fn remove_paths(
     paths: &[PathBuf],
     test_mode: TestMode,
     cli: &Commands,
+    excludes: &[regex::Regex],
     progress: Arc<Mutex<CopyProgress>>,
     progress_callback: impl Fn(u64) + Send + Sync + Clone + 'static,
     on_new_file: Box<dyn Fn(&str, u64) + Send + Sync>,
 ) -> Result<()> {
     // First, calculate total number of items to process
-    let files_to_remove = check_removes(paths, cli.is_recursive(), cli).await?;
+    let files_to_remove = check_removes(paths, cli.is_recursive(), cli, excludes).await?;
     
     // Set up progress state
     let progress_state = Arc::new(Mutex::new(ProgressState::new(
@@ -318,6 +343,7 @@ pub async fn remove_paths(
             path.is_dir(),
             test_mode.clone(),
             cli,
+            excludes,
             Arc::clone(&progress_state),
             progress_callback.clone(),
             &*on_new_file,

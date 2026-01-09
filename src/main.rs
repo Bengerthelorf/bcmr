@@ -6,7 +6,7 @@ mod progress;
 mod init;
 mod config;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use cli::Commands;
 use parking_lot::Mutex;
 use progress::CopyProgress;
@@ -80,14 +80,21 @@ async fn confirm_removal(files: &[remove::FileToRemove]) -> Result<bool> {
 
 async fn handle_copy_command(args: &Commands) -> Result<()> {
     let test_mode = args.get_test_mode();
+    let excludes = args.compile_excludes()?;
+    let (sources, dest) = args.get_sources_and_dest();
+
+    if sources.len() > 1 && (!dest.exists() || !dest.is_dir()) {
+        bail!("When copying multiple sources, destination '{}' must be an existing directory", dest.display());
+    }
 
     // If force is specified, check the files to be overwritten
     if args.is_force() {
         let files_to_overwrite = copy::check_overwrites(
-            args.get_source(),
-            args.get_destination(),
+            sources,
+            dest,
             args.is_recursive(),
             args,
+            &excludes,
         )
         .await?;
 
@@ -100,18 +107,22 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         }
     }
 
+    if args.is_dry_run() {
+        println!("DRY RUN MODE: No changes will be made.");
+    }
+
     // Calculate total size
-    let total_size = copy::get_total_size(args.get_source(), args.is_recursive(), args).await?;
-    // 修改这里：使用 !args.is_fancy_progress() 来决定是否使用plain模式
+    let total_size = copy::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
     let progress = Arc::new(Mutex::new(CopyProgress::new(total_size, !args.is_fancy_progress())?));
 
-    // Set initial file/directory name
-    let display_name = args
-        .get_source()
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy();
-    progress.lock().set_current_file(&display_name, total_size);
+    // Initialize progress display
+    if let Some(first) = sources.first() {
+         let display_name = first
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        progress.lock().set_current_file(&display_name, total_size);
+    }
 
     // Create clones for callbacks
     let progress_for_inc = Arc::clone(&progress);
@@ -127,40 +138,65 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         }
     });
 
-    // Start the copy operation with exclude patterns
-    let result = copy::copy_path(
-        args.get_source(),
-        args.get_destination(),
-        args.is_recursive(),
-        args.is_preserve(),
-        test_mode,
-        args,
-        move |n| progress_for_inc.lock().inc_current(n),
-        move |name, size| progress_for_file.lock().set_current_file(name, size),
-    )
-    .await;
+    // Loop through sources and copy each
+    let mut success = true;
+    for src in sources {
+        let result = copy::copy_path(
+            src,
+            dest,
+            args.is_recursive(),
+            args.is_preserve(),
+            test_mode.clone(),
+            args,
+            &excludes,
+            {
+                let p = Arc::clone(&progress_for_inc);
+                move |n| p.lock().inc_current(n)
+            },
+            {
+                let p = Arc::clone(&progress_for_file);
+                move |name, size| p.lock().set_current_file(name, size)
+            },
+        )
+        .await;
+
+        if let Err(e) = result {
+            eprintln!("Error copying '{}': {}", src.display(), e);
+            success = false;
+            // Should we stop or continue? Standard cp continues? No, generally it might stop?
+            // Let's stop on error for now.
+            break;
+        }
+    }
 
     // Ensure proper cleanup upon completion or error
     let mut progress = progress.lock();
-    if let Err(e) = result {
-        progress.finish()?;
-        return Err(e);
-    }
     progress.finish()?;
 
+    if !success {
+        bail!("Copy operation encountered errors.");
+    }
+ 
     tokio::time::sleep(Duration::from_secs(1)).await;
     Ok(())
 }
 
 async fn handle_move_command(args: &Commands) -> Result<()> {
     let test_mode = args.get_test_mode();
+    let excludes = args.compile_excludes()?;
+    let (sources, dest) = args.get_sources_and_dest();
+
+    if sources.len() > 1 && (!dest.exists() || !dest.is_dir()) {
+        bail!("When moving multiple sources, destination '{}' must be an existing directory", dest.display());
+    }
 
     if args.is_force() {
         let files_to_overwrite = r#move::check_overwrites(
-            args.get_source(),
-            args.get_destination(),
+            sources,
+            dest,
             args.is_recursive(),
             args,
+            &excludes,
         )
         .await?;
 
@@ -172,18 +208,23 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
         }
     }
 
-    let total_size = r#move::get_total_size(args.get_source(), args.is_recursive(), args).await?;
+    if args.is_dry_run() {
+        println!("DRY RUN MODE: No changes will be made.");
+    }
+
+    let total_size = r#move::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
     let progress = Arc::new(Mutex::new(CopyProgress::new(total_size, !args.is_fancy_progress())?));
 
-    let display_name = args
-        .get_source()
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy();
-    {
-        let mut progress_guard = progress.lock();
-        progress_guard.set_current_file(&display_name, total_size);
-        progress_guard.set_operation_type("Moving");
+    if let Some(first) = sources.first() {
+         let display_name = first
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        {
+            let mut progress_guard = progress.lock();
+            progress_guard.set_current_file(&display_name, total_size);
+            progress_guard.set_operation_type("Moving");
+        }
     }
 
     let progress_for_inc = Arc::clone(&progress);
@@ -197,24 +238,40 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
         }
     });
 
-    let result = r#move::move_path(
-        args.get_source(),
-        args.get_destination(),
-        args.is_recursive(),
-        args.is_preserve(),
-        test_mode,
-        args,
-        move |n| progress_for_inc.lock().inc_current(n),
-        move |name, size| progress_for_file.lock().set_current_file(name, size),
-    )
-    .await;
+    let mut success = true;
+    for src in sources {
+        let result = r#move::move_path(
+            src,
+            dest,
+            args.is_recursive(),
+            args.is_preserve(),
+            test_mode.clone(),
+            args,
+            &excludes,
+            {
+                let p = Arc::clone(&progress_for_inc);
+                move |n| p.lock().inc_current(n)
+            },
+            {
+                let p = Arc::clone(&progress_for_file);
+                move |name, size| p.lock().set_current_file(name, size)
+            },
+        )
+        .await;
+
+        if let Err(e) = result {
+            eprintln!("Error moving '{}': {}", src.display(), e);
+            success = false;
+            break;
+        }
+    }
 
     let mut progress = progress.lock();
-    if let Err(e) = result {
-        progress.finish()?;
-        return Err(e);
-    }
     progress.finish()?;
+
+    if !success {
+        bail!("Move operation encountered errors.");
+    }
 
     tokio::time::sleep(Duration::from_secs(1)).await;
     Ok(())
@@ -222,13 +279,23 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
 
 async fn handle_remove_command(args: &Commands) -> Result<()> {
     let test_mode = args.get_test_mode();
+    let excludes = args.compile_excludes()?;
     let paths = args.get_remove_paths().unwrap();
 
     // First check all files that will be removed
-    let files_to_remove = remove::check_removes(paths, args.is_recursive(), args).await?;
+    let files_to_remove = remove::check_removes(paths, args.is_recursive(), args, &excludes).await?;
+
+    if args.is_dry_run() {
+        println!("DRY RUN MODE: No changes will be made.");
+    }
 
     // Ask for confirmation if needed (not in force mode and either interactive or has items to remove)
-    if !files_to_remove.is_empty() && !args.is_force() && (!args.is_interactive() || files_to_remove.len() > 1) {
+    // In dry-run we skip confirmation? Or maybe confirmation confirms that we see what would happen?
+    // Usually dry-run skips actual prompts or just shows them.
+    // Let's skip prompt if dry_run? Or prompt "Would you like to remove...?"?
+    // User wants "no changes with no execution".
+    // I will skip confirmation in dry_run because we are just showing info.
+    if !args.is_dry_run() && !files_to_remove.is_empty() && !args.is_force() && (!args.is_interactive() || files_to_remove.len() > 1) {
         if !confirm_removal(&files_to_remove).await? {
             println!("Operation cancelled.");
             return Ok(());
@@ -241,7 +308,6 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         .sum();
 
     // Initialize progress display
-    // 修改这里：使用 !args.is_fancy_progress() 来决定是否使用plain模式
     let progress = Arc::new(Mutex::new(CopyProgress::new(total_size, !args.is_fancy_progress())?));
     
     // Set operation type
@@ -284,6 +350,7 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
             paths,
             test_mode,
             args,
+            &excludes,
             Arc::clone(&progress),
             inc_callback,
             file_callback,
@@ -325,6 +392,11 @@ fn handle_init_command(args: &Commands) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = cli::parse_args();
+    // Load config if available (implied, handled inside modules or lazily? 
+    // Wait, config module is there but main doesn't seem to init it explicitly.
+    // It seems config is loaded on demand or static? 
+    // `src/config.rs` has `CONFIG` lazy_static. Checked in previous turns.
+    // So we don't need to do anything here.)
 
     match &cli.command {
         Commands::Copy { .. } => handle_copy_command(&cli.command).await?,
@@ -335,4 +407,3 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
-

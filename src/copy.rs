@@ -11,48 +11,72 @@ pub struct FileToOverwrite {
     pub is_dir: bool,
 }
 
-pub async fn check_overwrites(src: &Path, dst: &Path, recursive: bool, cli: &Commands) -> Result<Vec<FileToOverwrite>> {
+pub async fn check_overwrites(
+    sources: &[PathBuf],
+    dst: &Path,
+    recursive: bool,
+    cli: &Commands,
+    excludes: &[regex::Regex],
+) -> Result<Vec<FileToOverwrite>> {
     let mut files_to_overwrite = Vec::new();
 
-    if src.is_file() {
-        let dst_path = if dst.is_dir() {
-            dst.join(src.file_name().ok_or_else(|| anyhow::anyhow!("Invalid source file name"))?)
-        } else {
-            dst.to_path_buf()
-        };
+    // If we have multiple sources, dst MUST be a directory (or we bail, but validation might happen earlier)
+    // Actually, cp file1 file2 file3 -> fails. cp file1 file2 dir -> works.
+    let dst_is_dir = dst.exists() && dst.is_dir();
+    
+    // If multiple sources and dest is not a dir (and exists), we can't proceed really, but let's check basic logic.
+    if sources.len() > 1 && !dst_is_dir {
+        // We will fail later, but here we just check overwrites if we were to proceed?
+        // Let's assume the caller ensures validity or we check it here.
+        // But for overwrite check, we need to know the target path.
+    }
 
-        if dst_path.exists() && !cli.should_exclude(&dst_path.to_string_lossy()) {
-            files_to_overwrite.push(FileToOverwrite {
-                path: dst_path,
-                is_dir: false,
-            });
+    for src in sources {
+         if cli.should_exclude(&src.to_string_lossy(), excludes) {
+            continue;
         }
-    } else if recursive && src.is_dir() {
-        let src_name = src.file_name().ok_or_else(|| anyhow::anyhow!("Invalid source directory name"))?;
-        let new_dst = if dst.is_dir() {
-            dst.join(src_name)
-        } else {
-            dst.to_path_buf()
-        };
 
-        // If the target directory exists, check for files that will be overwritten
-        if new_dst.exists() {
-            for entry in WalkDir::new(src).min_depth(1) {
-                let entry = entry?;
-                let path = entry.path();
+        if src.is_file() {
+            let dst_path = if dst_is_dir {
+                dst.join(src.file_name().ok_or_else(|| anyhow::anyhow!("Invalid source file name"))?)
+            } else {
+                // If single source and dest is file/doesn't exist
+                dst.to_path_buf()
+            };
 
-                if cli.should_exclude(&path.to_string_lossy()) {
-                    continue;
-                }
+            if dst_path.exists() && !cli.should_exclude(&dst_path.to_string_lossy(), excludes) {
+                files_to_overwrite.push(FileToOverwrite {
+                    path: dst_path,
+                    is_dir: false,
+                });
+            }
+        } else if recursive && src.is_dir() {
+            let src_name = src.file_name().ok_or_else(|| anyhow::anyhow!("Invalid source directory name"))?;
+            let new_dst = if dst_is_dir {
+                dst.join(src_name)
+            } else {
+                dst.to_path_buf()
+            };
 
-                let relative_path = path.strip_prefix(src)?;
-                let target_path = new_dst.join(relative_path);
+            // If the target directory exists, check for files that will be overwritten
+            if new_dst.exists() {
+                for entry in WalkDir::new(src).min_depth(1) {
+                    let entry = entry?;
+                    let path = entry.path();
 
-                if target_path.exists() {
-                    files_to_overwrite.push(FileToOverwrite {
-                        path: target_path,
-                        is_dir: path.is_dir(),
-                    });
+                    if cli.should_exclude(&path.to_string_lossy(), excludes) {
+                        continue;
+                    }
+
+                    let relative_path = path.strip_prefix(src)?;
+                    let target_path = new_dst.join(relative_path);
+
+                    if target_path.exists() {
+                        files_to_overwrite.push(FileToOverwrite {
+                            path: target_path,
+                            is_dir: path.is_dir(),
+                        });
+                    }
                 }
             }
         }
@@ -61,21 +85,31 @@ pub async fn check_overwrites(src: &Path, dst: &Path, recursive: bool, cli: &Com
     Ok(files_to_overwrite)
 }
 
-pub async fn get_total_size(path: &Path, recursive: bool, cli: &Commands) -> Result<u64> {
+pub async fn get_total_size(
+    sources: &[PathBuf],
+    recursive: bool,
+    cli: &Commands,
+    excludes: &[regex::Regex],
+) -> Result<u64> {
     let mut total_size = 0;
 
-    if recursive && path.is_dir() {
-        for entry in WalkDir::new(path).min_depth(1) {
-            let entry = entry?;
-            if entry.path().is_file() {
-                if !cli.should_exclude(&entry.path().to_string_lossy()) {
-                    total_size += entry.metadata()?.len();
+    for src in sources {
+        if cli.should_exclude(&src.to_string_lossy(), excludes) {
+            continue;
+        }
+
+        if recursive && src.is_dir() {
+            for entry in WalkDir::new(src).min_depth(1) {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_file() {
+                    if !cli.should_exclude(&path.to_string_lossy(), excludes) {
+                        total_size += entry.metadata()?.len();
+                    }
                 }
             }
-        }
-    } else if path.is_file() {
-        if !cli.should_exclude(&path.to_string_lossy()) {
-            total_size = path.metadata()?.len();
+        } else if src.is_file() {
+            total_size += src.metadata()?.len();
         }
     }
 
@@ -94,6 +128,7 @@ pub async fn copy_path<F>(
     preserve: bool,
     test_mode: TestMode,
     cli: &Commands,
+    excludes: &[regex::Regex],
     progress_callback: F,
     on_new_file: impl Fn(&str, u64) + Send + Sync + 'static,
 ) -> Result<()>
@@ -105,20 +140,26 @@ where
         on_new_file: Box::new(on_new_file),
     };
 
-    if cli.should_exclude(&src.to_string_lossy()) {
+    // Main exclusion check for the root item
+    if cli.should_exclude(&src.to_string_lossy(), excludes) {
         return Ok(());
     }
 
     if src.is_file() {
         let dst_path = if dst.is_dir() {
-            dst.join(src.file_name().ok_or_else(|| anyhow::anyhow!("Invalid source file name"))?)
+             dst.join(src.file_name().ok_or_else(|| anyhow::anyhow!("Invalid source file name"))?)
         } else {
-            dst.to_path_buf()
+             dst.to_path_buf()
         };
 
         // For files, only check when the target file exists
         if dst_path.exists() && !cli.is_force() {
             bail!("Destination '{}' already exists. Use -f to force overwrite.", dst_path.display());
+        }
+
+        if cli.is_dry_run() {
+            println!("Would copy '{}' to '{}'", src.display(), dst_path.display());
+            return Ok(());
         }
 
         if dst_path.exists() && cli.is_force() {
@@ -134,18 +175,31 @@ where
             dst.to_path_buf()
         };
 
+        if cli.is_dry_run() {
+            println!("Would copy directory '{}' to '{}'", src.display(), new_dst.display());
+            // In dry run we also iterate to show what files would be copied?
+            // "Would copy ..." is implemented below for recursive files if we want verbose dry run.
+            // For now, let's just log the directory copy and walk to log files?
+            // But we simulate the walk.
+        }
+
         // Create the target directory (if it does not exist)
-        if !new_dst.exists() {
+        if !new_dst.exists() && !cli.is_dry_run() {
             fs::create_dir_all(&new_dst).await?;
         }
 
         // Collect files and directories to copy
+        // We use WalkDir even in dry-run to show what would happen or to at least process excludes.
+        // But for dry-run of a huge dir, maybe just saying "Would copy directory recursively" is enough?
+        // User requirements: "Dry run... preview operations". Detailed is better.
+        
+        // Note: WalkDir returns entries in current dir.
         let mut files_to_copy = Vec::new();
         for entry in WalkDir::new(src).min_depth(1) {
             let entry = entry?;
             let path = entry.path();
 
-            if cli.should_exclude(&path.to_string_lossy()) {
+            if cli.should_exclude(&path.to_string_lossy(), excludes) {
                 continue;
             }
 
@@ -153,34 +207,15 @@ where
             let target_path = new_dst.join(relative_path);
 
             if path.is_dir() {
-                if !target_path.exists() {
-                    fs::create_dir_all(&target_path).await?;
-                }
-                if preserve {
-                    let src_metadata = path.metadata()?;
-                    let permissions = src_metadata.permissions();
-                    tokio::fs::set_permissions(&target_path, permissions).await?;
-
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::MetadataExt;
-                        let atime = filetime::FileTime::from_unix_time(src_metadata.atime(), 0);
-                        let mtime = filetime::FileTime::from_unix_time(src_metadata.mtime(), 0);
-                        filetime::set_file_times(&target_path, atime, mtime)?;
+                if !cli.is_dry_run() {
+                    if !target_path.exists() {
+                        fs::create_dir_all(&target_path).await?;
                     }
-
-                    #[cfg(windows)]
-                    {
-                        use std::os::windows::fs::MetadataExt;
-                        if let (Ok(atime), Ok(mtime)) = (
-                            src_metadata.last_access_time().try_into(),
-                            src_metadata.last_write_time().try_into(),
-                        ) {
-                            let atime = filetime::FileTime::from_windows_file_time(atime);
-                            let mtime = filetime::FileTime::from_windows_file_time(mtime);
-                            filetime::set_file_times(&target_path, atime, mtime)?;
-                        }
+                    if preserve {
+                         set_dir_attributes(path, &target_path).await?;
                     }
+                } else {
+                    println!("Would create directory '{}'", target_path.display());
                 }
             } else if path.is_file() {
                 files_to_copy.push((path.to_path_buf(), target_path));
@@ -190,7 +225,7 @@ where
         // Copy files
         for (src_path, dst_path) in files_to_copy {
             if let Some(parent) = dst_path.parent() {
-                if !parent.exists() {
+                if !parent.exists() && !cli.is_dry_run() {
                     fs::create_dir_all(parent).await?;
                 }
             }
@@ -198,6 +233,11 @@ where
             // Check each file to see if it needs to be overwritten
             if dst_path.exists() && !cli.is_force() {
                 bail!("Destination '{}' already exists. Use -f to force overwrite.", dst_path.display());
+            }
+
+            if cli.is_dry_run() {
+                 println!("Would copy '{}' to '{}'", src_path.display(), dst_path.display());
+                 continue;
             }
 
             if dst_path.exists() && cli.is_force() {
@@ -208,31 +248,8 @@ where
         }
 
         // Set the attributes of the target directory (if needed)
-        if preserve {
-            let src_metadata = src.metadata()?;
-            let permissions = src_metadata.permissions();
-            tokio::fs::set_permissions(&new_dst, permissions).await?;
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                let atime = filetime::FileTime::from_unix_time(src_metadata.atime(), 0);
-                let mtime = filetime::FileTime::from_unix_time(src_metadata.mtime(), 0);
-                filetime::set_file_times(&new_dst, atime, mtime)?;
-            }
-
-            #[cfg(windows)]
-            {
-                use std::os::windows::fs::MetadataExt;
-                if let (Ok(atime), Ok(mtime)) = (
-                    src_metadata.last_access_time().try_into(),
-                    src_metadata.last_write_time().try_into(),
-                ) {
-                    let atime = filetime::FileTime::from_windows_file_time(atime);
-                    let mtime = filetime::FileTime::from_windows_file_time(mtime);
-                    filetime::set_file_times(&new_dst, atime, mtime)?;
-                }
-            }
+        if preserve && !cli.is_dry_run() {
+            set_dir_attributes(src, &new_dst).await?;
         }
     } else if src.is_dir() {
         bail!("Source '{}' is a directory. Use -r flag for recursive copy.", src.display());
@@ -240,6 +257,34 @@ where
         bail!("Source '{}' does not exist or is not accessible.", src.display());
     }
 
+    Ok(())
+}
+
+async fn set_dir_attributes(src: &Path, dst: &Path) -> Result<()> {
+    let src_metadata = src.metadata()?;
+    let permissions = src_metadata.permissions();
+    tokio::fs::set_permissions(dst, permissions).await?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let atime = filetime::FileTime::from_unix_time(src_metadata.atime(), 0);
+        let mtime = filetime::FileTime::from_unix_time(src_metadata.mtime(), 0);
+        filetime::set_file_times(dst, atime, mtime)?;
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if let (Ok(atime), Ok(mtime)) = (
+            src_metadata.last_access_time().try_into(),
+            src_metadata.last_write_time().try_into(),
+        ) {
+            let atime = filetime::FileTime::from_windows_file_time(atime);
+            let mtime = filetime::FileTime::from_windows_file_time(mtime);
+            filetime::set_file_times(dst, atime, mtime)?;
+        }
+    }
     Ok(())
 }
 
@@ -310,30 +355,7 @@ where
     }
 
     if preserve {
-        let src_metadata = src.metadata()?;
-        let permissions = src_metadata.permissions();
-        tokio::fs::set_permissions(dst, permissions).await?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let atime = filetime::FileTime::from_unix_time(src_metadata.atime(), 0);
-            let mtime = filetime::FileTime::from_unix_time(src_metadata.mtime(), 0);
-            filetime::set_file_times(dst, atime, mtime)?;
-        }
-
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::MetadataExt;
-            if let (Ok(atime), Ok(mtime)) = (
-                src_metadata.last_access_time().try_into(),
-                src_metadata.last_write_time().try_into(),
-            ) {
-                let atime = filetime::FileTime::from_windows_file_time(atime);
-                let mtime = filetime::FileTime::from_windows_file_time(mtime);
-                filetime::set_file_times(dst, atime, mtime)?;
-            }
-        }
+         set_dir_attributes(src, dst).await?;
     }
 
     Ok(())
