@@ -1,7 +1,12 @@
 use crate::cli::Shell;
 use std::path::PathBuf;
 
-pub fn generate_init_script(shell: &Shell, cmd: &str, path: Option<&PathBuf>, no_cmd: bool) -> String {
+pub fn generate_init_script(
+    shell: &Shell,
+    cmd: &str,
+    path: Option<&PathBuf>,
+    no_cmd: bool,
+) -> String {
     let exe_path = std::env::current_exe()
         .unwrap_or_else(|_| PathBuf::from("bcmr"))
         .display()
@@ -13,16 +18,20 @@ pub fn generate_init_script(shell: &Shell, cmd: &str, path: Option<&PathBuf>, no
 
             // Add PATH if specified
             if let Some(path) = path {
-                script.push_str(&format!(r#"
+                script.push_str(&format!(
+                    r#"
 # Add bcmr directory to PATH
 export PATH="{}:$PATH"
-"#, path.display()));
+"#,
+                    path.display()
+                ));
             }
 
             // Generate command functions
             if !no_cmd {
                 let prefix = if cmd.is_empty() { "" } else { cmd };
-                script.push_str(&format!(r#"
+                script.push_str(&format!(
+                    r#"
 # bcmr shell integration
 {prefix}cp() {{
     "{exe_path}" copy "$@"
@@ -35,27 +44,33 @@ export PATH="{}:$PATH"
 {prefix}rm() {{
     "{exe_path}" remove "$@"
 }}
-"#, prefix=prefix, exe_path=exe_path));
+"#,
+                    prefix = prefix,
+                    exe_path = exe_path
+                ));
             }
 
             script
-
-        },
+        }
         Shell::Fish => {
             let mut script = String::new();
 
             // Add PATH if specified
             if let Some(path) = path {
-                script.push_str(&format!(r#"
+                script.push_str(&format!(
+                    r#"
 # Add bcmr directory to PATH
 fish_add_path "{}"
-"#, path.display()));
+"#,
+                    path.display()
+                ));
             }
 
             // Generate command functions
             if !no_cmd {
                 let prefix = if cmd.is_empty() { "" } else { cmd };
-                script.push_str(&format!(r#"
+                script.push_str(&format!(
+                    r#"
 # bcmr shell integration
 function {prefix}cp
     "{exe_path}" copy $argv
@@ -68,7 +83,10 @@ end
 function {prefix}rm
     "{exe_path}" remove $argv
 end
-"#, prefix=prefix, exe_path=exe_path));
+"#,
+                    prefix = prefix,
+                    exe_path = exe_path
+                ));
             }
 
             script
@@ -82,12 +100,14 @@ pub fn generate_uninstall_script(shell: &Shell) -> String {
         Shell::Bash | Shell::Zsh => r#"
 # Remove bcmr functions
 unset -f cp mv rm bcp bmv brm 2>/dev/null || true
-"#.to_string(),
+"#
+        .to_string(),
 
         Shell::Fish => r#"
 # Remove bcmr functions
 functions -e cp mv rm bcp bmv brm 2>/dev/null || true
-"#.to_string(),
+"#
+        .to_string(),
     }
 }
 

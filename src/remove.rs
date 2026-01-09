@@ -1,12 +1,12 @@
 use crate::cli::{Commands, TestMode};
-use anyhow::{Result, bail};
+use crate::progress::CopyProgress;
+use anyhow::{bail, Result};
+use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::fs;
 use walkdir::WalkDir;
-use std::time::Duration;
-use std::sync::Arc;
-use parking_lot::Mutex;
-use crate::progress::CopyProgress;
 
 pub struct FileToRemove {
     pub path: PathBuf,
@@ -39,7 +39,10 @@ fn check_removes_sync(
             });
         } else if path.is_dir() {
             if !recursive && !dir_only {
-                bail!("Cannot remove '{}': Is a directory (use -r for recursive removal)", path.display());
+                bail!(
+                    "Cannot remove '{}': Is a directory (use -r for recursive removal)",
+                    path.display()
+                );
             }
 
             // For directories, check if they're empty when -d is used
@@ -63,7 +66,7 @@ fn check_removes_sync(
                     let entry = entry?;
                     let path = entry.path();
                     let path_str = path.to_string_lossy();
-                    
+
                     if excludes.iter().any(|re| re.is_match(&path_str)) {
                         continue;
                     }
@@ -72,13 +75,20 @@ fn check_removes_sync(
                     files_to_remove.push(FileToRemove {
                         path: path.to_path_buf(),
                         is_dir: entry.file_type().is_dir(),
-                        size: if entry.file_type().is_file() { metadata.len() } else { 0 },
+                        size: if entry.file_type().is_file() {
+                            metadata.len()
+                        } else {
+                            0
+                        },
                     });
                 }
             }
         } else {
             if !force {
-                bail!("Cannot remove '{}': No such file or directory", path.display());
+                bail!(
+                    "Cannot remove '{}': No such file or directory",
+                    path.display()
+                );
             }
         }
     }
@@ -145,26 +155,27 @@ pub async fn get_total_size(
     let recursive = recursive;
     let excludes = excludes.to_vec();
 
-    tokio::task::spawn_blocking(move || {
-        get_total_size_sync(paths, recursive, excludes)
-    })
-    .await?
+    tokio::task::spawn_blocking(move || get_total_size_sync(paths, recursive, excludes)).await?
 }
 
 async fn confirm_remove(path: &Path, is_dir: bool) -> Result<bool> {
-    use std::io::{self, Write};
     use crossterm::{
+        cursor::{Hide, Show},
         execute,
         terminal::{disable_raw_mode, enable_raw_mode},
-        cursor::{Show, Hide},
     };
-    
+    use std::io::{self, Write};
+
     // Temporarily restore terminal to normal mode for input
     let mut stdout = io::stdout();
     disable_raw_mode()?;
-    execute!(stdout, Show)?;  // Show cursor
+    execute!(stdout, Show)?; // Show cursor
 
-    print!("Remove {} '{}'? (y/N) ", if is_dir { "directory" } else { "file" }, path.display());
+    print!(
+        "Remove {} '{}'? (y/N) ",
+        if is_dir { "directory" } else { "file" },
+        path.display()
+    );
     stdout.flush()?;
 
     let mut input = String::new();
@@ -198,33 +209,37 @@ pub async fn remove_path(
         }
     }
 
-    let file_name = path.file_name()
+    let file_name = path
+        .file_name()
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
 
     if path.is_dir() && (cli.is_recursive() || cli.is_dir_only()) {
         if cli.is_dry_run() {
-             println!("Would remove directory '{}' and contents", path.display());
+            println!("Would remove directory '{}' and contents", path.display());
         }
 
         on_new_file(&file_name, 0);
 
         // First, collect all entries
         let mut entries: Vec<_> = WalkDir::new(path)
-            .contents_first(true)  // This ensures we process contents before containing directory
+            .contents_first(true) // This ensures we process contents before containing directory
             .into_iter()
             .collect::<std::result::Result<_, _>>()?;
 
         // Sort in reverse order to handle deepest paths first
         entries.sort_by(|a, b| {
-            b.path().components().count().cmp(&a.path().components().count())
+            b.path()
+                .components()
+                .count()
+                .cmp(&a.path().components().count())
         });
 
         // Process all entries
         for entry in entries {
             let entry_path = entry.path();
-            
+
             if cli.should_exclude(&entry_path.to_string_lossy(), excludes) {
                 continue;
             }
@@ -243,7 +258,8 @@ pub async fn remove_path(
                 }
             }
 
-            let entry_name = entry_path.file_name()
+            let entry_name = entry_path
+                .file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
@@ -256,14 +272,14 @@ pub async fn remove_path(
                     TestMode::Delay(ms) => {
                         progress_callback(size);
                         tokio::time::sleep(Duration::from_millis(ms)).await;
-                    },
+                    }
                     TestMode::SpeedLimit(bps) => {
                         let chunks = size / bps + 1;
                         for _ in 0..chunks {
                             progress_callback(bps.min(size));
                             tokio::time::sleep(Duration::from_secs(1)).await;
                         }
-                    },
+                    }
                     TestMode::None => {
                         progress_callback(size);
                     }
@@ -278,7 +294,7 @@ pub async fn remove_path(
                     fs::remove_dir(entry_path).await?;
                 }
             } else {
-                 println!("Would remove '{}'", entry_path.display());
+                println!("Would remove '{}'", entry_path.display());
             }
 
             // Update progress only for actual entries (not the root directory)
@@ -290,7 +306,6 @@ pub async fn remove_path(
                 println!("removed {}", entry_path.display());
             }
         }
-
     } else if path.is_file() {
         if cli.is_dry_run() {
             println!("Would remove file '{}'", path.display());
@@ -307,7 +322,7 @@ pub async fn remove_path(
                     progress_callback(size);
                 }
                 tokio::time::sleep(Duration::from_millis(ms)).await;
-            },
+            }
             TestMode::SpeedLimit(bps) => {
                 if size > 0 {
                     let chunks = size / bps + 1;
@@ -316,7 +331,7 @@ pub async fn remove_path(
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                 }
-            },
+            }
             TestMode::None => {
                 if size > 0 {
                     progress_callback(size);
@@ -332,7 +347,10 @@ pub async fn remove_path(
             println!("removed {}", path.display());
         }
     } else {
-        bail!("Cannot remove '{}': No such file or directory", path.display());
+        bail!(
+            "Cannot remove '{}': No such file or directory",
+            path.display()
+        );
     }
 
     Ok(())
@@ -369,11 +387,11 @@ pub async fn remove_paths(
 ) -> Result<()> {
     // First, calculate total number of items to process
     let files_to_remove = check_removes(paths, cli.is_recursive(), cli, excludes).await?;
-    
+
     // Set up progress state
     let progress_state = Arc::new(Mutex::new(ProgressState::new(
         files_to_remove.len(),
-        Arc::clone(&progress)
+        Arc::clone(&progress),
     )));
 
     // Process each path
@@ -387,7 +405,8 @@ pub async fn remove_paths(
             Arc::clone(&progress_state),
             progress_callback.clone(),
             &*on_new_file,
-        ).await?;
+        )
+        .await?;
     }
 
     Ok(())

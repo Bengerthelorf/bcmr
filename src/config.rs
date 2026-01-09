@@ -51,9 +51,7 @@ impl Default for Config {
     }
 }
 
-pub static CONFIG: Lazy<Config> = Lazy::new(|| {
-    Config::new().unwrap_or_else(|_| Config::default())
-});
+pub static CONFIG: Lazy<Config> = Lazy::new(|| Config::new().unwrap_or_else(|_| Config::default()));
 
 impl Config {
     pub fn new() -> Result<Self, ConfigError> {
@@ -61,21 +59,51 @@ impl Config {
 
         // Start with default values
         let defaults = Config::default();
-        
+
         // We have to set defaults manually for ConfigLoader if we want them to be overridable
         // Alternatively, we can serialize the default struct to a Value or just rely on the fallback
         // Since config-rs sets defaults by key, we'll set the critical ones or just use the fallback approach
         // A better way with config-rs is to build layer by layer.
-        
+
         // Set defaults using the struct
-        s = s.set_default("progress.style", defaults.progress.style).unwrap()
-            .set_default("progress.theme.bar_complete_char", defaults.progress.theme.bar_complete_char).unwrap()
-            .set_default("progress.theme.bar_incomplete_char", defaults.progress.theme.bar_incomplete_char).unwrap()
-            .set_default("progress.theme.bar_gradient", defaults.progress.theme.bar_gradient).unwrap()
-            .set_default("progress.theme.text_color", defaults.progress.theme.text_color).unwrap()
-            .set_default("progress.theme.border_color", defaults.progress.theme.border_color).unwrap()
-            .set_default("progress.theme.title_color", defaults.progress.theme.title_color).unwrap()
-            .set_default("progress.layout.box_style", defaults.progress.layout.box_style).unwrap();
+        s = s
+            .set_default("progress.style", defaults.progress.style)
+            .unwrap()
+            .set_default(
+                "progress.theme.bar_complete_char",
+                defaults.progress.theme.bar_complete_char,
+            )
+            .unwrap()
+            .set_default(
+                "progress.theme.bar_incomplete_char",
+                defaults.progress.theme.bar_incomplete_char,
+            )
+            .unwrap()
+            .set_default(
+                "progress.theme.bar_gradient",
+                defaults.progress.theme.bar_gradient,
+            )
+            .unwrap()
+            .set_default(
+                "progress.theme.text_color",
+                defaults.progress.theme.text_color,
+            )
+            .unwrap()
+            .set_default(
+                "progress.theme.border_color",
+                defaults.progress.theme.border_color,
+            )
+            .unwrap()
+            .set_default(
+                "progress.theme.title_color",
+                defaults.progress.theme.title_color,
+            )
+            .unwrap()
+            .set_default(
+                "progress.layout.box_style",
+                defaults.progress.layout.box_style,
+            )
+            .unwrap();
 
         // Check for configuration file
         // 1. Check XDG_CONFIG_HOME/bcmr (~/.config/bcmr on Linux/macOS usually)
@@ -85,7 +113,7 @@ impl Config {
             if config_path.exists() {
                 s = s.add_source(File::from(config_path));
             }
-             let yaml_path = config_dir.join("config.yaml");
+            let yaml_path = config_dir.join("config.yaml");
             if yaml_path.exists() {
                 s = s.add_source(File::from(yaml_path));
             }

@@ -84,12 +84,12 @@ pub enum Commands {
         /// Run in dry-run mode (no changes)
         #[arg(short = 'n', long)]
         dry_run: bool,
-        
+
         /// Hidden test mode for simulation
         #[arg(long, hide = true, value_parser = parse_test_mode)]
         test_mode: Option<TestMode>,
     },
-    
+
     /// Move files or directories
     Move {
         /// Source files and destination directory
@@ -184,27 +184,23 @@ pub enum TestMode {
 impl Commands {
     pub fn get_test_mode(&self) -> TestMode {
         match self {
-            Commands::Copy { test_mode, .. } | 
-            Commands::Move { test_mode, .. } |
-            Commands::Remove { test_mode, .. } => {
-                test_mode.clone().unwrap_or(TestMode::None)
-            }
+            Commands::Copy { test_mode, .. }
+            | Commands::Move { test_mode, .. }
+            | Commands::Remove { test_mode, .. } => test_mode.clone().unwrap_or(TestMode::None),
             _ => TestMode::None,
         }
     }
 
     pub fn compile_excludes(&self) -> Result<Vec<regex::Regex>, regex::Error> {
         let patterns = match self {
-            Commands::Copy { exclude, .. } | 
-            Commands::Move { exclude, .. } |
-            Commands::Remove { exclude, .. } => exclude.as_ref(),
+            Commands::Copy { exclude, .. }
+            | Commands::Move { exclude, .. }
+            | Commands::Remove { exclude, .. } => exclude.as_ref(),
             _ => None,
         };
 
         if let Some(patterns) = patterns {
-            patterns.iter()
-                .map(|p| regex::Regex::new(p))
-                .collect()
+            patterns.iter().map(|p| regex::Regex::new(p)).collect()
         } else {
             Ok(Vec::new())
         }
@@ -216,26 +212,30 @@ impl Commands {
 
     pub fn should_prompt_for_overwrite(&self) -> bool {
         match self {
-            Commands::Copy { force, yes, .. } | Commands::Move { force, yes, .. } => *force && !*yes,
-            Commands::Remove { force, interactive, .. } => !*force && *interactive,
+            Commands::Copy { force, yes, .. } | Commands::Move { force, yes, .. } => {
+                *force && !*yes
+            }
+            Commands::Remove {
+                force, interactive, ..
+            } => !*force && *interactive,
             Commands::Init { .. } => false, // Init command never needs overwrite prompts
         }
     }
 
     pub fn is_tui_mode(&self) -> bool {
         match self {
-            Commands::Copy { tui, .. } | 
-            Commands::Move { tui, .. } |
-            Commands::Remove { tui, .. } => *tui,
+            Commands::Copy { tui, .. }
+            | Commands::Move { tui, .. }
+            | Commands::Remove { tui, .. } => *tui,
             _ => false,
         }
     }
 
     pub fn is_dry_run(&self) -> bool {
         match self {
-            Commands::Copy { dry_run, .. } | 
-            Commands::Move { dry_run, .. } |
-            Commands::Remove { dry_run, .. } => *dry_run,
+            Commands::Copy { dry_run, .. }
+            | Commands::Move { dry_run, .. }
+            | Commands::Remove { dry_run, .. } => *dry_run,
             _ => false,
         }
     }
@@ -243,9 +243,10 @@ impl Commands {
     // Helper method to split paths into sources and destination
     pub fn get_sources_and_dest(&self) -> (&[PathBuf], &PathBuf) {
         match self {
-            Commands::Copy { paths, .. } | 
-            Commands::Move { paths, .. } => {
-                let (dest, sources) = paths.split_last().expect("Clap should ensure at least 2 args");
+            Commands::Copy { paths, .. } | Commands::Move { paths, .. } => {
+                let (dest, sources) = paths
+                    .split_last()
+                    .expect("Clap should ensure at least 2 args");
                 (sources, dest)
             }
             _ => panic!("Command does not have source/dest structure"),
@@ -254,9 +255,9 @@ impl Commands {
 
     pub fn is_recursive(&self) -> bool {
         match self {
-            Commands::Copy { recursive, .. } | 
-            Commands::Move { recursive, .. } |
-            Commands::Remove { recursive, .. } => *recursive,
+            Commands::Copy { recursive, .. }
+            | Commands::Move { recursive, .. }
+            | Commands::Remove { recursive, .. } => *recursive,
             _ => false,
         }
     }
@@ -270,9 +271,9 @@ impl Commands {
 
     pub fn is_force(&self) -> bool {
         match self {
-            Commands::Copy { force, .. } | 
-            Commands::Move { force, .. } |
-            Commands::Remove { force, .. } => *force,
+            Commands::Copy { force, .. }
+            | Commands::Move { force, .. }
+            | Commands::Remove { force, .. } => *force,
             _ => false,
         }
     }

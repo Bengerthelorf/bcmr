@@ -1,6 +1,6 @@
 use crate::cli::{Commands, TestMode};
 use crate::copy;
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use walkdir::WalkDir;
@@ -51,14 +51,20 @@ where
     // Dry run check happens inside here
     let move_result = if src.is_file() {
         let dst_path = if dst.is_dir() {
-            dst.join(src.file_name().ok_or_else(|| anyhow::anyhow!("Invalid source file name"))?)
+            dst.join(
+                src.file_name()
+                    .ok_or_else(|| anyhow::anyhow!("Invalid source file name"))?,
+            )
         } else {
             dst.to_path_buf()
         };
 
         // For files, check when target exists
         if dst_path.exists() && !cli.is_force() {
-            bail!("Destination '{}' already exists. Use -f to force overwrite.", dst_path.display());
+            bail!(
+                "Destination '{}' already exists. Use -f to force overwrite.",
+                dst_path.display()
+            );
         }
 
         if cli.is_dry_run() {
@@ -71,7 +77,9 @@ where
             fs::rename(src, &dst_path).await
         }
     } else if recursive && src.is_dir() {
-        let src_name = src.file_name().ok_or_else(|| anyhow::anyhow!("Invalid source directory name"))?;
+        let src_name = src
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("Invalid source directory name"))?;
         let new_dst = if dst.is_dir() {
             dst.join(src_name)
         } else {
@@ -79,16 +87,26 @@ where
         };
 
         if cli.is_dry_run() {
-            println!("Would move directory '{}' to '{}'", src.display(), new_dst.display());
+            println!(
+                "Would move directory '{}' to '{}'",
+                src.display(),
+                new_dst.display()
+            );
             Ok(())
         } else {
             // For directories, try renaming the whole directory
             fs::rename(src, &new_dst).await
         }
     } else if src.is_dir() {
-        bail!("Source '{}' is a directory. Use -r flag for recursive move.", src.display());
+        bail!(
+            "Source '{}' is a directory. Use -r flag for recursive move.",
+            src.display()
+        );
     } else {
-        bail!("Source '{}' does not exist or is not accessible.", src.display());
+        bail!(
+            "Source '{}' does not exist or is not accessible.",
+            src.display()
+        );
     };
 
     // If rename failed (e.g., across filesystems), fall back to copy and delete

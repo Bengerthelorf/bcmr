@@ -1,12 +1,13 @@
 mod cli;
-mod copy;
-mod r#move;
-mod remove;
-mod progress;
-mod init;
 mod config;
+mod copy;
+mod init;
+mod r#move;
+mod progress;
+mod remove;
 
-use anyhow::{Result, bail};
+use crate::config::CONFIG;
+use anyhow::{bail, Result};
 use cli::Commands;
 use parking_lot::Mutex;
 use progress::CopyProgress;
@@ -14,7 +15,6 @@ use std::io::{self, Write};
 use std::sync::Arc;
 use tokio::signal::ctrl_c;
 use tokio::time::Duration;
-use crate::config::CONFIG;
 
 fn is_plain_mode_enabled(args: &Commands) -> bool {
     args.is_tui_mode() || CONFIG.progress.style.eq_ignore_ascii_case("plain")
@@ -58,9 +58,12 @@ async fn confirm_removal(files: &[remove::FileToRemove]) -> Result<bool> {
     println!("  Files: {}", file_count);
     println!("  Directories: {}", dir_count);
     if total_size > 0 {
-        println!("  Total size: {:.2} MiB", total_size as f64 / 1024.0 / 1024.0);
+        println!(
+            "  Total size: {:.2} MiB",
+            total_size as f64 / 1024.0 / 1024.0
+        );
     }
-    
+
     for file in files {
         println!(
             "  {} {}{}",
@@ -89,19 +92,16 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
     let (sources, dest) = args.get_sources_and_dest();
 
     if sources.len() > 1 && (!dest.exists() || !dest.is_dir()) {
-        bail!("When copying multiple sources, destination '{}' must be an existing directory", dest.display());
+        bail!(
+            "When copying multiple sources, destination '{}' must be an existing directory",
+            dest.display()
+        );
     }
 
     // If force is specified, check the files to be overwritten
     if args.is_force() {
-        let files_to_overwrite = copy::check_overwrites(
-            sources,
-            dest,
-            args.is_recursive(),
-            args,
-            &excludes,
-        )
-        .await?;
+        let files_to_overwrite =
+            copy::check_overwrites(sources, dest, args.is_recursive(), args, &excludes).await?;
 
         // If there are files to overwrite and confirmation is needed
         if !files_to_overwrite.is_empty() && args.should_prompt_for_overwrite() {
@@ -118,14 +118,14 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
 
     // Calculate total size
     let total_size = copy::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
-    let progress = Arc::new(Mutex::new(CopyProgress::new(total_size, is_plain_mode_enabled(args))?));
+    let progress = Arc::new(Mutex::new(CopyProgress::new(
+        total_size,
+        is_plain_mode_enabled(args),
+    )?));
 
     // Initialize progress display
     if let Some(first) = sources.first() {
-         let display_name = first
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
+        let display_name = first.file_name().unwrap_or_default().to_string_lossy();
         progress.lock().set_current_file(&display_name, total_size);
     }
 
@@ -195,7 +195,7 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
     if !success {
         bail!("Copy operation encountered errors.");
     }
- 
+
     tokio::time::sleep(Duration::from_secs(1)).await;
     Ok(())
 }
@@ -206,18 +206,15 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
     let (sources, dest) = args.get_sources_and_dest();
 
     if sources.len() > 1 && (!dest.exists() || !dest.is_dir()) {
-        bail!("When moving multiple sources, destination '{}' must be an existing directory", dest.display());
+        bail!(
+            "When moving multiple sources, destination '{}' must be an existing directory",
+            dest.display()
+        );
     }
 
     if args.is_force() {
-        let files_to_overwrite = r#move::check_overwrites(
-            sources,
-            dest,
-            args.is_recursive(),
-            args,
-            &excludes,
-        )
-        .await?;
+        let files_to_overwrite =
+            r#move::check_overwrites(sources, dest, args.is_recursive(), args, &excludes).await?;
 
         if !files_to_overwrite.is_empty() && args.should_prompt_for_overwrite() {
             if !confirm_overwrite(&files_to_overwrite).await? {
@@ -232,13 +229,13 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
     }
 
     let total_size = r#move::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
-    let progress = Arc::new(Mutex::new(CopyProgress::new(total_size, is_plain_mode_enabled(args))?));
+    let progress = Arc::new(Mutex::new(CopyProgress::new(
+        total_size,
+        is_plain_mode_enabled(args),
+    )?));
 
     if let Some(first) = sources.first() {
-         let display_name = first
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
+        let display_name = first.file_name().unwrap_or_default().to_string_lossy();
         {
             let mut progress_guard = progress.lock();
             progress_guard.set_current_file(&display_name, total_size);
@@ -314,7 +311,8 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
     let paths = args.get_remove_paths().unwrap();
 
     // First check all files that will be removed
-    let files_to_remove = remove::check_removes(paths, args.is_recursive(), args, &excludes).await?;
+    let files_to_remove =
+        remove::check_removes(paths, args.is_recursive(), args, &excludes).await?;
 
     if args.is_dry_run() {
         println!("DRY RUN MODE: No changes will be made.");
@@ -326,7 +324,11 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
     // Let's skip prompt if dry_run? Or prompt "Would you like to remove...?"?
     // User wants "no changes with no execution".
     // I will skip confirmation in dry_run because we are just showing info.
-    if !args.is_dry_run() && !files_to_remove.is_empty() && !args.is_force() && (!args.is_interactive() || files_to_remove.len() > 1) {
+    if !args.is_dry_run()
+        && !files_to_remove.is_empty()
+        && !args.is_force()
+        && (!args.is_interactive() || files_to_remove.len() > 1)
+    {
         if !confirm_removal(&files_to_remove).await? {
             println!("Operation cancelled.");
             return Ok(());
@@ -334,22 +336,20 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
     }
 
     // Calculate total size for progress bar
-    let total_size = files_to_remove.iter()
-        .map(|f| f.size)
-        .sum();
+    let total_size = files_to_remove.iter().map(|f| f.size).sum();
 
     // Initialize progress display
-    let progress = Arc::new(Mutex::new(CopyProgress::new(total_size, is_plain_mode_enabled(args))?));
-    
+    let progress = Arc::new(Mutex::new(CopyProgress::new(
+        total_size,
+        is_plain_mode_enabled(args),
+    )?));
+
     // Set operation type
     progress.lock().set_operation_type("Removing");
 
     // Set initial display using the first path
     if let Some(first_path) = paths.first() {
-        let display_name = first_path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
+        let display_name = first_path.file_name().unwrap_or_default().to_string_lossy();
         progress.lock().set_current_file(&display_name, total_size);
     }
 
@@ -361,7 +361,7 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
     let progress_for_signal = Arc::clone(&progress);
     #[allow(unused_mut)]
     let (tx, mut rx) = tokio::sync::oneshot::channel();
-    
+
     // Spawn ticker
     let progress_ticker = Arc::clone(&progress);
     let ticker_handle = tokio::spawn(async move {
@@ -419,15 +419,20 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
 
 fn handle_init_command(args: &Commands) -> Result<()> {
     match args {
-        Commands::Init { shell, cmd, path, no_cmd } => {
+        Commands::Init {
+            shell,
+            cmd,
+            path,
+            no_cmd,
+        } => {
             // 生成初始化脚本
             let script = init::generate_init_script(shell, cmd, path.as_ref(), *no_cmd);
-            
+
             // 直接打印到标准输出，这样就可以被 eval 捕获
             print!("{}", script);
-            
+
             Ok(())
-        },
+        }
         _ => unreachable!(),
     }
 }
@@ -435,9 +440,9 @@ fn handle_init_command(args: &Commands) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = cli::parse_args();
-    // Load config if available (implied, handled inside modules or lazily? 
+    // Load config if available (implied, handled inside modules or lazily?
     // Wait, config module is there but main doesn't seem to init it explicitly.
-    // It seems config is loaded on demand or static? 
+    // It seems config is loaded on demand or static?
     // `src/config.rs` has `CONFIG` lazy_static. Checked in previous turns.
     // So we don't need to do anything here.)
 

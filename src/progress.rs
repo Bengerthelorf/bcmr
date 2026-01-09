@@ -1,14 +1,13 @@
+use crate::config::CONFIG;
+use crossterm::{
+    cursor::{position, Hide, MoveTo, MoveToColumn, Show},
+    event::{self, Event, KeyCode},
+    execute,
+    style::{Attribute, Color, SetAttribute, SetForegroundColor},
+    terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType},
+};
 use std::io::{self, stdout, Write};
 use std::time::{Duration, Instant};
-use crossterm::{
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType},
-    cursor::{Hide, Show, MoveTo, MoveToColumn, position},
-    event::{self, Event, KeyCode},
-    style::{Color, SetForegroundColor, Attribute, SetAttribute},
-};
-use crate::config::CONFIG;
-
 
 /// Converts a byte count into a human-readable format
 fn format_bytes(bytes: f64) -> String {
@@ -66,13 +65,24 @@ fn parse_hex_color(hex: &str) -> Color {
 
 fn interpolate_color(c1: Color, c2: Color, t: f32) -> Color {
     match (c1, c2) {
-        (Color::Rgb { r: r1, g: g1, b: b1 }, Color::Rgb { r: r2, g: g2, b: b2 }) => {
+        (
+            Color::Rgb {
+                r: r1,
+                g: g1,
+                b: b1,
+            },
+            Color::Rgb {
+                r: r2,
+                g: g2,
+                b: b2,
+            },
+        ) => {
             let r = (r1 as f32 + (r2 as f32 - r1 as f32) * t) as u8;
             let g = (g1 as f32 + (g2 as f32 - g1 as f32) * t) as u8;
             let b = (b1 as f32 + (b2 as f32 - b1 as f32) * t) as u8;
             Color::Rgb { r, g, b }
-        },
-        _ => c1, 
+        }
+        _ => c1,
     }
 }
 
@@ -86,15 +96,15 @@ fn get_gradient_color(colors: &[String], progress: f32) -> Color {
 
     let segments = colors.len() - 1;
     let segment_len = 1.0 / segments as f32;
-    
+
     let segment_idx = (progress / segment_len).floor() as usize;
     let segment_idx = segment_idx.min(segments - 1);
-    
+
     let t = (progress - (segment_idx as f32 * segment_len)) / segment_len;
-    
+
     let c1 = parse_hex_color(&colors[segment_idx]);
     let c2 = parse_hex_color(&colors[segment_idx + 1]);
-    
+
     interpolate_color(c1, c2, t)
 }
 
@@ -108,8 +118,8 @@ struct ProgressData {
     last_bytes: u64,
     last_speed: f64,
     operation_type: String,
-    items_total: Option<usize>,    // Total number of items to process
-    items_processed: usize,        // Number of items processed
+    items_total: Option<usize>, // Total number of items to process
+    items_processed: usize,     // Number of items processed
 }
 
 impl ProgressData {
@@ -138,7 +148,7 @@ impl ProgressData {
 
         let bytes_per_sec = (self.current_bytes - self.last_bytes) as f64 / elapsed;
         let speed = bytes_per_sec / (1024.0 * 1024.0);
-        
+
         self.last_speed = if self.last_speed > 0.0 {
             self.last_speed * 0.8 + speed * 0.2
         } else {
@@ -147,7 +157,7 @@ impl ProgressData {
 
         self.last_update = Instant::now();
         self.last_bytes = self.current_bytes;
-        
+
         self.last_speed
     }
 
@@ -198,13 +208,17 @@ impl TuiProgress {
         }
 
         // Calculate required height based on content
-        let required_height = if self.data.items_total.is_some() { 10 } else { 8 };
+        let required_height = if self.data.items_total.is_some() {
+            10
+        } else {
+            8
+        };
 
         // Ensure we have enough space at the bottom
         let (_, term_height) = terminal_size::terminal_size()
             .map(|(w, h)| (w.0, h.0))
             .unwrap_or((80, 24));
-        
+
         let (_col, mut row) = position().unwrap_or((0, 0));
 
         // If we are too close to the bottom, scroll up
@@ -217,7 +231,7 @@ impl TuiProgress {
             // But actually the cursor is now at the bottom.
             // We want to start drawing 'lines_to_scroll' lines above the current position?
             // No, simpler: Print required_height newlines to force scroll, then move cursor up.
-            
+
             // Let's rely on standard scrolling behavior:
             let (_new_col, new_row) = position().unwrap_or((0, 0));
             // Recalculate if we are still at the bottom
@@ -229,14 +243,14 @@ impl TuiProgress {
                 row = term_height.saturating_sub(required_height);
             }
         }
-        
+
         self.start_col = 0; // Always start at column 0 for clean look
         self.start_row = row;
 
         // Try to enable raw mode
         let _ = enable_raw_mode();
         let _ = execute!(stdout(), Hide);
-        
+
         self.raw_mode_enabled = true;
         self.initialized = true;
 
@@ -260,15 +274,22 @@ impl TuiProgress {
         // Check for Ctrl+C
         if event::poll(Duration::from_millis(0))? {
             if let Event::Key(key) = event::read()? {
-                if key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL) {
+                if key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(event::KeyModifiers::CONTROL)
+                {
                     self.finish()?;
                     std::process::exit(130);
                 }
             }
         }
 
-        let total_progress = (self.data.current_bytes as f64 / self.data.total_bytes.max(1) as f64 * 100.0).min(100.0) as u16;
-        let current_progress = (self.data.current_file_progress as f64 / self.data.current_file_size.max(1) as f64 * 100.0).min(100.0) as u16;
+        let total_progress = (self.data.current_bytes as f64 / self.data.total_bytes.max(1) as f64
+            * 100.0)
+            .min(100.0) as u16;
+        let current_progress = (self.data.current_file_progress as f64
+            / self.data.current_file_size.max(1) as f64
+            * 100.0)
+            .min(100.0) as u16;
         let speed = self.data.calculate_speed();
         let eta_opt = self.data.estimate_eta();
 
@@ -279,24 +300,25 @@ impl TuiProgress {
         };
 
         let mut stdout = stdout();
-        
+
         // Use full terminal width for the progress display
-        use terminal_size::{Width, Height, terminal_size};
+        use terminal_size::{terminal_size, Height, Width};
         let (term_width, _) = terminal_size().unwrap_or((Width(80), Height(24)));
         let box_width = term_width.0 as usize;
         let right_border_col = (term_width.0).saturating_sub(2);
-        
+
         // Load configuration
         let theme = &CONFIG.progress.theme;
         let layout = &CONFIG.progress.layout;
-        
+
         // Define box characters based on style
-        let (top_left, top_right, bottom_left, bottom_right, horizontal, vertical) = match layout.box_style.as_str() {
-            "double" => ('╔', '╗', '╚', '╝', '═', '║'),
-            "heavy" => ('┏', '┓', '┗', '┛', '━', '┃'),
-            "single" => ('┌', '┐', '└', '┘', '─', '│'),
-            _ => ('╭', '╮', '╰', '╯', '─', '│'), // rounded is default
-        };
+        let (top_left, top_right, bottom_left, bottom_right, horizontal, vertical) =
+            match layout.box_style.as_str() {
+                "double" => ('╔', '╗', '╚', '╝', '═', '║'),
+                "heavy" => ('┏', '┓', '┗', '┛', '━', '┃'),
+                "single" => ('┌', '┐', '└', '┘', '─', '│'),
+                _ => ('╭', '╮', '╰', '╯', '─', '│'), // rounded is default
+            };
 
         let border_color = parse_hex_color(&theme.border_color);
         let title_color = parse_hex_color(&theme.title_color);
@@ -304,33 +326,63 @@ impl TuiProgress {
 
         // Draw fancy box
         let current_row = self.start_row;
-        
+
         // --- Top Border ---
-        execute!(stdout, MoveTo(0, current_row), SetForegroundColor(border_color))?;
+        execute!(
+            stdout,
+            MoveTo(0, current_row),
+            SetForegroundColor(border_color)
+        )?;
         write!(stdout, "{}{} {}", top_left, horizontal, operation)?; // Start of title box
-        
+
         // Draw title
-        execute!(stdout, SetForegroundColor(title_color), SetAttribute(Attribute::Bold))?;
+        execute!(
+            stdout,
+            SetForegroundColor(title_color),
+            SetAttribute(Attribute::Bold)
+        )?;
         write!(stdout, "{}", operation)?;
-        
+
         // Continue border
-        execute!(stdout, SetAttribute(Attribute::Reset), SetForegroundColor(border_color))?;
+        execute!(
+            stdout,
+            SetAttribute(Attribute::Reset),
+            SetForegroundColor(border_color)
+        )?;
         // Calculate remaining length: total width - (corner + horiz + space + title + space + corner)
         // Actually we just overwrite the rest.
         // Let's keep it simple: Top border spans purely, title is inside or overlay?
         // Design mock showed: ╭─ Copying ──────────────────╮
-        
+
         let title_len = operation.len();
-        
+
         // Reset and just draw the top line with title embedded
-        execute!(stdout, MoveTo(0, current_row), SetForegroundColor(border_color))?;
+        execute!(
+            stdout,
+            MoveTo(0, current_row),
+            SetForegroundColor(border_color)
+        )?;
         write!(stdout, "{}{} ", top_left, horizontal)?;
-        execute!(stdout, SetForegroundColor(title_color), SetAttribute(Attribute::Bold))?;
+        execute!(
+            stdout,
+            SetForegroundColor(title_color),
+            SetAttribute(Attribute::Bold)
+        )?;
         write!(stdout, "{}", operation)?;
-        execute!(stdout, SetAttribute(Attribute::Reset), SetForegroundColor(border_color))?;
-        
-        let remaining_len = box_width.saturating_sub(title_len + 4); 
-        write!(stdout, " {}" , horizontal.to_string().repeat(remaining_len.saturating_sub(1)))?;
+        execute!(
+            stdout,
+            SetAttribute(Attribute::Reset),
+            SetForegroundColor(border_color)
+        )?;
+
+        let remaining_len = box_width.saturating_sub(title_len + 4);
+        write!(
+            stdout,
+            " {}",
+            horizontal
+                .to_string()
+                .repeat(remaining_len.saturating_sub(1))
+        )?;
         execute!(stdout, MoveTo(right_border_col, current_row))?;
         write!(stdout, "{}", top_right)?;
         execute!(stdout, Clear(ClearType::UntilNewLine))?;
@@ -340,39 +392,56 @@ impl TuiProgress {
 
         // Helper to draw a line with borders
         // Fix: Pass stdout as argument to avoid borrow checker issues
-        let draw_line_content = |out: &mut io::Stdout, row_offset: u16, content: &str| -> io::Result<()> {
-            execute!(out, MoveTo(0, current_row + row_offset), SetForegroundColor(border_color))?;
-            write!(out, "{} ", vertical)?;
-            execute!(out, SetForegroundColor(text_color))?;
-            write!(out, "{}", content)?;
-            execute!(out, MoveTo(right_border_col, current_row + row_offset), SetForegroundColor(border_color))?;
-            write!(out, "{}", vertical)?;
-            execute!(out, Clear(ClearType::UntilNewLine))?;
-            Ok(())
-        };
+        let draw_line_content =
+            |out: &mut io::Stdout, row_offset: u16, content: &str| -> io::Result<()> {
+                execute!(
+                    out,
+                    MoveTo(0, current_row + row_offset),
+                    SetForegroundColor(border_color)
+                )?;
+                write!(out, "{} ", vertical)?;
+                execute!(out, SetForegroundColor(text_color))?;
+                write!(out, "{}", content)?;
+                execute!(
+                    out,
+                    MoveTo(right_border_col, current_row + row_offset),
+                    SetForegroundColor(border_color)
+                )?;
+                write!(out, "{}", vertical)?;
+                execute!(out, Clear(ClearType::UntilNewLine))?;
+                Ok(())
+            };
 
         // --- Line 1: Main Progress Bar ---
-        execute!(stdout, MoveTo(0, current_row + 1), SetForegroundColor(border_color))?;
+        execute!(
+            stdout,
+            MoveTo(0, current_row + 1),
+            SetForegroundColor(border_color)
+        )?;
         write!(stdout, "{} Total:   [", vertical)?;
-        
+
         // Render Gradient Bar
         let filled_len = (bar_width * total_progress as usize / 100).min(bar_width);
         let empty_len = bar_width - filled_len;
-        
+
         for i in 0..filled_len {
             let progress_fraction = i as f32 / bar_width as f32;
             let color = get_gradient_color(&theme.bar_gradient, progress_fraction);
             execute!(stdout, SetForegroundColor(color))?;
             write!(stdout, "{}", theme.bar_complete_char)?;
         }
-        
+
         execute!(stdout, SetForegroundColor(parse_hex_color("#444444")))?; // Dim color for empty
         write!(stdout, "{}", theme.bar_incomplete_char.repeat(empty_len))?;
-        
+
         execute!(stdout, SetForegroundColor(text_color))?;
         write!(stdout, "] {}%", total_progress)?;
-        
-        execute!(stdout, MoveTo(right_border_col, current_row + 1), SetForegroundColor(border_color))?;
+
+        execute!(
+            stdout,
+            MoveTo(right_border_col, current_row + 1),
+            SetForegroundColor(border_color)
+        )?;
         write!(stdout, "{}", vertical)?;
         execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
@@ -381,7 +450,7 @@ impl TuiProgress {
             Some(d) => format_eta(d.as_secs()),
             None => "--".to_string(),
         };
-        
+
         let details = format!(
             "Detail:  {} / {} | {}/s | ETA: {}",
             format_bytes(self.data.current_bytes as f64),
@@ -406,9 +475,13 @@ impl TuiProgress {
         draw_line_content(&mut stdout, 4, &display_file_info)?;
 
         // --- Line 5: Current File Bar ---
-        execute!(stdout, MoveTo(0, current_row + 5), SetForegroundColor(border_color))?;
+        execute!(
+            stdout,
+            MoveTo(0, current_row + 5),
+            SetForegroundColor(border_color)
+        )?;
         write!(stdout, "{}          [", vertical)?; // Indent to match "Current: " roughly? No, let's align with main bar "Total:   " is 9 chars
-        
+
         // For file bar, use a simpler single color or same gradient? Let's use same gradient logic for consistency
         let filled_len = (bar_width * current_progress as usize / 100).min(bar_width);
         let empty_len = bar_width - filled_len;
@@ -421,18 +494,34 @@ impl TuiProgress {
         }
         execute!(stdout, SetForegroundColor(parse_hex_color("#444444")))?;
         write!(stdout, "{}", theme.bar_incomplete_char.repeat(empty_len))?;
-        
+
         execute!(stdout, SetForegroundColor(text_color))?;
         write!(stdout, "] {}%", current_progress)?;
 
-        execute!(stdout, MoveTo(right_border_col, current_row + 5), SetForegroundColor(border_color))?;
+        execute!(
+            stdout,
+            MoveTo(right_border_col, current_row + 5),
+            SetForegroundColor(border_color)
+        )?;
         write!(stdout, "{}", vertical)?;
         execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
         // --- Bottom Border ---
-        execute!(stdout, MoveTo(0, current_row + 6), SetForegroundColor(border_color))?;
-        write!(stdout, "{}{}{}", bottom_left, horizontal.to_string().repeat(right_border_col.saturating_sub(1) as usize), bottom_right)?;
-        execute!(stdout, SetAttribute(Attribute::Reset))?; 
+        execute!(
+            stdout,
+            MoveTo(0, current_row + 6),
+            SetForegroundColor(border_color)
+        )?;
+        write!(
+            stdout,
+            "{}{}{}",
+            bottom_left,
+            horizontal
+                .to_string()
+                .repeat(right_border_col.saturating_sub(1) as usize),
+            bottom_right
+        )?;
+        execute!(stdout, SetAttribute(Attribute::Reset))?;
         execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
         stdout.flush()?;
@@ -443,18 +532,22 @@ impl TuiProgress {
         if self.finished {
             return Ok(());
         }
-        
+
         // Make sure to show final progress state
         let _ = self.redraw();
-        
+
         if self.raw_mode_enabled {
-            let lines_used = if self.data.items_total.is_some() { 10 } else { 8 };
+            let lines_used = if self.data.items_total.is_some() {
+                10
+            } else {
+                8
+            };
             execute!(stdout(), Show, MoveTo(0, self.start_row + lines_used))?;
             disable_raw_mode()?;
             self.raw_mode_enabled = false;
             println!();
         }
-        
+
         self.finished = true;
         Ok(())
     }
@@ -494,18 +587,25 @@ impl InlineProgress {
 
         // Cursor movement for overwriting
         if self.lines_printed > 0 {
-             execute!(stdout, crossterm::cursor::MoveUp(self.lines_printed), MoveToColumn(0))?;
+            execute!(
+                stdout,
+                crossterm::cursor::MoveUp(self.lines_printed),
+                MoveToColumn(0)
+            )?;
         }
 
-        let total_progress = (self.data.current_bytes as f64 / self.data.total_bytes.max(1) as f64 * 100.0) as u16;
-        let current_progress = (self.data.current_file_progress as f64 / self.data.current_file_size.max(1) as f64 * 100.0) as u16;
+        let total_progress =
+            (self.data.current_bytes as f64 / self.data.total_bytes.max(1) as f64 * 100.0) as u16;
+        let current_progress = (self.data.current_file_progress as f64
+            / self.data.current_file_size.max(1) as f64
+            * 100.0) as u16;
         let speed = self.data.calculate_speed();
         let eta_opt = self.data.estimate_eta();
 
         let operation = if self.data.operation_type.is_empty() {
             "Progress".to_string()
         } else {
-             self.data.operation_type.clone()
+            self.data.operation_type.clone()
         };
 
         let eta_str = match eta_opt {
@@ -522,10 +622,12 @@ impl InlineProgress {
         execute!(stdout, Clear(ClearType::CurrentLine))?;
         let op_label = format!("{}: ", operation);
         write!(stdout, "{}", op_label)?;
-        
+
         let suffix = format!(" {}%", total_progress);
-        let bar_width = term_width.saturating_sub(op_label.len() + suffix.len() + 2).max(10);
-        
+        let bar_width = term_width
+            .saturating_sub(op_label.len() + suffix.len() + 2)
+            .max(10);
+
         write!(stdout, "[")?;
         let filled = (bar_width * total_progress as usize / 100).min(bar_width);
         let empty = bar_width - filled;
@@ -535,7 +637,9 @@ impl InlineProgress {
 
         // Line 2: Stats
         execute!(stdout, Clear(ClearType::CurrentLine))?;
-        writeln!(stdout, "{} / {} | {}/s | ETA: {}", 
+        writeln!(
+            stdout,
+            "{} / {} | {}/s | ETA: {}",
             format_bytes(self.data.current_bytes as f64),
             format_bytes(self.data.total_bytes as f64),
             format_bytes(speed * 1024.0 * 1024.0),
@@ -546,30 +650,30 @@ impl InlineProgress {
         execute!(stdout, Clear(ClearType::CurrentLine))?;
         let file_label = "File: ";
         write!(stdout, "{}", file_label)?;
-        
+
         let file_suffix = format!(" {}%", current_progress);
         let avail = term_width.saturating_sub(file_label.len() + file_suffix.len() + 2);
         let bar_width_file = (avail / 2).max(10);
-        let name_width = avail.saturating_sub(bar_width_file + 1); 
-        
+        let name_width = avail.saturating_sub(bar_width_file + 1);
+
         let file_info = &self.data.current_file;
         let display_file = if file_info.len() > name_width {
             format!("{}...", &file_info[..name_width.saturating_sub(3)])
         } else {
             format!("{:width$}", file_info, width = name_width)
         };
-        
+
         write!(stdout, "{} ", display_file)?;
-        
+
         write!(stdout, "[")?;
         let filled = (bar_width_file * current_progress as usize / 100).min(bar_width_file);
         let empty = bar_width_file - filled;
         write!(stdout, "{}", "=".repeat(filled))?;
         write!(stdout, "{}", "-".repeat(empty))?;
         write!(stdout, "]{}", file_suffix)?;
-        
+
         stdout.flush()?;
-        
+
         self.lines_printed = 2; // We printed 2 newlines (L1->L2, L2->L3), cursor at end of L3
         Ok(())
     }
@@ -618,8 +722,9 @@ impl ProgressRenderer for TuiProgress {
         self.data.current_bytes += delta;
         self.data.current_file_progress += delta;
         // Only redraw every 1MB to reduce flicker and improve visibility
-        if self.data.current_bytes % (1024 * 1024) == 0 || 
-           self.data.current_bytes >= self.data.total_bytes {
+        if self.data.current_bytes % (1024 * 1024) == 0
+            || self.data.current_bytes >= self.data.total_bytes
+        {
             let _ = self.redraw();
         }
     }
@@ -684,7 +789,7 @@ impl CopyProgress {
         } else {
             Box::new(TuiProgress::new(total_bytes)?)
         };
-        
+
         Ok(Self { inner })
     }
 

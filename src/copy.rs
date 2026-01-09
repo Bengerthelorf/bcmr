@@ -1,5 +1,5 @@
 use crate::cli::{Commands, TestMode};
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::fs::{self, File};
@@ -23,7 +23,7 @@ pub async fn check_overwrites(
     // If we have multiple sources, dst MUST be a directory (or we bail, but validation might happen earlier)
     // Actually, cp file1 file2 file3 -> fails. cp file1 file2 dir -> works.
     let dst_is_dir = dst.exists() && dst.is_dir();
-    
+
     // If multiple sources and dest is not a dir (and exists), we can't proceed really, but let's check basic logic.
     if sources.len() > 1 && !dst_is_dir {
         // We will fail later, but here we just check overwrites if we were to proceed?
@@ -32,13 +32,16 @@ pub async fn check_overwrites(
     }
 
     for src in sources {
-         if cli.should_exclude(&src.to_string_lossy(), excludes) {
+        if cli.should_exclude(&src.to_string_lossy(), excludes) {
             continue;
         }
 
         if src.is_file() {
             let dst_path = if dst_is_dir {
-                dst.join(src.file_name().ok_or_else(|| anyhow::anyhow!("Invalid source file name"))?)
+                dst.join(
+                    src.file_name()
+                        .ok_or_else(|| anyhow::anyhow!("Invalid source file name"))?,
+                )
             } else {
                 // If single source and dest is file/doesn't exist
                 dst.to_path_buf()
@@ -51,7 +54,9 @@ pub async fn check_overwrites(
                 });
             }
         } else if recursive && src.is_dir() {
-            let src_name = src.file_name().ok_or_else(|| anyhow::anyhow!("Invalid source directory name"))?;
+            let src_name = src
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("Invalid source directory name"))?;
             let new_dst = if dst_is_dir {
                 dst.join(src_name)
             } else {
@@ -129,10 +134,7 @@ pub async fn get_total_size(
     let recursive = recursive;
     let excludes = excludes.to_vec();
 
-    tokio::task::spawn_blocking(move || {
-        get_total_size_sync(sources, recursive, excludes)
-    })
-    .await?
+    tokio::task::spawn_blocking(move || get_total_size_sync(sources, recursive, excludes)).await?
 }
 
 pub struct ProgressCallback<F> {
@@ -166,14 +168,20 @@ where
 
     if src.is_file() {
         let dst_path = if dst.is_dir() {
-             dst.join(src.file_name().ok_or_else(|| anyhow::anyhow!("Invalid source file name"))?)
+            dst.join(
+                src.file_name()
+                    .ok_or_else(|| anyhow::anyhow!("Invalid source file name"))?,
+            )
         } else {
-             dst.to_path_buf()
+            dst.to_path_buf()
         };
 
         // For files, only check when the target file exists
         if dst_path.exists() && !cli.is_force() {
-            bail!("Destination '{}' already exists. Use -f to force overwrite.", dst_path.display());
+            bail!(
+                "Destination '{}' already exists. Use -f to force overwrite.",
+                dst_path.display()
+            );
         }
 
         if cli.is_dry_run() {
@@ -187,7 +195,9 @@ where
 
         copy_file(src, &dst_path, preserve, test_mode, &callback).await?;
     } else if recursive && src.is_dir() {
-        let src_dir_name = src.file_name().ok_or_else(|| anyhow::anyhow!("Invalid source directory name"))?;
+        let src_dir_name = src
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("Invalid source directory name"))?;
         let new_dst = if dst.is_dir() {
             dst.join(src_dir_name)
         } else {
@@ -195,7 +205,11 @@ where
         };
 
         if cli.is_dry_run() {
-            println!("Would copy directory '{}' to '{}'", src.display(), new_dst.display());
+            println!(
+                "Would copy directory '{}' to '{}'",
+                src.display(),
+                new_dst.display()
+            );
             // In dry run we also iterate to show what files would be copied?
             // "Would copy ..." is implemented below for recursive files if we want verbose dry run.
             // For now, let's just log the directory copy and walk to log files?
@@ -211,7 +225,7 @@ where
         // We use WalkDir even in dry-run to show what would happen or to at least process excludes.
         // But for dry-run of a huge dir, maybe just saying "Would copy directory recursively" is enough?
         // User requirements: "Dry run... preview operations". Detailed is better.
-        
+
         // Note: WalkDir returns entries in current dir.
         let mut files_to_copy = Vec::new();
         for entry in WalkDir::new(src).min_depth(1) {
@@ -231,7 +245,7 @@ where
                         fs::create_dir_all(&target_path).await?;
                     }
                     if preserve {
-                         set_dir_attributes(path, &target_path).await?;
+                        set_dir_attributes(path, &target_path).await?;
                     }
                 } else {
                     println!("Would create directory '{}'", target_path.display());
@@ -251,12 +265,19 @@ where
 
             // Check each file to see if it needs to be overwritten
             if dst_path.exists() && !cli.is_force() {
-                bail!("Destination '{}' already exists. Use -f to force overwrite.", dst_path.display());
+                bail!(
+                    "Destination '{}' already exists. Use -f to force overwrite.",
+                    dst_path.display()
+                );
             }
 
             if cli.is_dry_run() {
-                 println!("Would copy '{}' to '{}'", src_path.display(), dst_path.display());
-                 continue;
+                println!(
+                    "Would copy '{}' to '{}'",
+                    src_path.display(),
+                    dst_path.display()
+                );
+                continue;
             }
 
             if dst_path.exists() && cli.is_force() {
@@ -271,9 +292,15 @@ where
             set_dir_attributes(src, &new_dst).await?;
         }
     } else if src.is_dir() {
-        bail!("Source '{}' is a directory. Use -r flag for recursive copy.", src.display());
+        bail!(
+            "Source '{}' is a directory. Use -r flag for recursive copy.",
+            src.display()
+        );
     } else {
-        bail!("Source '{}' does not exist or is not accessible.", src.display());
+        bail!(
+            "Source '{}' does not exist or is not accessible.",
+            src.display()
+        );
     }
 
     Ok(())
@@ -374,7 +401,7 @@ where
     }
 
     if preserve {
-         set_dir_attributes(src, dst).await?;
+        set_dir_attributes(src, dst).await?;
     }
 
     Ok(())
