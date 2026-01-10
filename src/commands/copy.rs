@@ -160,7 +160,7 @@ where
         };
 
         // For files, only check when the target file exists
-        if dst_path.exists() && !cli.is_force() && !cli.is_resume() && !cli.is_append() {
+        if dst_path.exists() && !cli.is_force() && !cli.is_resume() && !cli.is_append() && !cli.is_strict() {
             bail!(
                 "Destination '{}' already exists. Use -f to force overwrite.",
                 dst_path.display()
@@ -172,7 +172,7 @@ where
             return Ok(());
         }
 
-        if dst_path.exists() && cli.is_force() && !cli.is_resume() && !cli.is_append() {
+        if dst_path.exists() && cli.is_force() && !cli.is_resume() && !cli.is_append() && !cli.is_strict() {
             fs::remove_file(&dst_path).await?;
         }
 
@@ -237,7 +237,7 @@ where
             }
 
             // Check each file to see if it needs to be overwritten
-            if dst_path.exists() && !cli.is_force() && !cli.is_resume() && !cli.is_append() {
+            if dst_path.exists() && !cli.is_force() && !cli.is_resume() && !cli.is_append() && !cli.is_strict() {
                 bail!(
                     "Destination '{}' already exists. Use -f to force overwrite.",
                     dst_path.display()
@@ -253,7 +253,7 @@ where
                 continue;
             }
 
-            if dst_path.exists() && cli.is_force() && !cli.is_resume() && !cli.is_append() {
+            if dst_path.exists() && cli.is_force() && !cli.is_resume() && !cli.is_append() && !cli.is_strict() {
                 fs::remove_file(&dst_path).await?;
             }
 
@@ -334,7 +334,7 @@ where
     let mut file_flags = fs::OpenOptions::new();
     file_flags.write(true);
 
-    if (resume || append) && dst.exists() {
+    if (resume || append || strict) && dst.exists() {
         let dst_len = dst.metadata()?.len();
         
         let should_resume = if strict {
