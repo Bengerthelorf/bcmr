@@ -18,7 +18,7 @@ brew install bcmr
 ### Using Install Script
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Bengerthelorf/bcmr/main/install.sh | bash
+curl -fsSL https://bcmr.snaix.homes/ | bash
 ```
 
 ### Using Cargo
