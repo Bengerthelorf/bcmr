@@ -205,3 +205,84 @@ jobs:
       - name: Publish to crates.io
         run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
         continue-on-error: true
+
+  update-tap:
+    name: Update Homebrew Formula
+    runs-on: ubuntu-latest
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Checkout bcmr repo
+        uses: actions/checkout@v4
+
+      - name: Get Release Info
+        id: release
+        run: |
+          echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          TAG=${GITHUB_REF#refs/tags/}
+          echo "FORMULA_VERSION=${TAG#v}" >> $GITHUB_OUTPUT
+
+      - name: Download Configured Artifacts
+        run: |
+          VERSION=${{ steps.release.outputs.VERSION }}
+          URL_ARM_MAC="https://github.com/Bengerthelorf/bcmr/releases/download/${VERSION}/bcmr-aarch64-macos.tar.gz"
+          URL_INTEL_MAC="https://github.com/Bengerthelorf/bcmr/releases/download/${VERSION}/bcmr-x86_64-macos.tar.gz"
+          URL_LINUX="https://github.com/Bengerthelorf/bcmr/releases/download/${VERSION}/bcmr-x86_64-linux.tar.gz"
+          
+          wget -q -O bcmr-aarch64-macos.tar.gz "$URL_ARM_MAC"
+          wget -q -O bcmr-x86_64-macos.tar.gz "$URL_INTEL_MAC"
+          wget -q -O bcmr-x86_64-linux.tar.gz "$URL_LINUX"
+
+      - name: Calculate SHA256
+        id: shasum
+        run: |
+          echo "SHA_ARM_MAC=$(sha256sum bcmr-aarch64-macos.tar.gz | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
+          echo "SHA_INTEL_MAC=$(sha256sum bcmr-x86_64-macos.tar.gz | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
+          echo "SHA_LINUX=$(sha256sum bcmr-x86_64-linux.tar.gz | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
+
+      - name: Checkout Tap Repository
+        uses: actions/checkout@v4
+        with:
+          repository: Bengerthelorf/homebrew-tap
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update Formula
+        run: |
+          cd homebrew-tap/Formula
+          
+          cat > bcmr.rb <<EOF
+          class Bcmr < Formula
+            desc "Better Copy Move Remove - A modern, safe file operation tool"
+            homepage "https://github.com/Bengerthelorf/bcmr"
+            version "${{ steps.release.outputs.FORMULA_VERSION }}"
+            license "GPL-3.0"
+          
+            if OS.mac?
+              if Hardware::CPU.arm?
+                url "https://github.com/Bengerthelorf/bcmr/releases/download/${{ steps.release.outputs.VERSION }}/bcmr-aarch64-macos.tar.gz"
+                sha256 "${{ steps.shasum.outputs.SHA_ARM_MAC }}"
+              else
+                url "https://github.com/Bengerthelorf/bcmr/releases/download/${{ steps.release.outputs.VERSION }}/bcmr-x86_64-macos.tar.gz"
+                sha256 "${{ steps.shasum.outputs.SHA_INTEL_MAC }}"
+              end
+            elsif OS.linux?
+              url "https://github.com/Bengerthelorf/bcmr/releases/download/${{ steps.release.outputs.VERSION }}/bcmr-x86_64-linux.tar.gz"
+              sha256 "${{ steps.shasum.outputs.SHA_LINUX }}"
+            end
+          
+            def install
+              bin.install "bcmr"
+            end
+          
+            test do
+              system "#{bin}/bcmr", "--version"
+            end
+          end
+          EOF
+          
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add bcmr.rb
+          git commit -m "Update bcmr to ${{ steps.release.outputs.VERSION }}" || echo "No changes to commit"
+          git push origin main
