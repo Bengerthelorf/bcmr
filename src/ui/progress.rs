@@ -12,14 +12,30 @@ pub trait ProgressRenderer: Send {
     fn finish(&mut self) -> io::Result<()>;
 }
 
+struct SilentProgress;
+
+impl ProgressRenderer for SilentProgress {
+    fn set_total_items(&mut self, _total: usize) {}
+    fn inc_items_processed(&mut self) {}
+    fn set_current_file(&mut self, _file_name: &str, _file_size: u64) {}
+    fn inc_current(&mut self, _delta: u64) {}
+    fn set_operation_type(&mut self, _operation: &str) {}
+    fn tick(&mut self) {}
+    fn finish(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 // Public interface
 pub struct CopyProgress {
     inner: Box<dyn ProgressRenderer>,
 }
 
 impl CopyProgress {
-    pub fn new(total_bytes: u64, tui_mode: bool) -> io::Result<Self> {
-        let inner: Box<dyn ProgressRenderer> = if tui_mode {
+    pub fn new(total_bytes: u64, tui_mode: bool, silent: bool) -> io::Result<Self> {
+        let inner: Box<dyn ProgressRenderer> = if silent {
+            Box::new(SilentProgress)
+        } else if tui_mode {
             Box::new(InlineProgress::new(total_bytes)?)
         } else {
             Box::new(TuiProgress::new(total_bytes)?)

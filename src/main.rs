@@ -120,6 +120,7 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
     let progress = Arc::new(Mutex::new(CopyProgress::new(
         total_size,
         is_plain_mode_enabled(args),
+        args.is_dry_run(),
     )?));
 
     // Initialize progress display
@@ -231,6 +232,7 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
     let progress = Arc::new(Mutex::new(CopyProgress::new(
         total_size,
         is_plain_mode_enabled(args),
+        args.is_dry_run(),
     )?));
 
     if let Some(first) = sources.first() {
@@ -341,6 +343,7 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
     let progress = Arc::new(Mutex::new(CopyProgress::new(
         total_size,
         is_plain_mode_enabled(args),
+        args.is_dry_run(),
     )?));
 
     // Set operation type

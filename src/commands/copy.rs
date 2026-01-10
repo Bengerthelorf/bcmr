@@ -1,6 +1,7 @@
 use crate::cli::{Commands, TestMode};
 use crate::core::traversal;
 use crate::core::checksum;
+use crate::ui::display::{print_dry_run, ActionType};
 
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
@@ -149,6 +150,10 @@ where
         return Ok(());
     }
 
+// use crate::ui::display::{print_dry_run, ActionType}; // Ensure this is imported at top of file!
+
+// ... inside copy_path ...
+
     if src.is_file() {
         let dst_path = if dst.is_dir() {
             dst.join(
@@ -168,7 +173,74 @@ where
         }
 
         if cli.is_dry_run() {
-            println!("Would copy '{}' to '{}'", src.display(), dst_path.display());
+            let action = if !dst_path.exists() {
+                ActionType::Add
+            } else {
+                // Logic duplicating copy_file checks for Dry Run accuracy
+                let src_meta = src.metadata()?;
+                let dst_meta = dst_path.metadata()?;
+                let src_len = src_meta.len();
+                let dst_len = dst_meta.len();
+
+                let should_resume = if cli.is_strict() {
+                    // Strict mode (Hash check implied, but for dry-run we might skip hash or assume based on size?)
+                    // Doing a hash in dry-run is expensive. Let's assume size check + "STRICT" note?
+                    // copy_file logic:
+                    if dst_len == src_len {
+                         // Hash check would determine SKIP vs OVERWRITE.
+                         // For dry-run, if size matches, typically we might Assume SKIP if strict?
+                         // Or we can say "contents check"
+                         ActionType::Skip // Optimistic prediction
+                    } else if dst_len < src_len {
+                        // Partial hash check...
+                        ActionType::Append
+                    } else {
+                        ActionType::Overwrite
+                    }
+                } else if cli.is_append() {
+                    if dst_len == src_len {
+                        ActionType::Skip
+                    } else if dst_len < src_len {
+                        ActionType::Append
+                    } else {
+                        ActionType::Overwrite
+                    }
+                } else if cli.is_resume() {
+                    // Check Mtime
+                    let src_mtime = src_meta.modified()?;
+                    let dst_mtime = dst_meta.modified()?;
+                    
+                    if src_mtime != dst_mtime {
+                        ActionType::Overwrite
+                    } else {
+                        if dst_len == src_len {
+                            ActionType::Skip
+                        } else if dst_len < src_len {
+                            ActionType::Append
+                        } else {
+                            ActionType::Overwrite
+                        }
+                    }
+                } else {
+                    ActionType::Overwrite
+                };
+                
+                // If the logic determined a "Resume" action (ActionType is not natively "Resume", 
+                // but we map the logic outcome to Add/Overwrite/Append/Skip).
+                // Wait, should_resume logic returns boolean in copy_file.
+                // Here we return ActionType directly.
+                
+                // In above logic:
+                // If strict/append/resume match conditions -> Append or Skip.
+                // Else -> Overwrite.
+                should_resume
+            };
+            
+            print_dry_run(
+                action,
+                &src.to_string_lossy(),
+                Some(&dst_path.to_string_lossy())
+            );
             return Ok(());
         }
 
@@ -188,11 +260,13 @@ where
         };
 
         if cli.is_dry_run() {
-            println!(
-                "Would copy directory '{}' to '{}'",
-                src.display(),
-                new_dst.display()
-            );
+             if !new_dst.exists() {
+                 print_dry_run(
+                     ActionType::Add,
+                     &src.to_string_lossy(),
+                     Some(&format!("(DIR) -> {}", new_dst.display()))
+                 );
+             }
         }
 
         // Create the target directory (if it does not exist)
@@ -207,8 +281,6 @@ where
             let entry = entry?;
             let path = entry.path();
             
-            // Exclude check is handled by traversal::walk now!
-
             let relative_path = path.strip_prefix(src)?;
             let target_path = new_dst.join(relative_path);
 
@@ -221,7 +293,13 @@ where
                         set_dir_attributes(path, &target_path).await?;
                     }
                 } else {
-                    println!("Would create directory '{}'", target_path.display());
+                    if !target_path.exists() {
+                        print_dry_run(
+                            ActionType::Add,
+                            &path.to_string_lossy(),
+                            Some(&format!("(DIR) -> {}", target_path.display()))
+                        );
+                    }
                 }
             } else if path.is_file() {
                 files_to_copy.push((path.to_path_buf(), target_path));
@@ -245,19 +323,57 @@ where
             }
 
             if cli.is_dry_run() {
-                println!(
-                    "Would copy '{}' to '{}'",
-                    src_path.display(),
-                    dst_path.display()
+                let action = if !dst_path.exists() {
+                    ActionType::Add
+                } else {
+                    let src_meta = src_path.metadata()?;
+                    let dst_meta = dst_path.metadata()?;
+                    let src_len = src_meta.len();
+                    let dst_len = dst_meta.len();
+
+                    if cli.is_strict() {
+                        if dst_len == src_len { ActionType::Skip }
+                        else if dst_len < src_len { ActionType::Append }
+                        else { ActionType::Overwrite }
+                    } else if cli.is_append() {
+                        if dst_len == src_len { ActionType::Skip }
+                        else if dst_len < src_len { ActionType::Append }
+                        else { ActionType::Overwrite }
+                    } else if cli.is_resume() {
+                        let src_mtime = src_meta.modified()?;
+                        let dst_mtime = dst_meta.modified()?;
+                        if src_mtime != dst_mtime { ActionType::Overwrite }
+                        else if dst_len == src_len { ActionType::Skip }
+                        else if dst_len < src_len { ActionType::Append }
+                        else { ActionType::Overwrite }
+                    } else {
+                        ActionType::Overwrite
+                    }
+                };
+
+                print_dry_run(
+                    action,
+                    &src_path.to_string_lossy(),
+                    Some(&dst_path.to_string_lossy())
                 );
-                continue;
-            }
+            } else {
+                if dst_path.exists() && cli.is_force() && !cli.is_resume() && !cli.is_append() && !cli.is_strict() {
+                    fs::remove_file(&dst_path).await?;
+                }
 
-            if dst_path.exists() && cli.is_force() && !cli.is_resume() && !cli.is_append() && !cli.is_strict() {
-                fs::remove_file(&dst_path).await?;
+                copy_file(
+                    &src_path,
+                    &dst_path,
+                    preserve,
+                    cli.is_verify(),
+                    cli.is_resume(),
+                    cli.is_strict(),
+                    cli.is_append(),
+                    test_mode.clone(),
+                    &callback,
+                )
+                .await?;
             }
-
-            copy_file(&src_path, &dst_path, preserve, cli.is_verify(), cli.is_resume(), cli.is_strict(), cli.is_append(), test_mode.clone(), &callback).await?;
         }
 
         // Set the attributes of the target directory (if needed)

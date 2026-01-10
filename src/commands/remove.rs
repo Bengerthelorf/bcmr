@@ -1,5 +1,6 @@
 use crate::cli::{Commands, TestMode};
 use crate::ui::progress::CopyProgress;
+use crate::ui::display::{print_dry_run, ActionType};
 use crate::core::traversal;
 
 use anyhow::{bail, Result};
@@ -210,10 +211,8 @@ pub async fn remove_path(
         .to_string();
 
     if path.is_dir() && (cli.is_recursive() || cli.is_dir_only()) {
-        if cli.is_dry_run() {
-            println!("Would remove directory '{}' and contents", path.display());
-        }
-
+        // REMOVED: Duplicate printing of "Would remove directory"
+        
         on_new_file(&file_name, 0);
 
         // First, collect all entries
@@ -311,7 +310,12 @@ pub async fn remove_path(
                     fs::remove_dir(entry_path).await?;
                 }
             } else {
-                println!("Would remove '{}'", entry_path.display());
+                // Use new display logic
+                print_dry_run(
+                    ActionType::Remove, 
+                    &entry_path.to_string_lossy(),
+                    None
+                );
             }
 
             // Update progress only for actual entries (not the root directory)
@@ -319,13 +323,17 @@ pub async fn remove_path(
                 progress_state.lock().inc_processed();
             }
 
-            if cli.is_verbose() {
+            if cli.is_verbose() && !cli.is_dry_run() {
                 println!("removed {}", entry_path.display());
             }
         }
     } else if path.is_file() {
         if cli.is_dry_run() {
-            println!("Would remove file '{}'", path.display());
+             print_dry_run(
+                ActionType::Remove, 
+                &path.to_string_lossy(), 
+                None
+            );
             return Ok(());
         }
 

@@ -1,6 +1,7 @@
 use crate::cli::{Commands, TestMode};
 use crate::commands::copy;
 use crate::core::traversal;
+use crate::ui::display::{print_dry_run, ActionType};
 
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
@@ -30,6 +31,8 @@ pub async fn get_total_size(
     copy::get_total_size(sources, recursive, cli, excludes).await
 }
 
+// use std::sync::Arc;
+
 pub async fn move_path<F>(
     src: &Path,
     dst: &Path,
@@ -39,18 +42,16 @@ pub async fn move_path<F>(
     cli: &Commands,
     excludes: &[regex::Regex],
     progress_callback: F,
-    on_new_file: impl Fn(&str, u64) + Send + Sync + 'static,
+    on_new_file: impl Fn(&str, u64) + Send + Sync + 'static + Clone,
 ) -> Result<()>
 where
-    F: Fn(u64) + Send + Sync,
+    F: Fn(u64) + Send + Sync + Clone,
 {
     if traversal::is_excluded(src, excludes) {
         return Ok(());
     }
 
-    // First try to move using rename (this works fast if on same filesystem)
-    // Dry run check happens inside here
-    let move_result = if src.is_file() {
+    if src.is_file() {
         let dst_path = if dst.is_dir() {
             dst.join(
                 src.file_name()
@@ -69,13 +70,37 @@ where
         }
 
         if cli.is_dry_run() {
-            println!("Would move '{}' to '{}'", src.display(), dst_path.display());
-            Ok(())
+             print_dry_run(
+                ActionType::Move, 
+                &src.to_string_lossy(),
+                Some(&dst_path.to_string_lossy())
+            );
+            return Ok(());
         } else {
             if dst_path.exists() && cli.is_force() {
                 fs::remove_file(&dst_path).await?;
             }
-            fs::rename(src, &dst_path).await
+            
+            // Try rename first
+            if let Err(e) = fs::rename(src, &dst_path).await {
+                if e.raw_os_error() == Some(libc::EXDEV) {
+                     // Fallback to copy+delete
+                     copy::copy_path(
+                        src, 
+                        &dst_path, 
+                        false, 
+                        preserve, 
+                        test_mode, 
+                        cli, 
+                        excludes, 
+                        progress_callback.clone(),
+                        on_new_file.clone()
+                     ).await?;
+                     fs::remove_file(src).await?;
+                } else {
+                    return Err(e.into());
+                }
+            }
         }
     } else if recursive && src.is_dir() {
         let src_name = src
@@ -87,16 +112,86 @@ where
             dst.to_path_buf()
         };
 
-        if cli.is_dry_run() {
-            println!(
-                "Would move directory '{}' to '{}'",
-                src.display(),
-                new_dst.display()
-            );
-            Ok(())
+        // If excludes are present OR dry-run, we must inspect contents
+        if !excludes.is_empty() || cli.is_dry_run() {
+            if cli.is_dry_run() {
+                 if !new_dst.exists() {
+                     print_dry_run(
+                        ActionType::Add, // Moves involving dir creation
+                        &src.to_string_lossy(),
+                        Some(&format!("(DIR) -> {}", new_dst.display()))
+                     );
+                 }
+                 
+                 // Simulate walking to show all moves
+                 for entry in traversal::walk(src, true, false, 1, excludes) {
+                     let entry = entry?;
+                     let path = entry.path();
+                     let relative_path = path.strip_prefix(src)?;
+                     let target_path = new_dst.join(relative_path);
+                     
+                     if path.is_dir() {
+                         if !target_path.exists() {
+                             print_dry_run(
+                                ActionType::Add, // Creating dir
+                                &path.to_string_lossy(),
+                                Some(&format!("(DIR) -> {}", target_path.display()))
+                            );
+                         }
+                     } else {
+                         print_dry_run(
+                            ActionType::Move, 
+                            &path.to_string_lossy(),
+                            Some(&target_path.to_string_lossy())
+                        );
+                     }
+                 }
+                 return Ok(());
+            }
+
+            // Real run with excludes: We CANNOT use fs::rename (it ignores excludes)
+            // Fallback to copy + remove source files
+            
+            // 1. Copy
+            copy::copy_path(
+                src,
+                dst, 
+                recursive,
+                preserve,
+                test_mode.clone(),
+                cli,
+                excludes,
+                progress_callback.clone(),
+                on_new_file.clone()
+            ).await?;
+
+            // 2. Remove source files (that were copied)
+            remove_directory_contents(src, excludes).await?;
+            
+            // 3. Try to remove the source directory itself (only if empty)
+            let _ = fs::remove_dir(src).await; 
+
         } else {
-            // For directories, try renaming the whole directory
-            fs::rename(src, &new_dst).await
+            // No excludes, not dry-run -> Fast path
+             if let Err(e) = fs::rename(src, &new_dst).await {
+                // EXDEV -> Copy + Delete
+                if e.raw_os_error() == Some(libc::EXDEV) {
+                     copy::copy_path(
+                        src,
+                        dst,
+                        recursive,
+                        preserve,
+                        test_mode,
+                        cli,
+                        excludes,
+                        progress_callback.clone(),
+                        on_new_file.clone()
+                    ).await?;
+                    fs::remove_dir_all(src).await?;
+                } else {
+                    return Err(e.into());
+                }
+            }
         }
     } else if src.is_dir() {
         bail!(
@@ -109,39 +204,6 @@ where
             src.display()
         );
     };
-
-    // If rename failed (e.g., across filesystems), fall back to copy and delete
-    // Note: If dry_run, move_result is Ok(()), so we won't enter here, which is correct.
-    if let Err(e) = move_result {
-        // Only proceed with copy+delete if it's a cross-device error
-        if e.raw_os_error() == Some(libc::EXDEV) {
-            // First copy everything (copy_path handles exclude and dry_run, though we already handled dry_run above)
-            copy::copy_path(
-                src,
-                dst,
-                recursive,
-                preserve,
-                test_mode,
-                cli,
-                excludes,
-                progress_callback,
-                on_new_file,
-            )
-            .await?;
-
-            // Then remove the source
-            if src.is_file() {
-                fs::remove_file(src).await?;
-            } else if recursive && src.is_dir() {
-                // Remove directory and all its contents
-                remove_directory_contents(src, excludes).await?;
-                fs::remove_dir(src).await?;
-            }
-        } else {
-            // If it's a different error, propagate it
-            return Err(e.into());
-        }
-    }
 
     Ok(())
 }
@@ -168,7 +230,11 @@ async fn remove_directory_contents(dir: &Path, excludes: &[regex::Regex]) -> Res
         if path.is_file() {
             fs::remove_file(path).await?;
         } else if path.is_dir() {
-            fs::remove_dir(path).await?;
+            // remove_dir fails if not empty (e.g. contains excluded files)
+            // We ignore error here? 
+            // If it contains excluded files, we SHOULD NOT remove it.
+            // fs::remove_dir ensures this.
+            let _ = fs::remove_dir(path).await;
         }
     }
 
