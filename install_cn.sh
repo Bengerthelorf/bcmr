@@ -63,8 +63,13 @@ echo -e "${BLUE}>>> Downloading...${NC}"
 if curl -L --fail --progress-bar -o "${TMP_DIR}/${ASSET_NAME}" "$DOWNLOAD_URL"; then
     echo -e "${GREEN}Download successful.${NC}"
 else
-    echo -e "${RED}Download failed! Please check if the release asset exists.${NC}"
-    exit 1
+    echo -e "${RED}Standard download failed. Retrying with TLS v1.2 / HTTP 1.1...${NC}"
+    if curl -L --fail --progress-bar --tlsv1.2 --http1.1 -o "${TMP_DIR}/${ASSET_NAME}" "$DOWNLOAD_URL"; then
+        echo -e "${GREEN}Download successful (TLS v1.2 / HTTP 1.1).${NC}"
+    else
+        echo -e "${RED}Download failed! Please check if the release asset exists or if you have network issues.${NC}"
+        exit 1
+    fi
 fi
 
 # Extract
