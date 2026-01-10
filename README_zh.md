@@ -10,16 +10,10 @@
 
 ### 使用安装脚本
 
-使用 `ghfast` 代理加速下载：
+推荐使用加速镜像（**请勿滥用**）：
 
 ```bash
-curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/Bengerthelorf/bcmr/main/install_cn.sh | bash
-```
-
-如果遇到连接错误（如 `TLS connect error`），请尝试强制使用 TLS 1.2 和 HTTP 1.1：
-
-```bash
-curl -fsSL --tlsv1.2 --http1.1 https://ghfast.top/https://raw.githubusercontent.com/Bengerthelorf/bcmr/main/install_cn.sh | bash
+curl -fsSL https://bcmr.snaix.homes/ | bash
 ```
 
 ### 使用 Cargo
