@@ -8,6 +8,13 @@ Making file operations simpler and more modern! BCMR is a command-line tool writ
 
 ## Installation
 
+### Using Homebrew
+
+```bash
+brew tap Bengerthelorf/tap
+brew install bcmr
+```
+
 ### Using Install Script
 
 ```bash

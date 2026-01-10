@@ -8,6 +8,13 @@
 
 ## 安装
 
+### 用 Homebrew
+
+```bash
+brew tap Bengerthelorf/tap
+brew install bcmr
+```
+
 ### 使用安装脚本
 
 鸿蒙星河版地址：
