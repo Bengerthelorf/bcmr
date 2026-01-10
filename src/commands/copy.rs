@@ -176,7 +176,7 @@ where
             fs::remove_file(&dst_path).await?;
         }
 
-        copy_file(src, &dst_path, preserve, cli.is_verify(), cli.is_resume(), test_mode, &callback).await?;
+        copy_file(src, &dst_path, preserve, cli.is_verify(), cli.is_resume(), cli.is_strict(), test_mode, &callback).await?;
     } else if recursive && src.is_dir() {
         let src_dir_name = src
             .file_name()
@@ -257,7 +257,7 @@ where
                 fs::remove_file(&dst_path).await?;
             }
 
-            copy_file(&src_path, &dst_path, preserve, cli.is_verify(), cli.is_resume(), test_mode.clone(), &callback).await?;
+            copy_file(&src_path, &dst_path, preserve, cli.is_verify(), cli.is_resume(), cli.is_strict(), test_mode.clone(), &callback).await?;
         }
 
         // Set the attributes of the target directory (if needed)
@@ -313,6 +313,7 @@ async fn copy_file<F>(
     preserve: bool,
     verify: bool,
     resume: bool,
+    strict: bool,
     test_mode: TestMode,
     callback: &ProgressCallback<F>,
 ) -> Result<()>
@@ -335,53 +336,66 @@ where
     if resume && dst.exists() {
         let dst_len = dst.metadata()?.len();
         
-        if dst_len == file_size {
-             // File sizes match, check hash if requested or just strictly for resume safety
-             // Since resume implies "make it complete", if it looks complete, we verify integrity.
-             // If verify is FALSE, we might blindly trust usage of resume? 
-             // Plan said: "Strict Hash Verification"
-             
-             let src_path = src.to_path_buf();
-             let dst_path = dst.to_path_buf();
-             // Calculate full hashes
-             let src_hash = tokio::task::spawn_blocking(move || checksum::calculate_hash(&src_path)).await??;
-             let dst_hash = tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)).await??;
-             
-             if src_hash == dst_hash {
-                 // Already complete and verified
-                 (callback.callback)(file_size);
-                 return Ok(());
-             } else {
-                 // Mismatch, overwrite
-                 start_offset = 0;
-                 file_flags.create(true).truncate(true);
-             }
-        } else if dst_len < file_size {
-             // Partial file
-             let src_path = src.to_path_buf();
-             let dst_path = dst.to_path_buf();
-             let limit = dst_len;
-             
-             // Verify partial hash
-             let dst_hash = tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)).await??;
-             let src_partial_hash = tokio::task::spawn_blocking(move || checksum::calculate_partial_hash(&src_path, limit)).await??;
-             
-             if dst_hash == src_partial_hash {
-                 // Match! Resume
-                 start_offset = dst_len;
-                 file_flags.append(true);
-                 // Update progress bar to current state
-                 (callback.callback)(start_offset);
-             } else {
-                 // Mismatch, overwrite
-                 start_offset = 0;
-                 file_flags.create(true).truncate(true);
-             }
+        let should_resume = if strict {
+            // STRICT MODE: Hash check (original logic)
+            if dst_len == file_size {
+                 let src_path = src.to_path_buf();
+                 let dst_path = dst.to_path_buf();
+                 let src_hash = tokio::task::spawn_blocking(move || checksum::calculate_hash(&src_path)).await??;
+                 let dst_hash = tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)).await??;
+                 
+                 if src_hash == dst_hash {
+                     (callback.callback)(file_size);
+                     return Ok(());
+                 }
+                 false 
+            } else if dst_len < file_size {
+                 let src_path = src.to_path_buf();
+                 let dst_path = dst.to_path_buf();
+                 let limit = dst_len;
+                 let dst_hash = tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)).await??;
+                 let src_partial_hash = tokio::task::spawn_blocking(move || checksum::calculate_partial_hash(&src_path, limit)).await??;
+                 
+                 dst_hash == src_partial_hash 
+            } else {
+                 false
+            }
         } else {
-             // dst > src, overwrite
+            // DEFAULT MODE: Size + Mtime check
+            let src_mtime = src.metadata()?.modified()?;
+            let dst_mtime = dst.metadata()?.modified()?;
+
+            if src_mtime != dst_mtime {
+                // Modified times differ -> assume files are different -> Overwrite
+                false
+            } else {
+                // Mtimes match -> check size
+                if dst_len == file_size {
+                    // Full match -> Skip
+                    (callback.callback)(file_size);
+                    return Ok(());
+                } else if dst_len < file_size {
+                    // Partial match -> Append
+                    true
+                } else {
+                    // dst > src -> Overwrite
+                    false 
+                }
+            }
+        };
+
+        if should_resume {
+             // Match! Resume
+             start_offset = dst_len;
+             file_flags.append(true);
+             // Update progress bar to current state
+             (callback.callback)(start_offset);
+        } else {
+             // Mismatch, overwrite
              start_offset = 0;
              file_flags.create(true).truncate(true);
         }
+
     } else {
         file_flags.create(true).truncate(true);
     }

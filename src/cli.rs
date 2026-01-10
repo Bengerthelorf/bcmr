@@ -90,12 +90,16 @@ pub enum Commands {
         test_mode: Option<TestMode>,
 
         /// Verify file integrity after copy
-        #[arg(long, default_value_t = false)]
+        #[arg(short = 'V', long, default_value_t = false)]
         verify: bool,
 
         /// Resume interrupted copy
-        #[arg(long, default_value_t = false)]
+        #[arg(short = 'C', long, default_value_t = false)]
         resume: bool,
+
+        /// Use strict hash verification for resume
+        #[arg(short = 's', long, default_value_t = false)]
+        strict: bool,
     },
 
     /// Move files or directories
@@ -138,12 +142,16 @@ pub enum Commands {
         test_mode: Option<TestMode>,
 
         /// Verify file integrity after move
-        #[arg(long, default_value_t = false)]
+        #[arg(short = 'V', long, default_value_t = false)]
         verify: bool,
 
         /// Resume interrupted move (cross-device fallback only)
-        #[arg(long, default_value_t = false)]
+        #[arg(short = 'C', long, default_value_t = false)]
         resume: bool,
+
+        /// Use strict hash verification for resume
+        #[arg(short = 's', long, default_value_t = false)]
+        strict: bool,
     },
 
     /// Remove files or directories
@@ -278,6 +286,13 @@ impl Commands {
     pub fn is_resume(&self) -> bool {
         match self {
             Commands::Copy { resume, .. } | Commands::Move { resume, .. } => *resume,
+            _ => false,
+        }
+    }
+
+    pub fn is_strict(&self) -> bool {
+        match self {
+            Commands::Copy { strict, .. } | Commands::Move { strict, .. } => *strict,
             _ => false,
         }
     }

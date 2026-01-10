@@ -98,8 +98,9 @@ Options:
 - `-y, --yes`: Skip overwrite confirmation
 - `-e, --exclude <PATTERN>`: Exclude files/directories matching regex
 - `-t, --tui`: Use plain text mode
-- `--verify`: Verify file integrity after copy
-- `--resume`: Resume interrupted copy (with strict hash verification)
+- `-V, --verify`: Verify file integrity after copy
+- `-C, --resume`: Resume interrupted copy (Size + Mtime check)
+- `-s, --strict`: Use strict hash verification for resume
 - `-n, --dry-run`: Dry run (no changes)
 - `-h, --help`: Print help information
 
@@ -148,8 +149,9 @@ Available options:
 - `-n, --dry-run`: Preview operation without making changes
 - `-e, --exclude=<pattern>`: Exclude matching files (Regex)
 - `-t, --tui`: Use plain text mode
-- `--verify`: Verify file integrity after move
-- `--resume`: Resume interrupted move (cross-device fallback only)
+- `-V, --verify`: Verify file integrity after move
+- `-C, --resume`: Resume interrupted move (cross-device fallback only)
+- `-s, --strict`: Use strict hash verification for resume
 
 Examples:
 
