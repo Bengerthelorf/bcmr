@@ -11,7 +11,7 @@ Making file operations simpler and more modern! BCMR is a command-line tool writ
 ### Using Install Script
 
 ```bash
-curl -fsSL https://https://raw.githubusercontent.com/Bengerthelorf/bcmr/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Bengerthelorf/bcmr/main/install.sh | bash
 ```
 
 ### Using Cargo
