@@ -1,10 +1,11 @@
 use crate::cli::{Commands, TestMode};
+use crate::core::traversal;
+
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use walkdir::WalkDir;
 
 pub struct FileToOverwrite {
     pub path: PathBuf,
@@ -15,24 +16,15 @@ pub async fn check_overwrites(
     sources: &[PathBuf],
     dst: &Path,
     recursive: bool,
-    cli: &Commands,
+    _cli: &Commands,
     excludes: &[regex::Regex],
 ) -> Result<Vec<FileToOverwrite>> {
     let mut files_to_overwrite = Vec::new();
 
-    // If we have multiple sources, dst MUST be a directory (or we bail, but validation might happen earlier)
-    // Actually, cp file1 file2 file3 -> fails. cp file1 file2 dir -> works.
     let dst_is_dir = dst.exists() && dst.is_dir();
 
-    // If multiple sources and dest is not a dir (and exists), we can't proceed really, but let's check basic logic.
-    if sources.len() > 1 && !dst_is_dir {
-        // We will fail later, but here we just check overwrites if we were to proceed?
-        // Let's assume the caller ensures validity or we check it here.
-        // But for overwrite check, we need to know the target path.
-    }
-
     for src in sources {
-        if cli.should_exclude(&src.to_string_lossy(), excludes) {
+        if traversal::is_excluded(src, excludes) {
             continue;
         }
 
@@ -43,11 +35,10 @@ pub async fn check_overwrites(
                         .ok_or_else(|| anyhow::anyhow!("Invalid source file name"))?,
                 )
             } else {
-                // If single source and dest is file/doesn't exist
                 dst.to_path_buf()
             };
 
-            if dst_path.exists() && !cli.should_exclude(&dst_path.to_string_lossy(), excludes) {
+            if dst_path.exists() && !traversal::is_excluded(&dst_path, excludes) {
                 files_to_overwrite.push(FileToOverwrite {
                     path: dst_path,
                     is_dir: false,
@@ -65,13 +56,9 @@ pub async fn check_overwrites(
 
             // If the target directory exists, check for files that will be overwritten
             if new_dst.exists() {
-                for entry in WalkDir::new(src).min_depth(1) {
+                for entry in traversal::walk(src, true, false, 1, excludes) {
                     let entry = entry?;
                     let path = entry.path();
-
-                    if cli.should_exclude(&path.to_string_lossy(), excludes) {
-                        continue;
-                    }
 
                     let relative_path = path.strip_prefix(src)?;
                     let target_path = new_dst.join(relative_path);
@@ -99,21 +86,16 @@ fn get_total_size_sync(
     let mut total_size = 0;
 
     for src in sources {
-        // Simple exclude check without CLI dependency
-        let src_str = src.to_string_lossy();
-        if excludes.iter().any(|re| re.is_match(&src_str)) {
+        if traversal::is_excluded(&src, &excludes) {
             continue;
         }
 
         if recursive && src.is_dir() {
-            for entry in WalkDir::new(src).min_depth(1) {
+            for entry in traversal::walk(&src, true, false, 1, &excludes) {
                 let entry = entry?;
                 let path = entry.path();
                 if path.is_file() {
-                    let path_str = path.to_string_lossy();
-                    if !excludes.iter().any(|re| re.is_match(&path_str)) {
-                        total_size += entry.metadata()?.len();
-                    }
+                    total_size += entry.metadata()?.len();
                 }
             }
         } else if src.is_file() {
@@ -127,7 +109,7 @@ fn get_total_size_sync(
 pub async fn get_total_size(
     sources: &[PathBuf],
     recursive: bool,
-    _cli: &Commands, // We don't use simple string exclude anymore, only compiled regexes
+    _cli: &Commands,
     excludes: &[regex::Regex],
 ) -> Result<u64> {
     let sources = sources.to_vec();
@@ -162,7 +144,7 @@ where
     };
 
     // Main exclusion check for the root item
-    if cli.should_exclude(&src.to_string_lossy(), excludes) {
+    if traversal::is_excluded(src, excludes) {
         return Ok(());
     }
 
@@ -210,10 +192,6 @@ where
                 src.display(),
                 new_dst.display()
             );
-            // In dry run we also iterate to show what files would be copied?
-            // "Would copy ..." is implemented below for recursive files if we want verbose dry run.
-            // For now, let's just log the directory copy and walk to log files?
-            // But we simulate the walk.
         }
 
         // Create the target directory (if it does not exist)
@@ -222,19 +200,13 @@ where
         }
 
         // Collect files and directories to copy
-        // We use WalkDir even in dry-run to show what would happen or to at least process excludes.
-        // But for dry-run of a huge dir, maybe just saying "Would copy directory recursively" is enough?
-        // User requirements: "Dry run... preview operations". Detailed is better.
-
-        // Note: WalkDir returns entries in current dir.
         let mut files_to_copy = Vec::new();
-        for entry in WalkDir::new(src).min_depth(1) {
+        // Use unified traversal
+        for entry in traversal::walk(src, true, false, 1, excludes) {
             let entry = entry?;
             let path = entry.path();
-
-            if cli.should_exclude(&path.to_string_lossy(), excludes) {
-                continue;
-            }
+            
+            // Exclude check is handled by traversal::walk now!
 
             let relative_path = path.strip_prefix(src)?;
             let target_path = new_dst.join(relative_path);

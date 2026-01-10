@@ -206,9 +206,7 @@ impl Commands {
         }
     }
 
-    pub fn should_exclude(&self, path: &str, compiled_excludes: &[regex::Regex]) -> bool {
-        compiled_excludes.iter().any(|re| re.is_match(path))
-    }
+
 
     pub fn should_prompt_for_overwrite(&self) -> bool {
         match self {

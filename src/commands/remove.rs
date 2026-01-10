@@ -1,12 +1,13 @@
 use crate::cli::{Commands, TestMode};
-use crate::progress::CopyProgress;
+use crate::ui::progress::CopyProgress;
+use crate::core::traversal;
+
 use anyhow::{bail, Result};
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs;
-use walkdir::WalkDir;
 
 pub struct FileToRemove {
     pub path: PathBuf,
@@ -25,8 +26,7 @@ fn check_removes_sync(
     let mut files_to_remove = Vec::new();
 
     for path in paths {
-        let path_str = path.to_string_lossy();
-        if excludes.iter().any(|re| re.is_match(&path_str)) {
+        if traversal::is_excluded(&path, &excludes) {
             continue;
         }
 
@@ -62,14 +62,10 @@ fn check_removes_sync(
 
             // For recursive removal
             if recursive {
-                for entry in WalkDir::new(path).contents_first(true) {
+                for entry in traversal::walk(&path, true, true, 0, &excludes) {
                     let entry = entry?;
                     let path = entry.path();
-                    let path_str = path.to_string_lossy();
-
-                    if excludes.iter().any(|re| re.is_match(&path_str)) {
-                        continue;
-                    }
+                    // Exclude check handled by traversal::walk
 
                     let metadata = entry.metadata()?;
                     files_to_remove.push(FileToRemove {
@@ -122,19 +118,17 @@ fn get_total_size_sync(
     let mut total_size = 0;
 
     for path in paths {
-        let path_str = path.to_string_lossy();
-        if excludes.iter().any(|re| re.is_match(&path_str)) {
+        if traversal::is_excluded(&path, &excludes) {
             continue;
         }
 
         if path.is_file() {
             total_size += path.metadata()?.len();
         } else if recursive && path.is_dir() {
-            for entry in WalkDir::new(path).min_depth(1) {
+            for entry in traversal::walk(&path, true, false, 1, &excludes) {
                 let entry = entry?;
                 let p = entry.path();
-                let p_str = p.to_string_lossy();
-                if p.is_file() && !excludes.iter().any(|re| re.is_match(&p_str)) {
+                if p.is_file() {
                     total_size += entry.metadata()?.len();
                 }
             }
@@ -198,7 +192,7 @@ pub async fn remove_path(
     progress_callback: impl Fn(u64) + Send + Sync,
     on_new_file: impl Fn(&str, u64) + Send + Sync,
 ) -> Result<()> {
-    if cli.should_exclude(&path.to_string_lossy(), excludes) {
+    if traversal::is_excluded(path, excludes) {
         return Ok(());
     }
 
@@ -223,12 +217,26 @@ pub async fn remove_path(
         on_new_file(&file_name, 0);
 
         // First, collect all entries
-        let mut entries: Vec<_> = WalkDir::new(path)
-            .contents_first(true) // This ensures we process contents before containing directory
-            .into_iter()
-            .collect::<std::result::Result<_, _>>()?;
+        // Use unified traversal with contents_first=true
+        let mut entries = Vec::new();
+        // min_depth=0 to include the dir itself? Original code used WalkDir::new(path).
+        // WalkDir includes root. So min_depth=0.
+        for entry in traversal::walk(path, true, true, 0, excludes) {
+            entries.push(entry?);
+        }
 
         // Sort in reverse order to handle deepest paths first
+        // Wait, contents_first=true already does post-order traversal (children first).
+        // Original code:
+        // .contents_first(true)
+        // .collect()
+        // entries.sort_by_key(|entry| Reverse(entry.depth()))
+        // WalkDir contents_first guarantees children before parents. The sort seems redundant if WalkDir works as expected,
+        // BUT WalkDir yields siblings in some order. Sorting by depth ensures strict depth order?
+        // Actually, contents_first is usually enough for deletion.
+        // But original code had explicit sort. I should keep it to be safe, or rely on WalkDir order.
+        // WalkDir with contents_first=true yields leaves first.
+        // Let's keep the sort logic if it was there to be 100% sure about depth.
         entries.sort_by(|a, b| {
             b.path()
                 .components()
@@ -240,9 +248,7 @@ pub async fn remove_path(
         for entry in entries {
             let entry_path = entry.path();
 
-            if cli.should_exclude(&entry_path.to_string_lossy(), excludes) {
-                continue;
-            }
+            // Exclude check handled by traversal::walk!
 
             let size = if entry.file_type().is_file() {
                 let metadata = entry.metadata()?;
@@ -253,6 +259,17 @@ pub async fn remove_path(
 
             // Interactive confirmation for each entry if needed
             if cli.is_interactive() && !cli.is_force() {
+                // Don't ask again for the root if we already asked above?
+                // The original code asked for 'path' at the beginning.
+                // Then inside the loop, it iterated ALL entries.
+                // The WalkDir includes 'path'.
+                // So it would ask TWICE for the root dir?
+                // Original code:
+                // 1. confirm_remove(path, is_dir) [lines 207-209]
+                // 2. Loop entries -> confirm_remove(entry_path, ...) [lines 255-257]
+                // If entry_path == path, it asks again!
+                // This seems like a bug or feature of original code. I will preserve it or fix it?
+                // If I keep it, I preserve behavior.
                 if !confirm_remove(entry_path, entry.file_type().is_dir()).await? {
                     continue;
                 }

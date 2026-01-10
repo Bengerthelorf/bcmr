@@ -1,9 +1,10 @@
 use crate::cli::{Commands, TestMode};
-use crate::copy;
+use crate::commands::copy;
+use crate::core::traversal;
+
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 use tokio::fs;
-use walkdir::WalkDir;
 
 // Reuse FileToOverwrite from copy module
 pub use copy::FileToOverwrite;
@@ -43,7 +44,7 @@ pub async fn move_path<F>(
 where
     F: Fn(u64) + Send + Sync,
 {
-    if cli.should_exclude(&src.to_string_lossy(), excludes) {
+    if traversal::is_excluded(src, excludes) {
         return Ok(());
     }
 
@@ -133,7 +134,7 @@ where
                 fs::remove_file(src).await?;
             } else if recursive && src.is_dir() {
                 // Remove directory and all its contents
-                remove_directory_contents(src).await?;
+                remove_directory_contents(src, excludes).await?;
                 fs::remove_dir(src).await?;
             }
         } else {
@@ -145,19 +146,25 @@ where
     Ok(())
 }
 
-async fn remove_directory_contents(dir: &Path) -> Result<()> {
+async fn remove_directory_contents(dir: &Path, excludes: &[regex::Regex]) -> Result<()> {
     // Remove contents in reverse order (files first, then directories)
-    let mut entries: Vec<_> = WalkDir::new(dir)
-        .min_depth(1)
-        .contents_first(true) // This ensures we process files before directories
-        .into_iter()
-        .collect::<std::result::Result<_, _>>()?;
+    // Use unified traversal logic
+    let mut entries = Vec::new();
+    for entry in traversal::walk(dir, true, true, 0, excludes) {
+        entries.push(entry?);
+    }
 
     // Sort in reverse order to handle deeper paths first
-    entries.sort_by_key(|entry| std::cmp::Reverse(entry.depth()));
+    entries.sort_by(|a, b| {
+        b.path()
+            .components()
+            .count()
+            .cmp(&a.path().components().count())
+    });
 
     for entry in entries {
         let path = entry.path();
+        // Exclude check handled by traversal::walk!
         if path.is_file() {
             fs::remove_file(path).await?;
         } else if path.is_dir() {

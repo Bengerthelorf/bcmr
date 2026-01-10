@@ -1,18 +1,17 @@
 mod cli;
 mod config;
-mod copy;
-mod init;
-mod r#move;
-mod progress;
-mod remove;
+mod core;
+mod commands;
+mod ui;
 
 use crate::config::CONFIG;
 use anyhow::{bail, Result};
 use cli::Commands;
 use parking_lot::Mutex;
-use progress::CopyProgress;
+use ui::progress::CopyProgress;
 use std::io::{self, Write};
 use std::sync::Arc;
+
 use tokio::signal::ctrl_c;
 use tokio::time::Duration;
 
@@ -20,7 +19,7 @@ fn is_plain_mode_enabled(args: &Commands) -> bool {
     args.is_tui_mode() || CONFIG.progress.style.eq_ignore_ascii_case("plain")
 }
 
-async fn confirm_overwrite(files: &[copy::FileToOverwrite]) -> Result<bool> {
+async fn confirm_overwrite(files: &[commands::copy::FileToOverwrite]) -> Result<bool> {
     println!("\nThe following items will be overwritten:");
     for file in files {
         println!(
@@ -39,7 +38,7 @@ async fn confirm_overwrite(files: &[copy::FileToOverwrite]) -> Result<bool> {
     Ok(input.trim().to_lowercase() == "y")
 }
 
-async fn confirm_removal(files: &[remove::FileToRemove]) -> Result<bool> {
+async fn confirm_removal(files: &[commands::remove::FileToRemove]) -> Result<bool> {
     // Calculate total size and item counts
     let mut total_size = 0u64;
     let mut file_count = 0;
@@ -101,7 +100,7 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
     // If force is specified, check the files to be overwritten
     if args.is_force() {
         let files_to_overwrite =
-            copy::check_overwrites(sources, dest, args.is_recursive(), args, &excludes).await?;
+        commands::copy::check_overwrites(sources, dest, args.is_recursive(), args, &excludes).await?;
 
         // If there are files to overwrite and confirmation is needed
         if !files_to_overwrite.is_empty() && args.should_prompt_for_overwrite() {
@@ -117,7 +116,7 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
     }
 
     // Calculate total size
-    let total_size = copy::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
+    let total_size = commands::copy::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
     let progress = Arc::new(Mutex::new(CopyProgress::new(
         total_size,
         is_plain_mode_enabled(args),
@@ -157,7 +156,7 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
     // Loop through sources and copy each
     let mut success = true;
     for src in sources {
-        let result = copy::copy_path(
+        let result = commands::copy::copy_path(
             src,
             dest,
             args.is_recursive(),
@@ -214,7 +213,7 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
 
     if args.is_force() {
         let files_to_overwrite =
-            r#move::check_overwrites(sources, dest, args.is_recursive(), args, &excludes).await?;
+            commands::r#move::check_overwrites(sources, dest, args.is_recursive(), args, &excludes).await?;
 
         if !files_to_overwrite.is_empty() && args.should_prompt_for_overwrite() {
             if !confirm_overwrite(&files_to_overwrite).await? {
@@ -228,7 +227,7 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
         println!("DRY RUN MODE: No changes will be made.");
     }
 
-    let total_size = r#move::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
+    let total_size = commands::r#move::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
     let progress = Arc::new(Mutex::new(CopyProgress::new(
         total_size,
         is_plain_mode_enabled(args),
@@ -266,7 +265,7 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
 
     let mut success = true;
     for src in sources {
-        let result = r#move::move_path(
+        let result = commands::r#move::move_path(
             src,
             dest,
             args.is_recursive(),
@@ -312,7 +311,7 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
 
     // First check all files that will be removed
     let files_to_remove =
-        remove::check_removes(paths, args.is_recursive(), args, &excludes).await?;
+        commands::remove::check_removes(paths, args.is_recursive(), args, &excludes).await?;
 
     if args.is_dry_run() {
         println!("DRY RUN MODE: No changes will be made.");
@@ -387,7 +386,7 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
 
     // Use tokio::select! to handle both the remove operation and ctrl+c
     tokio::select! {
-        result = remove::remove_paths(
+        result = commands::remove::remove_paths(
             paths,
             test_mode,
             args,
@@ -426,7 +425,7 @@ fn handle_init_command(args: &Commands) -> Result<()> {
             no_cmd,
         } => {
             // 生成初始化脚本
-            let script = init::generate_init_script(shell, cmd, path.as_ref(), *no_cmd);
+            let script = commands::init::generate_init_script(shell, cmd, path.as_ref(), *no_cmd);
 
             // 直接打印到标准输出，这样就可以被 eval 捕获
             print!("{}", script);
