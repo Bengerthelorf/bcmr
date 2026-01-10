@@ -172,7 +172,7 @@ where
             return Ok(());
         }
 
-        if dst_path.exists() && cli.is_force() {
+        if dst_path.exists() && cli.is_force() && !cli.is_resume() && !cli.is_append() {
             fs::remove_file(&dst_path).await?;
         }
 
@@ -253,7 +253,7 @@ where
                 continue;
             }
 
-            if dst_path.exists() && cli.is_force() {
+            if dst_path.exists() && cli.is_force() && !cli.is_resume() && !cli.is_append() {
                 fs::remove_file(&dst_path).await?;
             }
 
@@ -334,7 +334,7 @@ where
     let mut file_flags = fs::OpenOptions::new();
     file_flags.write(true);
 
-    if resume && dst.exists() {
+    if (resume || append) && dst.exists() {
         let dst_len = dst.metadata()?.len();
         
         let should_resume = if strict {

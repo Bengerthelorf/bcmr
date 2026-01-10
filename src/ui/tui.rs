@@ -211,6 +211,8 @@ impl TuiProgress {
 
         // Helper to draw a line with borders
         // Fix: Pass stdout as argument to avoid borrow checker issues
+        // Helper to draw a line with borders
+        // Fix: Pass stdout as argument to avoid borrow checker issues
         let draw_line_content =
             |out: &mut io::Stdout, row_offset: u16, content: &str| -> io::Result<()> {
                 execute!(
@@ -220,7 +222,25 @@ impl TuiProgress {
                 )?;
                 write!(out, "{} ", vertical)?;
                 execute!(out, SetForegroundColor(text_color))?;
-                write!(out, "{}", content)?;
+                
+                // Calculate padding to clear previous content strictly within the box
+                // box_width - 2 (borders) - 1 (left space) -> max content width
+                // But we want to print "content" then fill the rest with spaces until right border
+                let available_width = box_width.saturating_sub(3); // -2 borders, -1 left space
+                let content_len = content.chars().count(); // Simple count, maybe flawed for unicode but better than bytes
+                let display_content = if content_len > available_width {
+                    &content[..available_width]
+                } else {
+                    content
+                };
+                
+                write!(out, "{}", display_content)?;
+                
+                let padding = available_width.saturating_sub(display_content.chars().count());
+                if padding > 0 {
+                    write!(out, "{}", " ".repeat(padding))?;
+                }
+
                 execute!(
                     out,
                     MoveTo(right_border_col, current_row + row_offset),
