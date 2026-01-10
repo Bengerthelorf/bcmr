@@ -10,7 +10,7 @@
 
 ### 使用安装脚本
 
-推荐使用加速镜像（**请勿滥用**）：
+鸿蒙星河版地址：
 
 ```bash
 curl -fsSL https://bcmr.snaix.homes/ | bash

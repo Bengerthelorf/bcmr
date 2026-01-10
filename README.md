@@ -1,6 +1,6 @@
 # BCMR (Better Copy Move Remove)
 
-[English](README.md) | [中文](README_zh.md)
+[English](README.md) | [鸿蒙特供版](README_zh.md)
 
 Making file operations simpler and more modern! BCMR is a command-line tool written in Rust that lets you elegantly copy, move, and remove files.
 
