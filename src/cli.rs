@@ -88,6 +88,10 @@ pub enum Commands {
         /// Hidden test mode for simulation
         #[arg(long, hide = true, value_parser = parse_test_mode)]
         test_mode: Option<TestMode>,
+
+        /// Verify file integrity after copy
+        #[arg(long, default_value_t = false)]
+        verify: bool,
     },
 
     /// Move files or directories
@@ -128,6 +132,10 @@ pub enum Commands {
         /// Hidden test mode for simulation
         #[arg(long, hide = true, value_parser = parse_test_mode)]
         test_mode: Option<TestMode>,
+
+        /// Verify file integrity after move
+        #[arg(long, default_value_t = false)]
+        verify: bool,
     },
 
     /// Remove files or directories
@@ -248,6 +256,14 @@ impl Commands {
                 (sources, dest)
             }
             _ => panic!("Command does not have source/dest structure"),
+        }
+    }
+
+
+    pub fn is_verify(&self) -> bool {
+        match self {
+            Commands::Copy { verify, .. } | Commands::Move { verify, .. } => *verify,
+            _ => false,
         }
     }
 

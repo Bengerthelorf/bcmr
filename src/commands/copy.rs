@@ -1,5 +1,6 @@
 use crate::cli::{Commands, TestMode};
 use crate::core::traversal;
+use crate::core::checksum;
 
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
@@ -175,7 +176,7 @@ where
             fs::remove_file(&dst_path).await?;
         }
 
-        copy_file(src, &dst_path, preserve, test_mode, &callback).await?;
+        copy_file(src, &dst_path, preserve, cli.is_verify(), test_mode, &callback).await?;
     } else if recursive && src.is_dir() {
         let src_dir_name = src
             .file_name()
@@ -256,7 +257,7 @@ where
                 fs::remove_file(&dst_path).await?;
             }
 
-            copy_file(&src_path, &dst_path, preserve, test_mode.clone(), &callback).await?;
+            copy_file(&src_path, &dst_path, preserve, cli.is_verify(), test_mode.clone(), &callback).await?;
         }
 
         // Set the attributes of the target directory (if needed)
@@ -310,6 +311,7 @@ async fn copy_file<F>(
     src: &Path,
     dst: &Path,
     preserve: bool,
+    verify: bool,
     test_mode: TestMode,
     callback: &ProgressCallback<F>,
 ) -> Result<()>
@@ -374,6 +376,17 @@ where
 
     if preserve {
         set_dir_attributes(src, dst).await?;
+    }
+
+    if verify {
+        let src_path = src.to_path_buf();
+        let dst_path = dst.to_path_buf();
+        let src_hash = tokio::task::spawn_blocking(move || checksum::calculate_hash(&src_path)).await??;
+        let dst_hash = tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)).await??;
+
+        if src_hash != dst_hash {
+            bail!("Verification failed: Hashes do not match for '{}'", dst.display());
+        }
     }
 
     Ok(())
