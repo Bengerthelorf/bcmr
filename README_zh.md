@@ -100,6 +100,7 @@ Options:
 - `-y, --yes`: 跳过覆盖确认
 - `-e, --exclude <PATTERN>`: 排除匹配正则的文件/目录
 - `-t, --tui`: 使用纯文本模式
+- `--verify`: 复制后校验文件完整性
 - `-n, --dry-run`: 试运行 (不产生更改)
 - `-h, --help`: 打印帮助信息
 
@@ -126,6 +127,9 @@ bcmr copy -f -y source.txt destination.txt
 
 # 使用正则排除复制 (排除 .git 文件夹和 .tmp 文件)
 bcmr copy -r --exclude="\.git","\.tmp$" src/ dest/
+
+# 复制并校验
+bcmr copy --verify critical_data.db /backup/
 ```
 
 ### Move 命令 (移动)
@@ -145,6 +149,7 @@ bcmr move [options] <source>... <destination>
 - `-n, --dry-run`: 预览操作而不进行实际更改
 - `-e, --exclude=<pattern>`: 排除匹配正则表达式的文件
 - `-t, --tui`: 使用纯文本模式
+- `--verify`: 移动后校验文件完整性
 
 示例：
 

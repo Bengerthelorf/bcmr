@@ -98,6 +98,7 @@ Options:
 - `-y, --yes`: Skip overwrite confirmation
 - `-e, --exclude <PATTERN>`: Exclude files/directories matching regex
 - `-t, --tui`: Use plain text mode
+- `--verify`: Verify file integrity after copy
 - `-n, --dry-run`: Dry run (no changes)
 - `-h, --help`: Print help information
 
@@ -124,6 +125,9 @@ bcmr copy -f -y source.txt destination.txt
 
 # Copy with Regex exclusions (exclude .git folder and .tmp files)
 bcmr copy -r --exclude="\.git","\.tmp$" src/ dest/
+
+# Copy with verification
+bcmr copy --verify critical_data.db /backup/
 ```
 
 ### Move Command (Move)
@@ -143,6 +147,7 @@ Available options:
 - `-n, --dry-run`: Preview operation without making changes
 - `-e, --exclude=<pattern>`: Exclude matching files (Regex)
 - `-t, --tui`: Use plain text mode
+- `--verify`: Verify file integrity after move
 
 Examples:
 
