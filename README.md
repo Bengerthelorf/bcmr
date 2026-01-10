@@ -99,6 +99,7 @@ Options:
 - `-e, --exclude <PATTERN>`: Exclude files/directories matching regex
 - `-t, --tui`: Use plain text mode
 - `--verify`: Verify file integrity after copy
+- `--resume`: Resume interrupted copy (with strict hash verification)
 - `-n, --dry-run`: Dry run (no changes)
 - `-h, --help`: Print help information
 
@@ -148,6 +149,7 @@ Available options:
 - `-e, --exclude=<pattern>`: Exclude matching files (Regex)
 - `-t, --tui`: Use plain text mode
 - `--verify`: Verify file integrity after move
+- `--resume`: Resume interrupted move (cross-device fallback only)
 
 Examples:
 

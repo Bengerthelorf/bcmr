@@ -101,6 +101,7 @@ Options:
 - `-e, --exclude <PATTERN>`: 排除匹配正则的文件/目录
 - `-t, --tui`: 使用纯文本模式
 - `--verify`: 复制后校验文件完整性
+- `--resume`: 断点续传 (启用严格哈希校验)
 - `-n, --dry-run`: 试运行 (不产生更改)
 - `-h, --help`: 打印帮助信息
 
@@ -150,6 +151,7 @@ bcmr move [options] <source>... <destination>
 - `-e, --exclude=<pattern>`: 排除匹配正则表达式的文件
 - `-t, --tui`: 使用纯文本模式
 - `--verify`: 移动后校验文件完整性
+- `--resume`: 断点续传 (仅限跨设备移动回退时)
 
 示例：
 

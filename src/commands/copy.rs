@@ -6,7 +6,7 @@ use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::fs::{self, File};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncSeekExt, SeekFrom};
 
 pub struct FileToOverwrite {
     pub path: PathBuf,
@@ -160,7 +160,7 @@ where
         };
 
         // For files, only check when the target file exists
-        if dst_path.exists() && !cli.is_force() {
+        if dst_path.exists() && !cli.is_force() && !cli.is_resume() {
             bail!(
                 "Destination '{}' already exists. Use -f to force overwrite.",
                 dst_path.display()
@@ -176,7 +176,7 @@ where
             fs::remove_file(&dst_path).await?;
         }
 
-        copy_file(src, &dst_path, preserve, cli.is_verify(), test_mode, &callback).await?;
+        copy_file(src, &dst_path, preserve, cli.is_verify(), cli.is_resume(), test_mode, &callback).await?;
     } else if recursive && src.is_dir() {
         let src_dir_name = src
             .file_name()
@@ -237,7 +237,7 @@ where
             }
 
             // Check each file to see if it needs to be overwritten
-            if dst_path.exists() && !cli.is_force() {
+            if dst_path.exists() && !cli.is_force() && !cli.is_resume() {
                 bail!(
                     "Destination '{}' already exists. Use -f to force overwrite.",
                     dst_path.display()
@@ -257,7 +257,7 @@ where
                 fs::remove_file(&dst_path).await?;
             }
 
-            copy_file(&src_path, &dst_path, preserve, cli.is_verify(), test_mode.clone(), &callback).await?;
+            copy_file(&src_path, &dst_path, preserve, cli.is_verify(), cli.is_resume(), test_mode.clone(), &callback).await?;
         }
 
         // Set the attributes of the target directory (if needed)
@@ -312,6 +312,7 @@ async fn copy_file<F>(
     dst: &Path,
     preserve: bool,
     verify: bool,
+    resume: bool,
     test_mode: TestMode,
     callback: &ProgressCallback<F>,
 ) -> Result<()>
@@ -327,8 +328,70 @@ where
 
     (callback.on_new_file)(&file_name, file_size);
 
+    let mut start_offset = 0;
+    let mut file_flags = fs::OpenOptions::new();
+    file_flags.write(true);
+
+    if resume && dst.exists() {
+        let dst_len = dst.metadata()?.len();
+        
+        if dst_len == file_size {
+             // File sizes match, check hash if requested or just strictly for resume safety
+             // Since resume implies "make it complete", if it looks complete, we verify integrity.
+             // If verify is FALSE, we might blindly trust usage of resume? 
+             // Plan said: "Strict Hash Verification"
+             
+             let src_path = src.to_path_buf();
+             let dst_path = dst.to_path_buf();
+             // Calculate full hashes
+             let src_hash = tokio::task::spawn_blocking(move || checksum::calculate_hash(&src_path)).await??;
+             let dst_hash = tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)).await??;
+             
+             if src_hash == dst_hash {
+                 // Already complete and verified
+                 (callback.callback)(file_size);
+                 return Ok(());
+             } else {
+                 // Mismatch, overwrite
+                 start_offset = 0;
+                 file_flags.create(true).truncate(true);
+             }
+        } else if dst_len < file_size {
+             // Partial file
+             let src_path = src.to_path_buf();
+             let dst_path = dst.to_path_buf();
+             let limit = dst_len;
+             
+             // Verify partial hash
+             let dst_hash = tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)).await??;
+             let src_partial_hash = tokio::task::spawn_blocking(move || checksum::calculate_partial_hash(&src_path, limit)).await??;
+             
+             if dst_hash == src_partial_hash {
+                 // Match! Resume
+                 start_offset = dst_len;
+                 file_flags.append(true);
+                 // Update progress bar to current state
+                 (callback.callback)(start_offset);
+             } else {
+                 // Mismatch, overwrite
+                 start_offset = 0;
+                 file_flags.create(true).truncate(true);
+             }
+        } else {
+             // dst > src, overwrite
+             start_offset = 0;
+             file_flags.create(true).truncate(true);
+        }
+    } else {
+        file_flags.create(true).truncate(true);
+    }
+
     let mut src_file = File::open(src).await?;
-    let mut dst_file = File::create(dst).await?;
+    let mut dst_file = file_flags.open(dst).await?;
+
+    if start_offset > 0 {
+        src_file.seek(SeekFrom::Start(start_offset)).await?;
+    }
 
     let mut buffer = vec![0; 1024 * 1024]; // 1MB buffer
 
@@ -378,6 +441,10 @@ where
         set_dir_attributes(src, dst).await?;
     }
 
+    // Only run full verification if specifically requested AND we didn't just verify it fully above
+    // If we resumed (start_offset > 0) or overwrote, we might want to verify.
+    // Optimization: If we just verified full hash above (dst_len == file_size case), we returned early.
+    // So here we are in a case where we wrote/appended something.
     if verify {
         let src_path = src.to_path_buf();
         let dst_path = dst.to_path_buf();

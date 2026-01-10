@@ -22,3 +22,22 @@ pub fn calculate_hash(path: &Path) -> Result<String> {
     let result = hasher.finalize();
     Ok(format!("{:x}", result))
 }
+
+/// Calculates the SHA-256 hash of the first `limit` bytes of a file
+pub fn calculate_partial_hash(path: &Path, limit: u64) -> Result<String> {
+    let file = File::open(path).with_context(|| format!("Failed to open file: {}", path.display()))?;
+    let mut reader = BufReader::new(file).take(limit);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; 8192];
+
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+
+    let result = hasher.finalize();
+    Ok(format!("{:x}", result))
+}

@@ -92,6 +92,10 @@ pub enum Commands {
         /// Verify file integrity after copy
         #[arg(long, default_value_t = false)]
         verify: bool,
+
+        /// Resume interrupted copy
+        #[arg(long, default_value_t = false)]
+        resume: bool,
     },
 
     /// Move files or directories
@@ -136,6 +140,10 @@ pub enum Commands {
         /// Verify file integrity after move
         #[arg(long, default_value_t = false)]
         verify: bool,
+
+        /// Resume interrupted move (cross-device fallback only)
+        #[arg(long, default_value_t = false)]
+        resume: bool,
     },
 
     /// Remove files or directories
@@ -263,6 +271,13 @@ impl Commands {
     pub fn is_verify(&self) -> bool {
         match self {
             Commands::Copy { verify, .. } | Commands::Move { verify, .. } => *verify,
+            _ => false,
+        }
+    }
+
+    pub fn is_resume(&self) -> bool {
+        match self {
+            Commands::Copy { resume, .. } | Commands::Move { resume, .. } => *resume,
             _ => false,
         }
     }
