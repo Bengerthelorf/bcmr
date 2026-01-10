@@ -160,7 +160,7 @@ where
         };
 
         // For files, only check when the target file exists
-        if dst_path.exists() && !cli.is_force() && !cli.is_resume() {
+        if dst_path.exists() && !cli.is_force() && !cli.is_resume() && !cli.is_append() {
             bail!(
                 "Destination '{}' already exists. Use -f to force overwrite.",
                 dst_path.display()
@@ -176,7 +176,7 @@ where
             fs::remove_file(&dst_path).await?;
         }
 
-        copy_file(src, &dst_path, preserve, cli.is_verify(), cli.is_resume(), cli.is_strict(), test_mode, &callback).await?;
+        copy_file(src, &dst_path, preserve, cli.is_verify(), cli.is_resume(), cli.is_strict(), cli.is_append(), test_mode, &callback).await?;
     } else if recursive && src.is_dir() {
         let src_dir_name = src
             .file_name()
@@ -237,7 +237,7 @@ where
             }
 
             // Check each file to see if it needs to be overwritten
-            if dst_path.exists() && !cli.is_force() && !cli.is_resume() {
+            if dst_path.exists() && !cli.is_force() && !cli.is_resume() && !cli.is_append() {
                 bail!(
                     "Destination '{}' already exists. Use -f to force overwrite.",
                     dst_path.display()
@@ -257,7 +257,7 @@ where
                 fs::remove_file(&dst_path).await?;
             }
 
-            copy_file(&src_path, &dst_path, preserve, cli.is_verify(), cli.is_resume(), cli.is_strict(), test_mode.clone(), &callback).await?;
+            copy_file(&src_path, &dst_path, preserve, cli.is_verify(), cli.is_resume(), cli.is_strict(), cli.is_append(), test_mode.clone(), &callback).await?;
         }
 
         // Set the attributes of the target directory (if needed)
@@ -314,6 +314,7 @@ async fn copy_file<F>(
     verify: bool,
     resume: bool,
     strict: bool,
+    append: bool,
     test_mode: TestMode,
     callback: &ProgressCallback<F>,
 ) -> Result<()>
@@ -359,6 +360,19 @@ where
                  dst_hash == src_partial_hash 
             } else {
                  false
+            }
+        } else if append {
+            // APPEND MODE: Size check only (Ignore Mtime)
+            if dst_len == file_size {
+                // Size matches -> assume same file -> Skip
+                (callback.callback)(file_size);
+                return Ok(());
+            } else if dst_len < file_size {
+                // File smaller -> Append
+                true
+            } else {
+                // File larger -> Overwrite
+                false
             }
         } else {
             // DEFAULT MODE: Size + Mtime check

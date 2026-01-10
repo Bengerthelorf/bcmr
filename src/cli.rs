@@ -100,6 +100,10 @@ pub enum Commands {
         /// Use strict hash verification for resume
         #[arg(short = 's', long, default_value_t = false)]
         strict: bool,
+
+        /// Append data to existing file (ignores mtime, checks size only)
+        #[arg(short = 'a', long, default_value_t = false)]
+        append: bool,
     },
 
     /// Move files or directories
@@ -152,6 +156,10 @@ pub enum Commands {
         /// Use strict hash verification for resume
         #[arg(short = 's', long, default_value_t = false)]
         strict: bool,
+
+        /// Append data to existing file (ignores mtime, checks size only)
+        #[arg(short = 'a', long, default_value_t = false)]
+        append: bool,
     },
 
     /// Remove files or directories
@@ -181,7 +189,7 @@ pub enum Commands {
         dir: bool,
 
         /// Exclude files/directories that match these regex patterns
-        #[arg(long, value_name = "PATTERN", value_delimiter = ',')]
+        #[arg(short = 'e', long, value_name = "PATTERN", value_delimiter = ',')]
         exclude: Option<Vec<String>>,
 
         /// Enable inline TUI mode (classic 3-line display)
@@ -293,6 +301,13 @@ impl Commands {
     pub fn is_strict(&self) -> bool {
         match self {
             Commands::Copy { strict, .. } | Commands::Move { strict, .. } => *strict,
+            _ => false,
+        }
+    }
+
+    pub fn is_append(&self) -> bool {
+        match self {
+            Commands::Copy { append, .. } | Commands::Move { append, .. } => *append,
             _ => false,
         }
     }

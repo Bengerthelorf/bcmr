@@ -101,6 +101,7 @@ Options:
 - `-V, --verify`: Verify file integrity after copy
 - `-C, --resume`: Resume interrupted copy (Size + Mtime check)
 - `-s, --strict`: Use strict hash verification for resume
+- `-a, --append`: Append to existing file (ignores mtime/hash)
 - `-n, --dry-run`: Dry run (no changes)
 - `-h, --help`: Print help information
 
@@ -152,6 +153,7 @@ Available options:
 - `-V, --verify`: Verify file integrity after move
 - `-C, --resume`: Resume interrupted move (cross-device fallback only)
 - `-s, --strict`: Use strict hash verification for resume
+- `-a, --append`: Append to existing file (ignores mtime/hash)
 
 Examples:
 
@@ -188,7 +190,7 @@ Available options:
 - `-v, --verbose`: Show detailed removal process
 - `-d, --dir`: Remove empty directories
 - `-n, --dry-run`: Preview operation without making changes
-- `--exclude=<pattern>`: Exclude matching files (Regex)
+- `-e, --exclude=<pattern>`: Exclude matching files (Regex)
 - `-t, --tui`: Use plain text mode
 
 Examples:

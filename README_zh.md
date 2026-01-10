@@ -103,6 +103,7 @@ Options:
 - `-V, --verify`: 复制后校验文件完整性
 - `-C, --resume`: 断点续传 (检查大小和修改时间)
 - `-s, --strict`: 对续传启用严格哈希校验
+- `-a, --append`: 追加到现有文件 (忽略 mtime/哈希)
 - `-n, --dry-run`: 试运行 (不产生更改)
 - `-h, --help`: 打印帮助信息
 
@@ -154,6 +155,7 @@ bcmr move [options] <source>... <destination>
 - `-V, --verify`: 移动后校验文件完整性
 - `-C, --resume`: 断点续传 (仅限跨设备移动回退时)
 - `-s, --strict`: 对续传启用严格哈希校验
+- `-a, --append`: 追加到现有文件 (忽略 mtime/哈希)
 
 示例：
 
@@ -190,7 +192,7 @@ bcmr remove [options] <path>...
 - `-v, --verbose`: 显示详细删除过程
 - `-d, --dir`: 删除空目录
 - `-n, --dry-run`: 预览操作而不进行实际更改
-- `--exclude=<pattern>`: 排除匹配正则表达式的文件
+- `-e, --exclude=<pattern>`: 排除匹配正则表达式的文件
 - `-t, --tui`: 使用纯文本模式
 
 示例：
