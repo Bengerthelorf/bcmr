@@ -1,6 +1,6 @@
 [package]
 name = "bcmr"
-version = "0.3.7"
+version = "0.3.8"
 edition = "2021"
 authors = ["Zane Leong"]
 description = "Better Copy Move Remove (BCMR) - A modern CLI tool for file operations with progress bar and advanced features"
