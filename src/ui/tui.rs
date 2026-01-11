@@ -274,7 +274,7 @@ impl TuiProgress {
         write!(stdout, "{}", theme.bar_incomplete_char.repeat(empty_len))?;
 
         execute!(stdout, SetForegroundColor(text_color))?;
-        write!(stdout, "] {}%", total_progress)?;
+        write!(stdout, "] {:>3}%", total_progress)?;
 
         execute!(
             stdout,
@@ -335,7 +335,7 @@ impl TuiProgress {
         write!(stdout, "{}", theme.bar_incomplete_char.repeat(empty_len))?;
 
         execute!(stdout, SetForegroundColor(text_color))?;
-        write!(stdout, "] {}%", current_progress)?;
+        write!(stdout, "] {:>3}%", current_progress)?;
 
         execute!(
             stdout,
