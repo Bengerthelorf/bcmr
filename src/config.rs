@@ -6,6 +6,18 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub progress: ProgressConfig,
+    #[serde(default)]
+    pub copy: CopyConfig,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct CopyConfig {
+    #[serde(default = "default_reflink")]
+    pub reflink: String,
+}
+
+fn default_reflink() -> String {
+    "auto".to_string()
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -47,6 +59,7 @@ impl Default for Config {
                     box_style: "rounded".to_string(),
                 },
             },
+            copy: CopyConfig::default(),
         }
     }
 }
@@ -102,6 +115,11 @@ impl Config {
             .set_default(
                 "progress.layout.box_style",
                 defaults.progress.layout.box_style,
+            )
+            .unwrap()
+            .set_default(
+                "copy.reflink",
+                defaults.copy.reflink,
             )
             .unwrap();
 

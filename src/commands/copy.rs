@@ -248,7 +248,7 @@ where
             fs::remove_file(&dst_path).await?;
         }
 
-        copy_file(src, &dst_path, preserve, cli.is_verify(), cli.is_resume(), cli.is_strict(), cli.is_append(), cli.is_reflink(), test_mode, &callback).await?;
+        copy_file(src, &dst_path, preserve, cli.is_verify(), cli.is_resume(), cli.is_strict(), cli.is_append(), cli.get_reflink_mode(), test_mode, &callback).await?;
     } else if recursive && src.is_dir() {
         let src_dir_name = src
             .file_name()
@@ -369,7 +369,7 @@ where
                     cli.is_resume(),
                     cli.is_strict(),
                     cli.is_append(),
-                    cli.is_reflink(),
+                    cli.get_reflink_mode(),
                     test_mode.clone(),
                     &callback,
                 )
@@ -424,6 +424,13 @@ async fn set_dir_attributes(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+// Add to imports if not present. But create::config::CONFIG is needed.
+// Add `use crate::config::CONFIG;` to top of file? No, we need to import it.
+// Let's modify the imports first in a separate call if needed, or assume it's available?
+// Better to import it inside the function or make sure it's imported.
+// Let's assume we need to import it.
+// Better to update imports first.
+
 async fn copy_file<F>(
     src: &Path,
     dst: &Path,
@@ -432,7 +439,7 @@ async fn copy_file<F>(
     resume: bool,
     strict: bool,
     append: bool,
-    reflink: bool,
+    reflink_arg: Option<String>,
     test_mode: TestMode,
     callback: &ProgressCallback<F>,
 ) -> Result<()>
@@ -448,11 +455,44 @@ where
 
     (callback.on_new_file)(&file_name, file_size);
 
+    // Resolve Reflink Mode
+    // 1. CLI Arg
+    // 2. Config
+
+    // Resolve Reflink Mode
+    // 1. CLI Arg
+    // 2. Config
+
+    // Config: "never" -> Skip.
+    // Config: "auto" -> Attempt. If fail -> Fallback.
+
+    let config_reflink = &crate::config::CONFIG.copy.reflink;
+    
+    // Determine effective action
+    // Return: (try_reflink, fail_on_error)
+    let (try_reflink, fail_on_error) = if let Some(mode) = reflink_arg {
+         match mode.to_lowercase().as_str() {
+             "force" => (true, true),
+             "disable" => (false, false),
+             "auto" => (true, false),
+             _ => {
+                 // Should be unreachable due to main.rs validation, but safe fallback
+                 (true, false)
+             }
+         }
+    } else {
+        // CLI not present. Use config.
+        match config_reflink.to_lowercase().as_str() {
+            "never" | "disable" => (false, false),
+            _ => (true, false), // Default / "auto"
+        }
+    };
+
     // Try reflink if requested
-    if reflink {
+    if try_reflink {
         let src_path = src.to_path_buf();
         let dst_path = dst.to_path_buf();
-        let result = tokio::task::spawn_blocking(move || reflink::reflink(&src_path, &dst_path))
+        let result = tokio::task::spawn_blocking(move || reflink_copy::reflink(&src_path, &dst_path))
             .await?;
         
         match result {
@@ -461,13 +501,12 @@ where
                 (callback.callback)(file_size);
                 return Ok(());
             }
-            Err(_e) => {
-                // If reflink fails, we fall back to standard copy. 
-                // We could log this if we had a logger, but for now we silently fall back 
-                // as 'reflink' is often a "try best effort" optimization.
-                // However, explicitly requesting --reflink might imply "I want reflink or fail".
-                // But cp --reflink=auto behavior is safer.
-                // Let's print a debug message if verbose? (Not accessible here easily)
+            Err(e) => {
+                if fail_on_error {
+                    // Force mode failed
+                   bail!("Reflink failed (forced): {}", e);
+                }
+                // Auto mode failed -> Fallback to standard copy
             }
         }
     }

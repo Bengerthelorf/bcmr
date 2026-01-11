@@ -105,9 +105,10 @@ pub enum Commands {
         #[arg(short = 'a', long, default_value_t = false)]
         append: bool,
 
-        /// Use Copy-on-Write (reflink) if supported (APFS, Btrfs, XFS)
-        #[arg(long, default_value_t = false)]
-        reflink: bool,
+        /// Use Copy-on-Write (reflink) if supported
+        /// Modes: force, auto (default), disable
+        #[arg(long, num_args = 0..=1, default_missing_value = "auto")]
+        reflink: Option<String>,
     },
 
     /// Move files or directories
@@ -316,10 +317,10 @@ impl Commands {
         }
     }
 
-    pub fn is_reflink(&self) -> bool {
+    pub fn get_reflink_mode(&self) -> Option<String> {
         match self {
-            Commands::Copy { reflink, .. } => *reflink,
-            _ => false,
+            Commands::Copy { reflink, .. } => reflink.clone(),
+            _ => None,
         }
     }
 

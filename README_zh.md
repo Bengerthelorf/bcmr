@@ -105,6 +105,7 @@ Options:
 - `-s, --strict`: 对续传启用严格哈希校验
 - `-a, --append`: 追加到现有文件 (忽略 mtime/哈希)
 - `-n, --dry-run`: 试运行 (不产生更改)
+- `--reflink <MODE>`: 控制 copy-on-write 行为 (auto/force/disable)
 - `-h, --help`: 打印帮助信息
 
 示例：
@@ -242,6 +243,10 @@ title_color = "#9E8BCA"
 
 [progress.layout]
 box_style = "rounded"    # "rounded" (default), "double", "heavy", "single"
+
+[copy]
+reflink = "auto"         # "auto" (default), "never" (从不使用 reflink)
+
 ```
 
 ## 许可证

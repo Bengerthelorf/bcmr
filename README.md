@@ -103,6 +103,7 @@ Options:
 - `-s, --strict`: Use strict hash verification for resume
 - `-a, --append`: Append to existing file (ignores mtime/hash)
 - `-n, --dry-run`: Dry run (no changes)
+- `--reflink <MODE>`: Control copy-on-write behavior (auto/force/disable)
 - `-h, --help`: Print help information
 
 Examples:
@@ -240,6 +241,10 @@ title_color = "#9E8BCA"
 
 [progress.layout]
 box_style = "rounded"    # "rounded" (default), "double", "heavy", "single"
+
+[copy]
+reflink = "auto"         # "auto" (default), "never"
+
 ```
 
 ## License

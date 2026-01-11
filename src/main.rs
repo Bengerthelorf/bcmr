@@ -90,6 +90,18 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
     let excludes = args.compile_excludes()?;
     let (sources, dest) = args.get_sources_and_dest();
 
+    // Validate reflink mode early to fail fast before progress bar checks
+    if let Some(mode) = args.get_reflink_mode() {
+         match mode.to_lowercase().as_str() {
+             "force" => {},
+             "disable" => {},
+             "auto" => {},
+             other => {
+                 bail!("Invalid reflink mode '{}'. Supported modes: force, disable, auto.", other);
+             }
+         }
+    }
+
     if sources.len() > 1 && (!dest.exists() || !dest.is_dir()) {
         bail!(
             "When copying multiple sources, destination '{}' must be an existing directory",
