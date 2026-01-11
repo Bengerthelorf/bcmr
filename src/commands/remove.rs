@@ -2,8 +2,8 @@ use crate::cli::{Commands, TestMode};
 use crate::ui::progress::CopyProgress;
 use crate::ui::display::{print_dry_run, ActionType};
 use crate::core::traversal;
+use crate::core::error::BcmrError;
 
-use anyhow::{bail, Result};
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,7 +23,7 @@ fn check_removes_sync(
     dir_only: bool,
     force: bool,
     excludes: Vec<regex::Regex>,
-) -> Result<Vec<FileToRemove>> {
+) -> std::result::Result<Vec<FileToRemove>, BcmrError> {
     let mut files_to_remove = Vec::new();
 
     for path in paths {
@@ -40,10 +40,10 @@ fn check_removes_sync(
             });
         } else if path.is_dir() {
             if !recursive && !dir_only {
-                bail!(
+                return Err(BcmrError::InvalidInput(format!(
                     "Cannot remove '{}': Is a directory (use -r for recursive removal)",
                     path.display()
-                );
+                )));
             }
 
             // For directories, check if they're empty when -d is used
@@ -51,7 +51,7 @@ fn check_removes_sync(
                 // Use read_dir (blocking syscall, acceptable in spawn_blocking)
                 let mut read_dir = std::fs::read_dir(&path)?;
                 if read_dir.next().is_some() {
-                    bail!("Cannot remove '{}': Directory not empty", path.display());
+                    return Err(BcmrError::InvalidInput(format!("Cannot remove '{}': Directory not empty", path.display())));
                 }
                 files_to_remove.push(FileToRemove {
                     path: path.to_path_buf(),
@@ -82,10 +82,7 @@ fn check_removes_sync(
             }
         } else {
             if !force {
-                bail!(
-                    "Cannot remove '{}': No such file or directory",
-                    path.display()
-                );
+                return Err(BcmrError::SourceNotFound(path.to_path_buf()));
             }
         }
     }
@@ -98,7 +95,7 @@ pub async fn check_removes(
     recursive: bool,
     cli: &Commands,
     excludes: &[regex::Regex],
-) -> Result<Vec<FileToRemove>> {
+) -> std::result::Result<Vec<FileToRemove>, BcmrError> {
     let paths = paths.to_vec();
     let recursive = recursive;
     let dir_only = cli.is_dir_only();
@@ -115,7 +112,7 @@ fn get_total_size_sync(
     paths: Vec<PathBuf>,
     recursive: bool,
     excludes: Vec<regex::Regex>,
-) -> Result<u64> {
+) -> std::result::Result<u64, BcmrError> {
     let mut total_size = 0;
 
     for path in paths {
@@ -145,7 +142,7 @@ pub async fn get_total_size(
     recursive: bool,
     _cli: &Commands,
     excludes: &[regex::Regex],
-) -> Result<u64> {
+) -> std::result::Result<u64, BcmrError> {
     let paths = paths.to_vec();
     let recursive = recursive;
     let excludes = excludes.to_vec();
@@ -153,7 +150,7 @@ pub async fn get_total_size(
     tokio::task::spawn_blocking(move || get_total_size_sync(paths, recursive, excludes)).await?
 }
 
-async fn confirm_remove(path: &Path, is_dir: bool) -> Result<bool> {
+async fn confirm_remove(path: &Path, is_dir: bool) -> std::result::Result<bool, BcmrError> {
     use crossterm::{
         cursor::{Hide, Show},
         execute,
@@ -192,7 +189,7 @@ pub async fn remove_path(
     progress_state: Arc<Mutex<ProgressState>>,
     progress_callback: impl Fn(u64) + Send + Sync,
     on_new_file: impl Fn(&str, u64) + Send + Sync,
-) -> Result<()> {
+) -> std::result::Result<(), BcmrError> {
     if traversal::is_excluded(path, excludes) {
         return Ok(());
     }
@@ -372,10 +369,7 @@ pub async fn remove_path(
             println!("removed {}", path.display());
         }
     } else {
-        bail!(
-            "Cannot remove '{}': No such file or directory",
-            path.display()
-        );
+        return Err(BcmrError::SourceNotFound(path.to_path_buf()));
     }
 
     Ok(())
@@ -409,7 +403,7 @@ pub async fn remove_paths(
     progress: Arc<Mutex<CopyProgress>>,
     progress_callback: impl Fn(u64) + Send + Sync + Clone + 'static,
     on_new_file: Box<dyn Fn(&str, u64) + Send + Sync>,
-) -> Result<()> {
+) -> std::result::Result<(), BcmrError> {
     // First, calculate total number of items to process
     let files_to_remove = check_removes(paths, cli.is_recursive(), cli, excludes).await?;
 

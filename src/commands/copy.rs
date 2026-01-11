@@ -1,9 +1,11 @@
 use crate::cli::{Commands, TestMode};
 use crate::core::traversal;
 use crate::core::checksum;
+use crate::core::error::BcmrError;
 use crate::ui::display::{print_dry_run, ActionType};
 
-use anyhow::{bail, Result};
+
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::fs::{self, File};
@@ -20,7 +22,7 @@ pub async fn check_overwrites(
     recursive: bool,
     _cli: &Commands,
     excludes: &[regex::Regex],
-) -> Result<Vec<FileToOverwrite>> {
+) -> std::result::Result<Vec<FileToOverwrite>, BcmrError> {
     let mut files_to_overwrite = Vec::new();
 
     let dst_is_dir = dst.exists() && dst.is_dir();
@@ -34,7 +36,7 @@ pub async fn check_overwrites(
             let dst_path = if dst_is_dir {
                 dst.join(
                     src.file_name()
-                        .ok_or_else(|| anyhow::anyhow!("Invalid source file name"))?,
+                        .ok_or_else(|| BcmrError::InvalidInput("Invalid source file name".to_string()))?,
                 )
             } else {
                 dst.to_path_buf()
@@ -49,7 +51,7 @@ pub async fn check_overwrites(
         } else if recursive && src.is_dir() {
             let src_name = src
                 .file_name()
-                .ok_or_else(|| anyhow::anyhow!("Invalid source directory name"))?;
+                .ok_or_else(|| BcmrError::InvalidInput("Invalid source directory name".to_string()))?;
             let new_dst = if dst_is_dir {
                 dst.join(src_name)
             } else {
@@ -84,7 +86,7 @@ fn get_total_size_sync(
     sources: Vec<PathBuf>,
     recursive: bool,
     excludes: Vec<regex::Regex>,
-) -> Result<u64> {
+) -> std::result::Result<u64, BcmrError> {
     let mut total_size = 0;
 
     for src in sources {
@@ -92,16 +94,25 @@ fn get_total_size_sync(
             continue;
         }
 
-        if recursive && src.is_dir() {
-            for entry in traversal::walk(&src, true, false, 1, &excludes) {
-                let entry = entry?;
-                let path = entry.path();
-                if path.is_file() {
-                    total_size += entry.metadata()?.len();
-                }
-            }
-        } else if src.is_file() {
+        if src.is_file() {
             total_size += src.metadata()?.len();
+        } else if src.is_dir() {
+            if recursive {
+                for entry in traversal::walk(&src, true, false, 1, &excludes) {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if path.is_file() {
+                        total_size += entry.metadata()?.len();
+                    }
+                }
+            } else {
+                return Err(BcmrError::InvalidInput(format!(
+                    "Source '{}' is a directory. Use -r flag for recursive copy.",
+                    src.display()
+                )));
+            }
+        } else {
+            return Err(BcmrError::SourceNotFound(src));
         }
     }
 
@@ -113,7 +124,7 @@ pub async fn get_total_size(
     recursive: bool,
     _cli: &Commands,
     excludes: &[regex::Regex],
-) -> Result<u64> {
+) -> std::result::Result<u64, BcmrError> {
     let sources = sources.to_vec();
     let recursive = recursive;
     let excludes = excludes.to_vec();
@@ -136,7 +147,7 @@ pub async fn copy_path<F>(
     excludes: &[regex::Regex],
     progress_callback: F,
     on_new_file: impl Fn(&str, u64) + Send + Sync + 'static,
-) -> Result<()>
+) -> std::result::Result<(), BcmrError>
 where
     F: Fn(u64) + Send + Sync,
 {
@@ -150,15 +161,11 @@ where
         return Ok(());
     }
 
-// use crate::ui::display::{print_dry_run, ActionType}; // Ensure this is imported at top of file!
-
-// ... inside copy_path ...
-
     if src.is_file() {
         let dst_path = if dst.is_dir() {
             dst.join(
                 src.file_name()
-                    .ok_or_else(|| anyhow::anyhow!("Invalid source file name"))?,
+                    .ok_or_else(|| BcmrError::InvalidInput("Invalid source file name".to_string()))?,
             )
         } else {
             dst.to_path_buf()
@@ -166,10 +173,7 @@ where
 
         // For files, only check when the target file exists
         if dst_path.exists() && !cli.is_force() && !cli.is_resume() && !cli.is_append() && !cli.is_strict() {
-            bail!(
-                "Destination '{}' already exists. Use -f to force overwrite.",
-                dst_path.display()
-            );
+            return Err(BcmrError::TargetExists(dst_path));
         }
 
         if cli.is_dry_run() {
@@ -252,7 +256,7 @@ where
     } else if recursive && src.is_dir() {
         let src_dir_name = src
             .file_name()
-            .ok_or_else(|| anyhow::anyhow!("Invalid source directory name"))?;
+            .ok_or_else(|| BcmrError::InvalidInput("Invalid source directory name".to_string()))?;
         let new_dst = if dst.is_dir() {
             dst.join(src_dir_name)
         } else {
@@ -316,10 +320,7 @@ where
 
             // Check each file to see if it needs to be overwritten
             if dst_path.exists() && !cli.is_force() && !cli.is_resume() && !cli.is_append() && !cli.is_strict() {
-                bail!(
-                    "Destination '{}' already exists. Use -f to force overwrite.",
-                    dst_path.display()
-                );
+                return Err(BcmrError::TargetExists(dst_path));
             }
 
             if cli.is_dry_run() {
@@ -382,21 +383,18 @@ where
             set_dir_attributes(src, &new_dst).await?;
         }
     } else if src.is_dir() {
-        bail!(
+        return Err(BcmrError::InvalidInput(format!(
             "Source '{}' is a directory. Use -r flag for recursive copy.",
             src.display()
-        );
+        )));
     } else {
-        bail!(
-            "Source '{}' does not exist or is not accessible.",
-            src.display()
-        );
+        return Err(BcmrError::SourceNotFound(src.to_path_buf()));
     }
 
     Ok(())
 }
 
-async fn set_dir_attributes(src: &Path, dst: &Path) -> Result<()> {
+async fn set_dir_attributes(src: &Path, dst: &Path) -> std::result::Result<(), BcmrError> {
     let src_metadata = src.metadata()?;
     let permissions = src_metadata.permissions();
     tokio::fs::set_permissions(dst, permissions).await?;
@@ -442,7 +440,7 @@ async fn copy_file<F>(
     reflink_arg: Option<String>,
     test_mode: TestMode,
     callback: &ProgressCallback<F>,
-) -> Result<()>
+) -> std::result::Result<(), BcmrError>
 where
     F: Fn(u64),
 {
@@ -476,8 +474,7 @@ where
              "disable" => (false, false),
              "auto" => (true, false),
              _ => {
-                 // Should be unreachable due to main.rs validation, but safe fallback
-                 (true, false)
+                 return Err(BcmrError::InvalidInput(format!("Invalid reflink mode '{}'. Supported modes: force, disable, auto.", mode)));
              }
          }
     } else {
@@ -504,7 +501,7 @@ where
             Err(e) => {
                 if fail_on_error {
                     // Force mode failed
-                   bail!("Reflink failed (forced): {}", e);
+                   return Err(BcmrError::Reflink(format!("Reflink failed (forced): {}", e)));
                 }
                 // Auto mode failed -> Fallback to standard copy
             }
@@ -661,7 +658,7 @@ where
         let dst_hash = tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)).await??;
 
         if src_hash != dst_hash {
-            bail!("Verification failed: Hashes do not match for '{}'", dst.display());
+            return Err(BcmrError::VerificationError(dst.to_path_buf()));
         }
     }
 

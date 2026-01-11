@@ -1,12 +1,11 @@
-use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{self, BufReader, Read};
 use std::path::Path;
 
 /// Calculates the SHA-256 hash of a file
-pub fn calculate_hash(path: &Path) -> Result<String> {
-    let file = File::open(path).with_context(|| format!("Failed to open file: {}", path.display()))?;
+pub fn calculate_hash(path: &Path) -> io::Result<String> {
+    let file = File::open(path)?;
     let mut reader = BufReader::new(file);
     let mut hasher = Sha256::new();
     let mut buffer = [0; 8192];
@@ -24,8 +23,8 @@ pub fn calculate_hash(path: &Path) -> Result<String> {
 }
 
 /// Calculates the SHA-256 hash of the first `limit` bytes of a file
-pub fn calculate_partial_hash(path: &Path, limit: u64) -> Result<String> {
-    let file = File::open(path).with_context(|| format!("Failed to open file: {}", path.display()))?;
+pub fn calculate_partial_hash(path: &Path, limit: u64) -> io::Result<String> {
+    let file = File::open(path)?;
     let mut reader = BufReader::new(file).take(limit);
     let mut hasher = Sha256::new();
     let mut buffer = [0; 8192];

@@ -5,6 +5,7 @@ mod commands;
 mod ui;
 
 use crate::config::CONFIG;
+use crate::core::error::BcmrError;
 use anyhow::{bail, Result};
 use cli::Commands;
 use parking_lot::Mutex;
@@ -97,7 +98,7 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
              "disable" => {},
              "auto" => {},
              other => {
-                 bail!("Invalid reflink mode '{}'. Supported modes: force, disable, auto.", other);
+                 return Err(BcmrError::InvalidInput(format!("Invalid reflink mode '{}'. Supported modes: force, disable, auto.", other)).into());
              }
          }
     }
@@ -117,8 +118,7 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         // If there are files to overwrite and confirmation is needed
         if !files_to_overwrite.is_empty() && args.should_prompt_for_overwrite() {
             if !confirm_overwrite(&files_to_overwrite).await? {
-                println!("Operation cancelled.");
-                return Ok(());
+                return Err(BcmrError::Cancelled.into());
             }
         }
     }
@@ -189,20 +189,25 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         .await;
 
         if let Err(e) = result {
+            // Stop the TUI before printing the error
+            ticker_handle.abort();
+            let mut p = progress.lock();
+            let _ = p.finish(); // Ignore error during finish if any, to ensure we print the actual error
+            drop(p);
+
             eprintln!("Error copying '{}': {}", src.display(), e);
             success = false;
-            // Should we stop or continue? Standard cp continues? No, generally it might stop?
-            // Let's stop on error for now.
+            // Stop on error
             break;
         }
     }
-
-    // Stop the ticker
-    ticker_handle.abort();
-
-    // Ensure proper cleanup upon completion or error
-    let mut progress = progress.lock();
-    progress.finish()?;
+    
+    // If loop finished or broke, ticker might still be running if we didn't break (but we break on error)
+    if success {
+        ticker_handle.abort();
+        let mut progress = progress.lock();
+        progress.finish()?;
+    }
 
     if !success {
         bail!("Copy operation encountered errors.");
@@ -299,16 +304,22 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
         .await;
 
         if let Err(e) = result {
+            ticker_handle.abort();
+            let mut p = progress.lock();
+            let _ = p.finish();
+            drop(p);
+            
             eprintln!("Error moving '{}': {}", src.display(), e);
             success = false;
             break;
         }
     }
 
-    ticker_handle.abort();
-
-    let mut progress = progress.lock();
-    progress.finish()?;
+    if success {
+         ticker_handle.abort();
+         let mut progress = progress.lock();
+         progress.finish()?;
+    }
 
     if !success {
         bail!("Move operation encountered errors.");
@@ -415,7 +426,7 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
             let mut progress = progress.lock();
             if let Err(e) = result {
                 progress.finish()?;
-                return Err(e);
+                return Err(e.into());
             }
             progress.finish()?;
         }

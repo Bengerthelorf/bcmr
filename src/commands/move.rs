@@ -1,9 +1,10 @@
 use crate::cli::{Commands, TestMode};
 use crate::commands::copy;
 use crate::core::traversal;
+use crate::core::error::BcmrError;
 use crate::ui::display::{print_dry_run, ActionType};
 
-use anyhow::{bail, Result};
+// We want to replace return types with Result<(), BcmrError> or Result<T, BcmrError>
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
@@ -17,7 +18,7 @@ pub async fn check_overwrites(
     recursive: bool,
     cli: &Commands,
     excludes: &[regex::Regex],
-) -> Result<Vec<FileToOverwrite>> {
+) -> std::result::Result<Vec<FileToOverwrite>, BcmrError> {
     copy::check_overwrites(sources, dst, recursive, cli, excludes).await
 }
 
@@ -27,7 +28,7 @@ pub async fn get_total_size(
     recursive: bool,
     cli: &Commands,
     excludes: &[regex::Regex],
-) -> Result<u64> {
+) -> std::result::Result<u64, BcmrError> {
     copy::get_total_size(sources, recursive, cli, excludes).await
 }
 
@@ -43,7 +44,7 @@ pub async fn move_path<F>(
     excludes: &[regex::Regex],
     progress_callback: F,
     on_new_file: impl Fn(&str, u64) + Send + Sync + 'static + Clone,
-) -> Result<()>
+) -> std::result::Result<(), BcmrError>
 where
     F: Fn(u64) + Send + Sync + Clone,
 {
@@ -55,7 +56,7 @@ where
         let dst_path = if dst.is_dir() {
             dst.join(
                 src.file_name()
-                    .ok_or_else(|| anyhow::anyhow!("Invalid source file name"))?,
+                    .ok_or_else(|| BcmrError::InvalidInput("Invalid source file name".to_string()))?,
             )
         } else {
             dst.to_path_buf()
@@ -63,10 +64,7 @@ where
 
         // For files, check when target exists
         if dst_path.exists() && !cli.is_force() {
-            bail!(
-                "Destination '{}' already exists. Use -f to force overwrite.",
-                dst_path.display()
-            );
+            return Err(BcmrError::TargetExists(dst_path));
         }
 
         if cli.is_dry_run() {
@@ -98,14 +96,14 @@ where
                      ).await?;
                      fs::remove_file(src).await?;
                 } else {
-                    return Err(e.into());
+                    return Err(BcmrError::Io(e));
                 }
             }
         }
     } else if recursive && src.is_dir() {
         let src_name = src
             .file_name()
-            .ok_or_else(|| anyhow::anyhow!("Invalid source directory name"))?;
+            .ok_or_else(|| BcmrError::InvalidInput("Invalid source directory name".to_string()))?;
         let new_dst = if dst.is_dir() {
             dst.join(src_name)
         } else {
@@ -194,21 +192,18 @@ where
             }
         }
     } else if src.is_dir() {
-        bail!(
+        return Err(BcmrError::InvalidInput(format!(
             "Source '{}' is a directory. Use -r flag for recursive move.",
             src.display()
-        );
+        )));
     } else {
-        bail!(
-            "Source '{}' does not exist or is not accessible.",
-            src.display()
-        );
+        return Err(BcmrError::SourceNotFound(src.to_path_buf()));
     };
 
     Ok(())
 }
 
-async fn remove_directory_contents(dir: &Path, excludes: &[regex::Regex]) -> Result<()> {
+async fn remove_directory_contents(dir: &Path, excludes: &[regex::Regex]) -> std::result::Result<(), BcmrError> {
     // Remove contents in reverse order (files first, then directories)
     // Use unified traversal logic
     let mut entries = Vec::new();

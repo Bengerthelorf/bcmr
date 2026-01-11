@@ -12,7 +12,7 @@ A prioritized list of improvements, refactoring, and new features to be implemen
   - Create a global implementation to manage SIGINT (Ctrl+C) and SIGTERM.
   - Ensure robust cleanup of partially copied/moved files upon interruption.
 
-- [ ] **Custom Error Types**
+- [x] **Custom Error Types**
   - Replace generic `anyhow::Result` with specific `thiserror` enums (e.g., `PermissionDenied`, `TargetExists`).
   - Provide actionable user tips based on error types.
 
@@ -23,7 +23,7 @@ A prioritized list of improvements, refactoring, and new features to be implemen
   - Limit concurrency usage based on system resources.
   - *Goal*: Improve performance for directories with large numbers of small files.
 
-- [ ] **Reflink / Copy-on-Write (CoW)**
+- [x] **Reflink / Copy-on-Write (CoW)**
   - Implement support for `reflink` on compatible file systems (APFS, Btrfs, XFS).
   - *Goal*: Enable instantaneous file copies without additional disk usage.
 
