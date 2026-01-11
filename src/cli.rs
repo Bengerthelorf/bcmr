@@ -275,7 +275,7 @@ impl Commands {
         }
     }
 
-    // Helper method to split paths into sources and destination
+    // Split -> (sources, dest)
     pub fn get_sources_and_dest(&self) -> (&[PathBuf], &PathBuf) {
         match self {
             Commands::Copy { paths, .. } | Commands::Move { paths, .. } => {

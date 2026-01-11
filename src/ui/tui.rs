@@ -12,7 +12,7 @@ use crossterm::{
 use std::io::{self, stdout, Write};
 use std::time::Duration;
 
-// TUI progress using crossterm for box interface
+// TUI progress
 pub struct TuiProgress {
     data: ProgressData,
     start_row: u16,
@@ -40,21 +40,21 @@ impl TuiProgress {
             return Ok(());
         }
 
-        // Calculate required height based on content
+        // Calc height
         let required_height = if self.data.items_total.is_some() {
             10
         } else {
             8
         };
 
-        // Ensure we have enough space at the bottom
+        // Ensure space
         let (_, term_height) = terminal_size::terminal_size()
             .map(|(w, h)| (w.0, h.0))
             .unwrap_or((80, 24));
 
         let (_col, mut row) = position().unwrap_or((0, 0));
 
-        // If we are too close to the bottom, scroll up
+        // Scroll if needed
         if row + required_height > term_height {
             let lines_to_scroll = (row + required_height).saturating_sub(term_height);
             for _ in 0..lines_to_scroll {
@@ -94,7 +94,7 @@ impl TuiProgress {
             self.data.current_file = "File".to_string();
         }
 
-        // Check for Ctrl+C
+        // Poll Ctrl+C
         if event::poll(Duration::from_millis(0))? {
             if let Event::Key(key) = event::read()? {
                 if key.code == KeyCode::Char('c')
@@ -124,7 +124,7 @@ impl TuiProgress {
 
         let mut stdout = stdout();
 
-        // Use full terminal width for the progress display
+        // Use full width
         use terminal_size::{terminal_size, Height, Width};
         let (term_width, _) = terminal_size().unwrap_or((Width(80), Height(24)));
         let box_width = term_width.0 as usize;
@@ -134,7 +134,7 @@ impl TuiProgress {
         let theme = &CONFIG.progress.theme;
         let layout = &CONFIG.progress.layout;
 
-        // Define box characters based on style
+        // Box chars
         let (top_left, top_right, bottom_left, bottom_right, horizontal, vertical) =
             match layout.box_style.as_str() {
                 "double" => ('╔', '╗', '╚', '╝', '═', '║'),
@@ -158,7 +158,7 @@ impl TuiProgress {
         )?;
         write!(stdout, "{}{} {}", top_left, horizontal, operation)?; // Start of title box
 
-        // Draw title
+        // Title
         execute!(
             stdout,
             SetForegroundColor(title_color),
@@ -209,10 +209,7 @@ impl TuiProgress {
         // Variables for content rendering
         let bar_width = (box_width.saturating_sub(20)).max(20);
 
-        // Helper to draw a line with borders
-        // Fix: Pass stdout as argument to avoid borrow checker issues
-        // Helper to draw a line with borders
-        // Fix: Pass stdout as argument to avoid borrow checker issues
+        // Helper to draw line content
         let draw_line_content =
             |out: &mut io::Stdout, row_offset: u16, content: &str| -> io::Result<()> {
                 execute!(
@@ -223,11 +220,9 @@ impl TuiProgress {
                 write!(out, "{} ", vertical)?;
                 execute!(out, SetForegroundColor(text_color))?;
                 
-                // Calculate padding to clear previous content strictly within the box
                 // box_width - 2 (borders) - 1 (left space) -> max content width
-                // But we want to print "content" then fill the rest with spaces until right border
                 let available_width = box_width.saturating_sub(3); // -2 borders, -1 left space
-                let content_len = content.chars().count(); // Simple count, maybe flawed for unicode but better than bytes
+                let content_len = content.chars().count(); 
                 let display_content = if content_len > available_width {
                     &content[..available_width]
                 } else {
@@ -251,7 +246,7 @@ impl TuiProgress {
                 Ok(())
             };
 
-        // --- Line 1: Main Progress Bar ---
+        // --- L1: Main Bar ---
         execute!(
             stdout,
             MoveTo(0, current_row + 1),
@@ -284,7 +279,7 @@ impl TuiProgress {
         write!(stdout, "{}", vertical)?;
         execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
-        // --- Line 2: Details (Size, Speed, ETA) ---
+        // --- L2: Details ---
         let eta_str = match eta_opt {
             Some(d) => format_eta(d.as_secs()),
             None => "--".to_string(),
@@ -299,10 +294,10 @@ impl TuiProgress {
         );
         draw_line_content(&mut stdout, 2, &details)?;
 
-        // --- Line 3: Spacer ---
+        // --- L3: Spacer ---
         draw_line_content(&mut stdout, 3, "")?;
 
-        // --- Line 4: Current File Name ---
+        // --- L4: Current File ---
         let file_info = format!("Current: {}", self.data.current_file);
         // Truncate if too long (account for borders and padding)
         let max_text_width = box_width.saturating_sub(4);
@@ -313,7 +308,7 @@ impl TuiProgress {
         };
         draw_line_content(&mut stdout, 4, &display_file_info)?;
 
-        // --- Line 5: Current File Bar ---
+        // --- L5: File Bar ---
         execute!(
             stdout,
             MoveTo(0, current_row + 5),

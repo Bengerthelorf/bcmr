@@ -187,16 +187,10 @@ where
                 let dst_len = dst_meta.len();
 
                 let should_resume = if cli.is_strict() {
-                    // Strict mode (Hash check implied, but for dry-run we might skip hash or assume based on size?)
-                    // Doing a hash in dry-run is expensive. Let's assume size check + "STRICT" note?
-                    // copy_file logic:
                     if dst_len == src_len {
-                         // Hash check would determine SKIP vs OVERWRITE.
-                         // For dry-run, if size matches, typically we might Assume SKIP if strict?
-                         // Or we can say "contents check"
-                         ActionType::Skip // Optimistic prediction
+                         // Hash check -> SKIP | OVERWRITE
+                         ActionType::Skip // Optimistic
                     } else if dst_len < src_len {
-                        // Partial hash check...
                         ActionType::Append
                     } else {
                         ActionType::Overwrite
@@ -229,14 +223,6 @@ where
                     ActionType::Overwrite
                 };
                 
-                // If the logic determined a "Resume" action (ActionType is not natively "Resume", 
-                // but we map the logic outcome to Add/Overwrite/Append/Skip).
-                // Wait, should_resume logic returns boolean in copy_file.
-                // Here we return ActionType directly.
-                
-                // In above logic:
-                // If strict/append/resume match conditions -> Append or Skip.
-                // Else -> Overwrite.
                 should_resume
             };
             
@@ -278,9 +264,7 @@ where
             fs::create_dir_all(&new_dst).await?;
         }
 
-        // Collect files and directories to copy
         let mut files_to_copy = Vec::new();
-        // Use unified traversal
         for entry in traversal::walk(src, true, false, 1, excludes) {
             let entry = entry?;
             let path = entry.path();
@@ -453,21 +437,13 @@ where
 
     (callback.on_new_file)(&file_name, file_size);
 
-    // Resolve Reflink Mode
-    // 1. CLI Arg
-    // 2. Config
-
-    // Resolve Reflink Mode
-    // 1. CLI Arg
-    // 2. Config
-
-    // Config: "never" -> Skip.
-    // Config: "auto" -> Attempt. If fail -> Fallback.
+    // Reflink: CLI > Config
 
     let config_reflink = &crate::config::CONFIG.copy.reflink;
     
-    // Determine effective action
-    // Return: (try_reflink, fail_on_error)
+    // Action: (try, fail_on_err)
+    // - CLI: force=(T,T), disable=(F,F), auto=(T,F)
+    // - Cfg: never/disable=(F,F), *=(T,F)
     let (try_reflink, fail_on_error) = if let Some(mode) = reflink_arg {
          match mode.to_lowercase().as_str() {
              "force" => (true, true),
@@ -478,10 +454,9 @@ where
              }
          }
     } else {
-        // CLI not present. Use config.
         match config_reflink.to_lowercase().as_str() {
             "never" | "disable" => (false, false),
-            _ => (true, false), // Default / "auto"
+            _ => (true, false),
         }
     };
 
@@ -500,10 +475,8 @@ where
             }
             Err(e) => {
                 if fail_on_error {
-                    // Force mode failed
                    return Err(BcmrError::Reflink(format!("Reflink failed (forced): {}", e)));
                 }
-                // Auto mode failed -> Fallback to standard copy
             }
         }
     }
@@ -516,7 +489,7 @@ where
         let dst_len = dst.metadata()?.len();
         
         let should_resume = if strict {
-            // STRICT MODE: Hash check (original logic)
+            // STRICT: Hash check
             if dst_len == file_size {
                  let src_path = src.to_path_buf();
                  let dst_path = dst.to_path_buf();
@@ -540,9 +513,11 @@ where
                  false
             }
         } else if append {
-            // APPEND MODE: Size check only (Ignore Mtime)
+            // APPEND: Size check (ignore mtime)
+            // dst == src -> Skip
+            // dst < src -> Append
+            // dst > src -> Overwrite
             if dst_len == file_size {
-                // Size matches -> assume same file -> Skip
                 (callback.callback)(file_size);
                 return Ok(());
             } else if dst_len < file_size {
@@ -553,17 +528,14 @@ where
                 false
             }
         } else {
-            // DEFAULT MODE: Size + Mtime check
+            // DEFAULT: Mtime + Size
             let src_mtime = src.metadata()?.modified()?;
             let dst_mtime = dst.metadata()?.modified()?;
 
             if src_mtime != dst_mtime {
-                // Modified times differ -> assume files are different -> Overwrite
                 false
             } else {
-                // Mtimes match -> check size
                 if dst_len == file_size {
-                    // Full match -> Skip
                     (callback.callback)(file_size);
                     return Ok(());
                 } else if dst_len < file_size {
@@ -577,13 +549,10 @@ where
         };
 
         if should_resume {
-             // Match! Resume
              start_offset = dst_len;
              file_flags.append(true);
-             // Update progress bar to current state
              (callback.callback)(start_offset);
         } else {
-             // Mismatch, overwrite
              start_offset = 0;
              file_flags.create(true).truncate(true);
         }
@@ -647,10 +616,7 @@ where
         set_dir_attributes(src, dst).await?;
     }
 
-    // Only run full verification if specifically requested AND we didn't just verify it fully above
-    // If we resumed (start_offset > 0) or overwrote, we might want to verify.
-    // Optimization: If we just verified full hash above (dst_len == file_size case), we returned early.
-    // So here we are in a case where we wrote/appended something.
+    // Verify if requested AND not already verified (e.g. strict match skipped)
     if verify {
         let src_path = src.to_path_buf();
         let dst_path = dst.to_path_buf();

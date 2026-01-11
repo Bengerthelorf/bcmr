@@ -1,6 +1,6 @@
 use crossterm::style::Color;
 
-/// Converts a byte count into a human-readable format
+/// Format bytes
 pub fn format_bytes(bytes: f64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * 1024.0;
@@ -20,7 +20,7 @@ pub fn format_bytes(bytes: f64) -> String {
     }
 }
 
-/// Formats a duration in seconds into a human-readable HH:MM:SS or MM:SS string
+/// Format duration
 pub fn format_eta(seconds: u64) -> String {
     let hours = seconds / 3600;
     let minutes = (seconds % 3600) / 60;

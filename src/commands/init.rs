@@ -16,7 +16,6 @@ pub fn generate_init_script(
         Shell::Bash | Shell::Zsh => {
             let mut script = String::new();
 
-            // Add PATH if specified
             if let Some(path) = path {
                 script.push_str(&format!(
                     r#"
@@ -27,7 +26,6 @@ export PATH="{}:$PATH"
                 ));
             }
 
-            // Generate command functions
             if !no_cmd {
                 let prefix = if cmd.is_empty() { "" } else { cmd };
                 script.push_str(&format!(
@@ -55,7 +53,6 @@ export PATH="{}:$PATH"
         Shell::Fish => {
             let mut script = String::new();
 
-            // Add PATH if specified
             if let Some(path) = path {
                 script.push_str(&format!(
                     r#"
@@ -66,7 +63,6 @@ fish_add_path "{}"
                 ));
             }
 
-            // Generate command functions
             if !no_cmd {
                 let prefix = if cmd.is_empty() { "" } else { cmd };
                 script.push_str(&format!(
@@ -98,13 +94,12 @@ end
 pub fn generate_uninstall_script(shell: &Shell) -> String {
     match shell {
         Shell::Bash | Shell::Zsh => r#"
-# Remove bcmr functions
 unset -f cp mv rm bcp bmv brm 2>/dev/null || true
 "#
         .to_string(),
 
         Shell::Fish => r#"
-# Remove bcmr functions
+        Shell::Fish => r#"
 functions -e cp mv rm bcp bmv brm 2>/dev/null || true
 "#
         .to_string(),

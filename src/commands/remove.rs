@@ -16,7 +16,7 @@ pub struct FileToRemove {
     pub size: u64,
 }
 
-// Helper for synchronous check logic
+// Helper: sync check logic
 fn check_removes_sync(
     paths: Vec<PathBuf>,
     recursive: bool,
@@ -61,7 +61,7 @@ fn check_removes_sync(
                 continue;
             }
 
-            // For recursive removal
+            // Recursive
             if recursive {
                 for entry in traversal::walk(&path, true, true, 0, &excludes) {
                     let entry = entry?;
@@ -221,18 +221,7 @@ pub async fn remove_path(
             entries.push(entry?);
         }
 
-        // Sort in reverse order to handle deepest paths first
-        // Wait, contents_first=true already does post-order traversal (children first).
-        // Original code:
-        // .contents_first(true)
-        // .collect()
-        // entries.sort_by_key(|entry| Reverse(entry.depth()))
-        // WalkDir contents_first guarantees children before parents. The sort seems redundant if WalkDir works as expected,
-        // BUT WalkDir yields siblings in some order. Sorting by depth ensures strict depth order?
-        // Actually, contents_first is usually enough for deletion.
-        // But original code had explicit sort. I should keep it to be safe, or rely on WalkDir order.
-        // WalkDir with contents_first=true yields leaves first.
-        // Let's keep the sort logic if it was there to be 100% sure about depth.
+        // Sort: children -> parents (depth desc)
         entries.sort_by(|a, b| {
             b.path()
                 .components()
@@ -253,19 +242,8 @@ pub async fn remove_path(
                 0
             };
 
-            // Interactive confirmation for each entry if needed
             if cli.is_interactive() && !cli.is_force() {
-                // Don't ask again for the root if we already asked above?
-                // The original code asked for 'path' at the beginning.
-                // Then inside the loop, it iterated ALL entries.
-                // The WalkDir includes 'path'.
-                // So it would ask TWICE for the root dir?
-                // Original code:
-                // 1. confirm_remove(path, is_dir) [lines 207-209]
-                // 2. Loop entries -> confirm_remove(entry_path, ...) [lines 255-257]
-                // If entry_path == path, it asks again!
-                // This seems like a bug or feature of original code. I will preserve it or fix it?
-                // If I keep it, I preserve behavior.
+            // Interactive check
                 if !confirm_remove(entry_path, entry.file_type().is_dir()).await? {
                     continue;
                 }
@@ -315,7 +293,7 @@ pub async fn remove_path(
                 );
             }
 
-            // Update progress only for actual entries (not the root directory)
+            // Update progress (skip root item itself)
             if entry_path != path {
                 progress_state.lock().inc_processed();
             }

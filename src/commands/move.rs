@@ -4,14 +4,10 @@ use crate::core::traversal;
 use crate::core::error::BcmrError;
 use crate::ui::display::{print_dry_run, ActionType};
 
-// We want to replace return types with Result<(), BcmrError> or Result<T, BcmrError>
 use std::path::{Path, PathBuf};
 use tokio::fs;
-
-// Reuse FileToOverwrite from copy module
 pub use copy::FileToOverwrite;
 
-// Similar to copy, but will use the same function for checking overwrites
 pub async fn check_overwrites(
     sources: &[PathBuf],
     dst: &Path,
@@ -62,7 +58,6 @@ where
             dst.to_path_buf()
         };
 
-        // For files, check when target exists
         if dst_path.exists() && !cli.is_force() {
             return Err(BcmrError::TargetExists(dst_path));
         }
@@ -79,7 +74,7 @@ where
                 fs::remove_file(&dst_path).await?;
             }
             
-            // Try rename first
+            // Try rename -> EXDEV? Copy+Rm : Err
             if let Err(e) = fs::rename(src, &dst_path).await {
                 if e.raw_os_error() == Some(libc::EXDEV) {
                      // Fallback to copy+delete
@@ -110,7 +105,7 @@ where
             dst.to_path_buf()
         };
 
-        // If excludes are present OR dry-run, we must inspect contents
+        // Excludes OR dry-run -> inspect contents
         if !excludes.is_empty() || cli.is_dry_run() {
             if cli.is_dry_run() {
                  if !new_dst.exists() {
@@ -147,8 +142,7 @@ where
                  return Ok(());
             }
 
-            // Real run with excludes: We CANNOT use fs::rename (it ignores excludes)
-            // Fallback to copy + remove source files
+            // Excludes: rename ignores excludes -> Copy + Remove source(files) + Remove source(dir, if empty)
             
             // 1. Copy
             copy::copy_path(
@@ -163,16 +157,11 @@ where
                 on_new_file.clone()
             ).await?;
 
-            // 2. Remove source files (that were copied)
             remove_directory_contents(src, excludes).await?;
-            
-            // 3. Try to remove the source directory itself (only if empty)
             let _ = fs::remove_dir(src).await; 
 
         } else {
-            // No excludes, not dry-run -> Fast path
              if let Err(e) = fs::rename(src, &new_dst).await {
-                // EXDEV -> Copy + Delete
                 if e.raw_os_error() == Some(libc::EXDEV) {
                      copy::copy_path(
                         src,
@@ -204,14 +193,13 @@ where
 }
 
 async fn remove_directory_contents(dir: &Path, excludes: &[regex::Regex]) -> std::result::Result<(), BcmrError> {
-    // Remove contents in reverse order (files first, then directories)
-    // Use unified traversal logic
+    // Reverse order (files first)
     let mut entries = Vec::new();
     for entry in traversal::walk(dir, true, true, 0, excludes) {
         entries.push(entry?);
     }
 
-    // Sort in reverse order to handle deeper paths first
+    // Sort: deep -> shallow
     entries.sort_by(|a, b| {
         b.path()
             .components()
@@ -225,10 +213,7 @@ async fn remove_directory_contents(dir: &Path, excludes: &[regex::Regex]) -> std
         if path.is_file() {
             fs::remove_file(path).await?;
         } else if path.is_dir() {
-            // remove_dir fails if not empty (e.g. contains excluded files)
-            // We ignore error here? 
-            // If it contains excluded files, we SHOULD NOT remove it.
-            // fs::remove_dir ensures this.
+            // remove_dir ensures only empty dirs are removed
             let _ = fs::remove_dir(path).await;
         }
     }

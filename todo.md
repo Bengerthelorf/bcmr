@@ -27,6 +27,12 @@ A prioritized list of improvements, refactoring, and new features to be implemen
   - Implement support for `reflink` on compatible file systems (APFS, Btrfs, XFS).
   - *Goal*: Enable instantaneous file copies without additional disk usage.
 
+- [ ] **Background & Suspend Support (SIGTSTP/SIGCONT)**
+  - Handle `Ctrl+Z` (SIGTSTP) to suspend execution gracefully (stop TUI rendering).
+  - Handle `fg/bg` (SIGCONT) to resume.
+    - If resumed in foreground: Restore TUI.
+    - If resumed in background: Continue operation silently (no TUI).
+
 ## User Experience & Safety
 
 - [ ] **Trash / Recycle Bin Support**

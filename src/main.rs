@@ -40,7 +40,7 @@ async fn confirm_overwrite(files: &[commands::copy::FileToOverwrite]) -> Result<
 }
 
 async fn confirm_removal(files: &[commands::remove::FileToRemove]) -> Result<bool> {
-    // Calculate total size and item counts
+    // Calc stats
     let mut total_size = 0u64;
     let mut file_count = 0;
     let mut dir_count = 0;
@@ -91,7 +91,7 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
     let excludes = args.compile_excludes()?;
     let (sources, dest) = args.get_sources_and_dest();
 
-    // Validate reflink mode early to fail fast before progress bar checks
+    // Validation
     if let Some(mode) = args.get_reflink_mode() {
          match mode.to_lowercase().as_str() {
              "force" => {},
@@ -110,12 +110,11 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         );
     }
 
-    // If force is specified, check the files to be overwritten
     if args.is_force() {
+    // Force -> Check overwrites
         let files_to_overwrite =
         commands::copy::check_overwrites(sources, dest, args.is_recursive(), args, &excludes).await?;
 
-        // If there are files to overwrite and confirmation is needed
         if !files_to_overwrite.is_empty() && args.should_prompt_for_overwrite() {
             if !confirm_overwrite(&files_to_overwrite).await? {
                 return Err(BcmrError::Cancelled.into());
@@ -127,7 +126,7 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         println!("DRY RUN MODE: No changes will be made.");
     }
 
-    // Calculate total size
+    // Total size
     let total_size = commands::copy::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
     let progress = Arc::new(Mutex::new(CopyProgress::new(
         total_size,
@@ -135,21 +134,20 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         args.is_dry_run(),
     )?));
 
-    // Initialize progress display
+    // Init display
     if let Some(first) = sources.first() {
         let display_name = first.file_name().unwrap_or_default().to_string_lossy();
         progress.lock().set_current_file(&display_name, total_size);
     }
 
-    // Create clones for callbacks
+    // Clones
     let progress_for_inc = Arc::clone(&progress);
     let progress_for_file = Arc::clone(&progress);
 
-    // Modify signal handling logic
     let progress_for_signal = Arc::clone(&progress);
 
-    // Spawn ticker for progress updates and event polling
     let progress_ticker = Arc::clone(&progress);
+    // Spawn ticker
     let ticker_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(100));
         loop {
@@ -158,7 +156,7 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         }
     });
 
-    // Spawn separate Ctrl+C handler as backup
+    // Ctrl+C handler
     tokio::spawn(async move {
         if let Ok(()) = ctrl_c().await {
             let _ = progress_for_signal.lock().finish();
@@ -166,7 +164,7 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         }
     });
 
-    // Loop through sources and copy each
+    // Process sources
     let mut success = true;
     for src in sources {
         let result = commands::copy::copy_path(
@@ -189,7 +187,7 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         .await;
 
         if let Err(e) = result {
-            // Stop the TUI before printing the error
+            // Stop TUI, print error
             ticker_handle.abort();
             let mut p = progress.lock();
             let _ = p.finish(); // Ignore error during finish if any, to ensure we print the actual error
@@ -202,7 +200,7 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         }
     }
     
-    // If loop finished or broke, ticker might still be running if we didn't break (but we break on error)
+    // Success? Finish
     if success {
         ticker_handle.abort();
         let mut progress = progress.lock();
@@ -334,7 +332,6 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
     let excludes = args.compile_excludes()?;
     let paths = args.get_remove_paths().unwrap();
 
-    // First check all files that will be removed
     let files_to_remove =
         commands::remove::check_removes(paths, args.is_recursive(), args, &excludes).await?;
 
@@ -342,12 +339,7 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         println!("DRY RUN MODE: No changes will be made.");
     }
 
-    // Ask for confirmation if needed (not in force mode and either interactive or has items to remove)
-    // In dry-run we skip confirmation? Or maybe confirmation confirms that we see what would happen?
-    // Usually dry-run skips actual prompts or just shows them.
-    // Let's skip prompt if dry_run? Or prompt "Would you like to remove...?"?
-    // User wants "no changes with no execution".
-    // I will skip confirmation in dry_run because we are just showing info.
+    // Confirm? (skip in dry-run)
     if !args.is_dry_run()
         && !files_to_remove.is_empty()
         && !args.is_force()
@@ -359,30 +351,29 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         }
     }
 
-    // Calculate total size for progress bar
+    // Total size
     let total_size = files_to_remove.iter().map(|f| f.size).sum();
 
-    // Initialize progress display
+    // Init display
     let progress = Arc::new(Mutex::new(CopyProgress::new(
         total_size,
         is_plain_mode_enabled(args),
         args.is_dry_run(),
     )?));
 
-    // Set operation type
     progress.lock().set_operation_type("Removing");
 
-    // Set initial display using the first path
+    // Initial display
     if let Some(first_path) = paths.first() {
         let display_name = first_path.file_name().unwrap_or_default().to_string_lossy();
         progress.lock().set_current_file(&display_name, total_size);
     }
 
-    // Create clones for callbacks
+    // Clones
     let progress_for_inc = Arc::clone(&progress);
     let progress_for_file = Arc::clone(&progress);
 
-    // Set up improved Ctrl+C handler
+    // Ctrl+C handler
     let progress_for_signal = Arc::clone(&progress);
     #[allow(unused_mut)]
     let (tx, mut rx) = tokio::sync::oneshot::channel();
@@ -404,13 +395,13 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         }
     });
 
-    // Prepare the callbacks
+    // Callbacks
     let inc_callback = move |n| progress_for_inc.lock().inc_current(n);
     let file_callback = Box::new(move |name: &str, size: u64| {
         progress_for_file.lock().set_current_file(name, size);
     });
 
-    // Use tokio::select! to handle both the remove operation and ctrl+c
+    // Run | Ctrl+C
     tokio::select! {
         result = commands::remove::remove_paths(
             paths,
@@ -421,8 +412,7 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
             inc_callback,
             file_callback,
         ) => {
-            // Clean up and handle any errors
-            ticker_handle.abort(); // Abort first
+            // Cleanup
             let mut progress = progress.lock();
             if let Err(e) = result {
                 progress.finish()?;
@@ -437,7 +427,7 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         }
     }
 
-    // Give the user time to see final status
+    // Wait for final status
     tokio::time::sleep(Duration::from_secs(1)).await;
     Ok(())
 }
@@ -450,10 +440,10 @@ fn handle_init_command(args: &Commands) -> Result<()> {
             path,
             no_cmd,
         } => {
-            // 生成初始化脚本
+            // Script generation
             let script = commands::init::generate_init_script(shell, cmd, path.as_ref(), *no_cmd);
 
-            // 直接打印到标准输出，这样就可以被 eval 捕获
+            // Print script for eval
             print!("{}", script);
 
             Ok(())
@@ -465,11 +455,7 @@ fn handle_init_command(args: &Commands) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = cli::parse_args();
-    // Load config if available (implied, handled inside modules or lazily?
-    // Wait, config module is there but main doesn't seem to init it explicitly.
-    // It seems config is loaded on demand or static?
-    // `src/config.rs` has `CONFIG` lazy_static. Checked in previous turns.
-    // So we don't need to do anything here.)
+    // Load config (lazy static)
 
     match &cli.command {
         Commands::Copy { .. } => handle_copy_command(&cli.command).await?,

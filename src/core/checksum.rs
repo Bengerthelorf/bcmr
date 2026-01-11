@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{self, BufReader, Read};
 use std::path::Path;
 
-/// Calculates the SHA-256 hash of a file
+/// SHA-256 hash
 pub fn calculate_hash(path: &Path) -> io::Result<String> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
@@ -22,7 +22,7 @@ pub fn calculate_hash(path: &Path) -> io::Result<String> {
     Ok(format!("{:x}", result))
 }
 
-/// Calculates the SHA-256 hash of the first `limit` bytes of a file
+/// Partial SHA-256 (limit)
 pub fn calculate_partial_hash(path: &Path, limit: u64) -> io::Result<String> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file).take(limit);

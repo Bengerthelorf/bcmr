@@ -8,7 +8,7 @@ use crossterm::{
 };
 use std::io::{self, stdout, Write};
 
-// Inline progress using multi-line colored output
+// Inline progress
 pub struct InlineProgress {
     data: ProgressData,
     initialized: bool,
@@ -40,7 +40,7 @@ impl InlineProgress {
 
         let mut stdout = stdout();
 
-        // Cursor movement for overwriting
+        // Cursor move
         if self.lines_printed > 0 {
             execute!(
                 stdout,
@@ -73,7 +73,7 @@ impl InlineProgress {
             .unwrap_or((80, 24));
         let term_width = term_width as usize;
 
-        // Line 1: Operation + Total Bar
+        // L1: Op + Total
         execute!(stdout, Clear(ClearType::CurrentLine))?;
         let op_label = format!("{}: ", operation);
         write!(stdout, "{}", op_label)?;
@@ -90,7 +90,7 @@ impl InlineProgress {
         write!(stdout, "{}", "-".repeat(empty))?;
         writeln!(stdout, "]{}", suffix)?;
 
-        // Line 2: Stats
+        // L2: Stats
         execute!(stdout, Clear(ClearType::CurrentLine))?;
         writeln!(
             stdout,
@@ -101,7 +101,7 @@ impl InlineProgress {
             eta_str
         )?;
 
-        // Line 3: File + Bar
+        // L3: File
         execute!(stdout, Clear(ClearType::CurrentLine))?;
         let file_label = "File: ";
         write!(stdout, "{}", file_label)?;
@@ -129,7 +129,7 @@ impl InlineProgress {
 
         stdout.flush()?;
 
-        self.lines_printed = 2; // We printed 2 newlines (L1->L2, L2->L3), cursor at end of L3
+        self.lines_printed = 2;
         Ok(())
     }
 }
@@ -164,7 +164,7 @@ impl ProgressRenderer for InlineProgress {
     }
 
     fn tick(&mut self) {
-        // Redraw on tick to update ETA/Speed
+        // Redraw on tick
         let _ = self.redraw();
     }
 

@@ -70,15 +70,10 @@ impl Config {
     pub fn new() -> Result<Self, ConfigError> {
         let mut s = ConfigLoader::builder();
 
-        // Start with default values
+        // Defaults
         let defaults = Config::default();
 
-        // We have to set defaults manually for ConfigLoader if we want them to be overridable
-        // Alternatively, we can serialize the default struct to a Value or just rely on the fallback
-        // Since config-rs sets defaults by key, we'll set the critical ones or just use the fallback approach
-        // A better way with config-rs is to build layer by layer.
-
-        // Set defaults using the struct
+        // Set defaults manually (for overrides)
         s = s
             .set_default("progress.style", defaults.progress.style)
             .unwrap()
@@ -123,8 +118,8 @@ impl Config {
             )
             .unwrap();
 
-        // Check for configuration file
-        // 1. Check XDG_CONFIG_HOME/bcmr (~/.config/bcmr on Linux/macOS usually)
+        // Check config file
+        // 1. XDG (~/.config/bcmr)
         if let Some(user_dirs) = directories::UserDirs::new() {
             let config_dir = user_dirs.home_dir().join(".config").join("bcmr");
             let config_path = config_dir.join("config.toml");
@@ -137,10 +132,10 @@ impl Config {
             }
         }
 
-        // 2. Fallback to platform-specific standard config dir if distinct
+        // 2. Platform fallback
         if let Some(proj_dirs) = ProjectDirs::from("com", "bcmr", "bcmr") {
             let config_dir = proj_dirs.config_dir();
-            // Avoid adding the same source twice if paths happen to be identical
+            // Avoid duplicate source
             if !config_dir.ends_with(".config/bcmr") {
                 let config_path = config_dir.join("config.toml");
                 if config_path.exists() {
