@@ -248,7 +248,7 @@ where
             fs::remove_file(&dst_path).await?;
         }
 
-        copy_file(src, &dst_path, preserve, cli.is_verify(), cli.is_resume(), cli.is_strict(), cli.is_append(), test_mode, &callback).await?;
+        copy_file(src, &dst_path, preserve, cli.is_verify(), cli.is_resume(), cli.is_strict(), cli.is_append(), cli.is_reflink(), test_mode, &callback).await?;
     } else if recursive && src.is_dir() {
         let src_dir_name = src
             .file_name()
@@ -369,6 +369,7 @@ where
                     cli.is_resume(),
                     cli.is_strict(),
                     cli.is_append(),
+                    cli.is_reflink(),
                     test_mode.clone(),
                     &callback,
                 )
@@ -431,6 +432,7 @@ async fn copy_file<F>(
     resume: bool,
     strict: bool,
     append: bool,
+    reflink: bool,
     test_mode: TestMode,
     callback: &ProgressCallback<F>,
 ) -> Result<()>
@@ -445,6 +447,30 @@ where
         .to_string();
 
     (callback.on_new_file)(&file_name, file_size);
+
+    // Try reflink if requested
+    if reflink {
+        let src_path = src.to_path_buf();
+        let dst_path = dst.to_path_buf();
+        let result = tokio::task::spawn_blocking(move || reflink::reflink(&src_path, &dst_path))
+            .await?;
+        
+        match result {
+            Ok(_) => {
+                // Reflink successful!
+                (callback.callback)(file_size);
+                return Ok(());
+            }
+            Err(_e) => {
+                // If reflink fails, we fall back to standard copy. 
+                // We could log this if we had a logger, but for now we silently fall back 
+                // as 'reflink' is often a "try best effort" optimization.
+                // However, explicitly requesting --reflink might imply "I want reflink or fail".
+                // But cp --reflink=auto behavior is safer.
+                // Let's print a debug message if verbose? (Not accessible here easily)
+            }
+        }
+    }
 
     let mut start_offset = 0;
     let mut file_flags = fs::OpenOptions::new();

@@ -104,6 +104,10 @@ pub enum Commands {
         /// Append data to existing file (ignores mtime, checks size only)
         #[arg(short = 'a', long, default_value_t = false)]
         append: bool,
+
+        /// Use Copy-on-Write (reflink) if supported (APFS, Btrfs, XFS)
+        #[arg(long, default_value_t = false)]
+        reflink: bool,
     },
 
     /// Move files or directories
@@ -308,6 +312,13 @@ impl Commands {
     pub fn is_append(&self) -> bool {
         match self {
             Commands::Copy { append, .. } | Commands::Move { append, .. } => *append,
+            _ => false,
+        }
+    }
+
+    pub fn is_reflink(&self) -> bool {
+        match self {
+            Commands::Copy { reflink, .. } => *reflink,
             _ => false,
         }
     }
