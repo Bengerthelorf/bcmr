@@ -1,4 +1,4 @@
-use crate::cli::{Commands, TestMode};
+use crate::cli::{Commands, TestMode, SparseMode}; // Added SparseMode
 use crate::core::traversal;
 use crate::core::checksum;
 use crate::core::error::BcmrError;
@@ -238,7 +238,7 @@ where
             fs::remove_file(&dst_path).await?;
         }
 
-        copy_file(src, &dst_path, preserve, cli.is_verify(), cli.is_resume(), cli.is_strict(), cli.is_append(), cli.get_reflink_mode(), test_mode, &callback).await?;
+        copy_file(src, &dst_path, preserve, cli.is_verify(), cli.is_resume(), cli.is_strict(), cli.is_append(), cli.get_reflink_mode(), cli.get_sparse_mode(), test_mode, &callback).await?;
     } else if recursive && src.is_dir() {
         let src_dir_name = src
             .file_name()
@@ -355,6 +355,7 @@ where
                     cli.is_strict(),
                     cli.is_append(),
                     cli.get_reflink_mode(),
+                    cli.get_sparse_mode(),
                     test_mode.clone(),
                     &callback,
                 )
@@ -420,8 +421,9 @@ async fn copy_file<F>(
     verify: bool,
     resume: bool,
     strict: bool,
-    append: bool,
+    append: bool, // Fixed duplicate
     reflink_arg: Option<String>,
+    sparse_mode: SparseMode,
     test_mode: TestMode,
     callback: &ProgressCallback<F>,
 ) -> std::result::Result<(), BcmrError>
@@ -585,6 +587,7 @@ where
             let mut start_time = Instant::now();
 
             loop {
+                // Read a chunk
                 let n = src_file.read(&mut buffer[..chunk_size as usize]).await?;
                 if n == 0 {
                     break;
@@ -602,13 +605,38 @@ where
                 (callback.callback)(n as u64);
             }
         }
-        TestMode::None => loop {
-            let n = src_file.read(&mut buffer).await?;
-            if n == 0 {
-                break;
+        TestMode::None => {
+            let mut pending_hole = 0u64;
+
+            loop {
+                let n = src_file.read(&mut buffer).await?;
+                if n == 0 {
+                    break;
+                }
+
+                let is_zeros = match sparse_mode {
+                    SparseMode::Always => buffer[..n].iter().all(|&b| b == 0),
+                    SparseMode::Auto => n >= 4096 && buffer[..n].iter().all(|&b| b == 0),
+                    SparseMode::Never => false,
+                };
+
+                if is_zeros {
+                    pending_hole += n as u64;
+                } else {
+                    if pending_hole > 0 {
+                        dst_file.seek(SeekFrom::Current(pending_hole as i64)).await?;
+                        pending_hole = 0;
+                    }
+                    dst_file.write_all(&buffer[..n]).await?;
+                }
+                (callback.callback)(n as u64);
             }
-            dst_file.write_all(&buffer[..n]).await?;
-            (callback.callback)(n as u64);
+
+            if pending_hole > 0 {
+                // If the file ends with a hole, extend the file size
+                let current_pos = dst_file.stream_position().await?;
+                dst_file.set_len(current_pos + pending_hole).await?;
+            }
         },
     }
 

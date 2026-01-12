@@ -20,6 +20,23 @@ pub enum Shell {
     Fish,
 }
 
+#[derive(Clone, Debug, ValueEnum)]
+pub enum SparseMode {
+    Always,
+    Auto,
+    Never,
+}
+
+impl std::fmt::Display for SparseMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SparseMode::Always => write!(f, "always"),
+            SparseMode::Auto => write!(f, "auto"),
+            SparseMode::Never => write!(f, "never"),
+        }
+    }
+}
+
 impl std::fmt::Display for Shell {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -109,6 +126,10 @@ pub enum Commands {
         /// Modes: force, auto (default), disable
         #[arg(long, num_args = 0..=1, default_missing_value = "auto")]
         reflink: Option<String>,
+
+        /// Control sparse file creation
+        #[arg(long, value_enum, default_value_t = SparseMode::Auto)]
+        sparse: SparseMode,
     },
 
     /// Move files or directories
@@ -321,6 +342,13 @@ impl Commands {
         match self {
             Commands::Copy { reflink, .. } => reflink.clone(),
             _ => None,
+        }
+    }
+
+    pub fn get_sparse_mode(&self) -> SparseMode {
+        match self {
+            Commands::Copy { sparse, .. } => sparse.clone(),
+            _ => SparseMode::Auto,
         }
     }
 
