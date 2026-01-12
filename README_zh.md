@@ -17,8 +17,6 @@ brew install bcmr
 
 ### 使用安装脚本
 
-鸿蒙星河版地址：
-
 ```bash
 curl -fsSL https://bcmr.snaix.homes/ | bash
 ```
