@@ -31,3 +31,8 @@ regex = "1.12.2"
 sha2 = "0.10"
 reflink-copy = "0.1.28"
 
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
