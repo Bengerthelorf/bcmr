@@ -1,13 +1,13 @@
-use sha2::{Digest, Sha256};
+use blake3::Hasher;
 use std::fs::File;
 use std::io::{self, BufReader, Read};
 use std::path::Path;
 
-/// SHA-256 hash
+/// BLAKE3 hash
 pub fn calculate_hash(path: &Path) -> io::Result<String> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
-    let mut hasher = Sha256::new();
+    let mut hasher = Hasher::new();
     let mut buffer = [0; 8192];
 
     loop {
@@ -18,15 +18,14 @@ pub fn calculate_hash(path: &Path) -> io::Result<String> {
         hasher.update(&buffer[..count]);
     }
 
-    let result = hasher.finalize();
-    Ok(format!("{:x}", result))
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
-/// Partial SHA-256 (limit)
+/// Partial BLAKE3 hash (limit)
 pub fn calculate_partial_hash(path: &Path, limit: u64) -> io::Result<String> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file).take(limit);
-    let mut hasher = Sha256::new();
+    let mut hasher = Hasher::new();
     let mut buffer = [0; 8192];
 
     loop {
@@ -37,6 +36,5 @@ pub fn calculate_partial_hash(path: &Path, limit: u64) -> io::Result<String> {
         hasher.update(&buffer[..count]);
     }
 
-    let result = hasher.finalize();
-    Ok(format!("{:x}", result))
+    Ok(hasher.finalize().to_hex().to_string())
 }
