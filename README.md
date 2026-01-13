@@ -52,6 +52,8 @@ bcmr init [shell] [options]
 Available options:
 
 - `--cmd <prefix>`: Set command prefix (e.g., 'b' creates bcp, bmv, brm)
+- `--prefix <prefix>`: Explicitly set command prefix (overrides --cmd)
+- `--suffix <suffix>`: Set command suffix
 - `--no-cmd`: Don't create command aliases
 - `--path <path>`: Add directory to PATH
 
@@ -67,6 +69,9 @@ eval "$(bcmr init zsh --cmd '')"
 
 # Use 'b' prefix (creates bcp, bmv, brm)
 eval "$(bcmr init bash --cmd b)"
+
+# Use prefix and suffix (creates pcp+, pmv+, prm+)
+eval "$(bcmr init zsh --cmd --prefix p --suffix +)"
 ```
 
 Supported shells:
@@ -104,6 +109,7 @@ Options:
 - `-a, --append`: Append to existing file (ignores mtime/hash)
 - `-n, --dry-run`: Dry run (no changes)
 - `--reflink <MODE>`: Control copy-on-write behavior (auto/force/disable)
+- `--sparse <MODE>`: Control sparse file handling (auto/force/disable)
 - `-h, --help`: Print help information
 
 Examples:
@@ -244,6 +250,7 @@ box_style = "rounded"    # "rounded" (default), "double", "heavy", "single"
 
 [copy]
 reflink = "auto"         # "auto" (default), "never"
+sparse = "never"         # "never" (default), "auto" (detect zero blocks >= 4KB)
 
 ```
 

@@ -103,6 +103,17 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
          }
     }
 
+    if let Some(mode) = args.get_sparse_mode() {
+         match mode.to_lowercase().as_str() {
+             "force" => {},
+             "disable" => {},
+             "auto" => {},
+             other => {
+                 return Err(BcmrError::InvalidInput(format!("Invalid sparse mode '{}'. Supported modes: force, disable, auto.", other)).into());
+             }
+         }
+    }
+
     if sources.len() > 1 && (!dest.exists() || !dest.is_dir()) {
         bail!(
             "When copying multiple sources, destination '{}' must be an existing directory",
@@ -437,11 +448,20 @@ fn handle_init_command(args: &Commands) -> Result<()> {
         Commands::Init {
             shell,
             cmd,
+            prefix,
+            suffix,
             path,
             no_cmd,
         } => {
             // Script generation
-            let script = commands::init::generate_init_script(shell, cmd, path.as_ref(), *no_cmd);
+            let script = commands::init::generate_init_script(
+                shell,
+                cmd.as_deref().unwrap_or(""),
+                prefix.as_deref(),
+                suffix.as_deref(),
+                path.as_ref(),
+                *no_cmd
+            );
 
             // Print script for eval
             print!("{}", script);

@@ -423,7 +423,7 @@ async fn copy_file<F>(
     strict: bool,
     append: bool, // Fixed duplicate
     reflink_arg: Option<String>,
-    sparse_mode: SparseMode,
+    sparse_arg: Option<String>,
     test_mode: TestMode,
     callback: &ProgressCallback<F>,
 ) -> std::result::Result<(), BcmrError>
@@ -457,13 +457,31 @@ where
          }
     } else {
         match config_reflink.to_lowercase().as_str() {
-            "never" | "disable" => (false, false),
-            _ => (true, false),
+             "never" => (false, false),
+             _ => (true, false),
         }
     };
 
+    // Sparse: CLI > Config
+    let config_sparse = &crate::config::CONFIG.copy.sparse;
+    let sparse_mode = if let Some(mode) = sparse_arg {
+         match mode.to_lowercase().as_str() {
+             "force" => SparseMode::Always,
+             "disable" => SparseMode::Never,
+             "auto" => SparseMode::Auto,
+             _ => return Err(BcmrError::InvalidInput(format!("Invalid sparse mode '{}'. Supported modes: force, disable, auto.", mode))),
+         }
+    } else {
+         match config_sparse.to_lowercase().as_str() {
+             "auto" => SparseMode::Auto,
+             _ => SparseMode::Never, // Default is never
+         }
+    };
+
+
     // Try reflink if requested
-    if try_reflink {
+    // But if SparseMode is Always (Force), we MUST scan the file, so we disable reflink.
+    if try_reflink && matches!(sparse_mode, SparseMode::Always) == false {
         let src_path = src.to_path_buf();
         let dst_path = dst.to_path_buf();
         let result = tokio::task::spawn_blocking(move || reflink_copy::reflink(&src_path, &dst_path))

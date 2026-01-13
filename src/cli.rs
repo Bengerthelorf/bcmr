@@ -20,21 +20,11 @@ pub enum Shell {
     Fish,
 }
 
-#[derive(Clone, Debug, ValueEnum)]
+#[derive(Clone, Debug)]
 pub enum SparseMode {
     Always,
     Auto,
     Never,
-}
-
-impl std::fmt::Display for SparseMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SparseMode::Always => write!(f, "always"),
-            SparseMode::Auto => write!(f, "auto"),
-            SparseMode::Never => write!(f, "never"),
-        }
-    }
 }
 
 impl std::fmt::Display for Shell {
@@ -54,9 +44,18 @@ pub enum Commands {
         /// Shell to initialize (bash, zsh, fish)
         shell: Shell,
 
-        /// Command prefix to use (default: no prefix)
-        #[arg(long, default_value = "")]
-        cmd: String,
+        /// Command prefix (default: no prefix if empty).
+        /// Acts as a "base" for aliases.
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        cmd: Option<String>,
+
+        /// Explicit command prefix (overrides cmd if present)
+        #[arg(long, requires = "cmd")]
+        prefix: Option<String>,
+
+        /// Command suffix
+        #[arg(long, requires = "cmd")]
+        suffix: Option<String>,
 
         /// Path to add to PATH
         #[arg(long)]
@@ -128,8 +127,9 @@ pub enum Commands {
         reflink: Option<String>,
 
         /// Control sparse file creation
-        #[arg(long, value_enum, default_value_t = SparseMode::Auto)]
-        sparse: SparseMode,
+        /// Modes: force, auto (default), disable
+        #[arg(long, num_args = 0..=1, default_missing_value = "auto")]
+        sparse: Option<String>,
     },
 
     /// Move files or directories
@@ -264,8 +264,6 @@ impl Commands {
         }
     }
 
-
-
     pub fn should_prompt_for_overwrite(&self) -> bool {
         match self {
             Commands::Copy { force, yes, .. } | Commands::Move { force, yes, .. } => {
@@ -309,7 +307,6 @@ impl Commands {
         }
     }
 
-
     pub fn is_verify(&self) -> bool {
         match self {
             Commands::Copy { verify, .. } | Commands::Move { verify, .. } => *verify,
@@ -345,10 +342,10 @@ impl Commands {
         }
     }
 
-    pub fn get_sparse_mode(&self) -> SparseMode {
+    pub fn get_sparse_mode(&self) -> Option<String> {
         match self {
             Commands::Copy { sparse, .. } => sparse.clone(),
-            _ => SparseMode::Auto,
+            _ => None,
         }
     }
 

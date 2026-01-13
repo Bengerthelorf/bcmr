@@ -3,7 +3,9 @@ use std::path::PathBuf;
 
 pub fn generate_init_script(
     shell: &Shell,
-    cmd: &str,
+    cmd_compat: &str,
+    prefix_arg: Option<&str>,
+    suffix_arg: Option<&str>,
     path: Option<&PathBuf>,
     no_cmd: bool,
 ) -> String {
@@ -27,23 +29,26 @@ export PATH="{}:$PATH"
             }
 
             if !no_cmd {
-                let prefix = if cmd.is_empty() { "" } else { cmd };
+                let prefix = prefix_arg.unwrap_or(if cmd_compat.is_empty() { "" } else { cmd_compat });
+                let suffix = suffix_arg.unwrap_or("");
+                
                 script.push_str(&format!(
                     r#"
 # bcmr shell integration
-{prefix}cp() {{
+{prefix}cp{suffix}() {{
     "{exe_path}" copy "$@"
 }}
 
-{prefix}mv() {{
+{prefix}mv{suffix}() {{
     "{exe_path}" move "$@"
 }}
 
-{prefix}rm() {{
+{prefix}rm{suffix}() {{
     "{exe_path}" remove "$@"
 }}
 "#,
                     prefix = prefix,
+                    suffix = suffix,
                     exe_path = exe_path
                 ));
             }
@@ -64,23 +69,26 @@ fish_add_path "{}"
             }
 
             if !no_cmd {
-                let prefix = if cmd.is_empty() { "" } else { cmd };
+                let prefix = prefix_arg.unwrap_or(if cmd_compat.is_empty() { "" } else { cmd_compat });
+                let suffix = suffix_arg.unwrap_or("");
+                
                 script.push_str(&format!(
                     r#"
 # bcmr shell integration
-function {prefix}cp
+function {prefix}cp{suffix}
     "{exe_path}" copy $argv
 end
 
-function {prefix}mv
+function {prefix}mv{suffix}
     "{exe_path}" move $argv
 end
 
-function {prefix}rm
+function {prefix}rm{suffix}
     "{exe_path}" remove $argv
 end
 "#,
                     prefix = prefix,
+                    suffix = suffix,
                     exe_path = exe_path
                 ));
             }
@@ -112,7 +120,7 @@ mod tests {
 
     #[test]
     fn test_bash_init_script() {
-        let script = generate_init_script(&Shell::Bash, "b", None, false);
+        let script = generate_init_script(&Shell::Bash, "b", None, None, None, false);
         assert!(script.contains("bcp()"));
         assert!(script.contains("bmv()"));
         assert!(script.contains("brm()"));
@@ -120,7 +128,7 @@ mod tests {
 
     #[test]
     fn test_zsh_init_script() {
-        let script = generate_init_script(&Shell::Zsh, "", None, false);
+        let script = generate_init_script(&Shell::Zsh, "", None, None, None, false);
         assert!(script.contains("cp()"));
         assert!(script.contains("mv()"));
         assert!(script.contains("rm()"));
@@ -128,7 +136,7 @@ mod tests {
 
     #[test]
     fn test_fish_init_script() {
-        let script = generate_init_script(&Shell::Fish, "b", None, false);
+        let script = generate_init_script(&Shell::Fish, "b", None, None, None, false);
         assert!(script.contains("function bcp"));
         assert!(script.contains("function bmv"));
         assert!(script.contains("function brm"));
@@ -137,15 +145,34 @@ mod tests {
     #[test]
     fn test_with_path() {
         let path = PathBuf::from("/some/path");
-        let script = generate_init_script(&Shell::Bash, "", Some(&path), false);
+        let script = generate_init_script(&Shell::Bash, "", None, None, Some(&path), false);
         assert!(script.contains("export PATH=\"/some/path:$PATH\""));
     }
 
     #[test]
     fn test_no_cmd() {
-        let script = generate_init_script(&Shell::Bash, "b", None, true);
+        let script = generate_init_script(&Shell::Bash, "b", None, None, None, true);
         assert!(!script.contains("bcp()"));
         assert!(!script.contains("bmv()"));
         assert!(!script.contains("brm()"));
+    }
+
+    #[test]
+    fn test_suffix_only() {
+        let script = generate_init_script(&Shell::Bash, "", None, Some("+"), None, false);
+        assert!(script.contains("cp+()"));
+    }
+
+    #[test]
+    fn test_prefix_and_suffix() {
+        let script = generate_init_script(&Shell::Bash, "", Some("b"), Some("+"), None, false);
+        assert!(script.contains("bcp+()"));
+    }
+    
+    #[test]
+    fn test_compat_cmd_with_suffix() {
+        // cmd="b" acts as prefix, suffix="+" -> bcp+
+        let script = generate_init_script(&Shell::Bash, "b", None, Some("+"), None, false);
+        assert!(script.contains("bcp+()"));
     }
 }

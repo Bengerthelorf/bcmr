@@ -52,6 +52,8 @@ bcmr init [shell] [options]
 可用选项：
 
 - `--cmd <prefix>`: 设置命令前缀 (例如 'b' 会创建 bcp, bmv, brm)
+- `--prefix <prefix>`: 显式设置命令前缀 (覆盖 --cmd)
+- `--suffix <suffix>`: 设置命令后缀
 - `--no-cmd`: 不创建命令别名
 - `--path <path>`: 将目录添加到 PATH
 
@@ -67,6 +69,9 @@ eval "$(bcmr init zsh --cmd '')"
 
 # 使用 'b' 前缀 (创建 bcp, bmv, brm)
 eval "$(bcmr init bash --cmd b)"
+
+# 使用前缀及后缀 (创建 pcp+, pmv+, prm+)
+eval "$(bcmr init zsh --cmd --prefix p --suffix +)"
 ```
 
 支持的 Shell:
@@ -104,6 +109,7 @@ Options:
 - `-a, --append`: 追加到现有文件 (忽略 mtime/哈希)
 - `-n, --dry-run`: 试运行 (不产生更改)
 - `--reflink <MODE>`: 控制 copy-on-write 行为 (auto/force/disable)
+- `--sparse <MODE>`: 控制稀疏文件处理 (auto/force/disable)
 - `-h, --help`: 打印帮助信息
 
 示例：
@@ -243,7 +249,8 @@ title_color = "#9E8BCA"
 box_style = "rounded"    # "rounded" (default), "double", "heavy", "single"
 
 [copy]
-reflink = "auto"         # "auto" (default), "never" (从不使用 reflink)
+reflink = "auto"         # "auto" (默认), "never" (不使用 reflink)
+sparse = "never"         # "never" (默认), "auto" (检测 >= 4KB 的零块)
 
 ```
 

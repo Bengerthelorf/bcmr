@@ -14,10 +14,16 @@ pub struct Config {
 pub struct CopyConfig {
     #[serde(default = "default_reflink")]
     pub reflink: String,
+    #[serde(default = "default_sparse")]
+    pub sparse: String,
 }
 
 fn default_reflink() -> String {
     "auto".to_string()
+}
+
+fn default_sparse() -> String {
+    "never".to_string()
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -115,6 +121,11 @@ impl Config {
             .set_default(
                 "copy.reflink",
                 defaults.copy.reflink,
+            )
+            .unwrap()
+            .set_default(
+                "copy.sparse",
+                defaults.copy.sparse,
             )
             .unwrap();
 
