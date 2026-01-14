@@ -21,7 +21,12 @@ pub fn generate_init_script(
             if let Some(path) = path {
                 script.push_str(&format!(
                     r#"
+# =============================================================================
+#
 # Add bcmr directory to PATH
+#
+# =============================================================================
+
 export PATH="{}:$PATH"
 "#,
                     path.display()
@@ -31,22 +36,43 @@ export PATH="{}:$PATH"
             if !no_cmd {
                 let prefix = prefix_arg.unwrap_or(if cmd_compat.is_empty() { "" } else { cmd_compat });
                 let suffix = suffix_arg.unwrap_or("");
-                
+
                 script.push_str(&format!(
                     r#"
-# bcmr shell integration
-{prefix}cp{suffix}() {{
+# =============================================================================
+#
+# BCMR shell integration for {shell_name}
+#
+# This provides convenient shell functions that wrap bcmr commands with
+# progress tracking and safety features.
+#
+# =============================================================================
+
+function {prefix}cp{suffix}() {{
     "{exe_path}" copy "$@"
 }}
 
-{prefix}mv{suffix}() {{
+function {prefix}mv{suffix}() {{
     "{exe_path}" move "$@"
 }}
 
-{prefix}rm{suffix}() {{
+function {prefix}rm{suffix}() {{
     "{exe_path}" remove "$@"
 }}
+
+# =============================================================================
+#
+# To initialize bcmr, add this to your shell configuration file:
+#
+#   eval "$(bcmr init {shell_name})"
+#
+# For custom prefix (e.g., 'b' creates bcp, bmv, brm):
+#
+#   eval "$(bcmr init {shell_name} --cmd b)"
+#
+# =============================================================================
 "#,
+                    shell_name = shell,
                     prefix = prefix,
                     suffix = suffix,
                     exe_path = exe_path
@@ -121,17 +147,17 @@ mod tests {
     #[test]
     fn test_bash_init_script() {
         let script = generate_init_script(&Shell::Bash, "b", None, None, None, false);
-        assert!(script.contains("bcp()"));
-        assert!(script.contains("bmv()"));
-        assert!(script.contains("brm()"));
+        assert!(script.contains("function bcp()"));
+        assert!(script.contains("function bmv()"));
+        assert!(script.contains("function brm()"));
     }
 
     #[test]
     fn test_zsh_init_script() {
         let script = generate_init_script(&Shell::Zsh, "", None, None, None, false);
-        assert!(script.contains("cp()"));
-        assert!(script.contains("mv()"));
-        assert!(script.contains("rm()"));
+        assert!(script.contains("function cp()"));
+        assert!(script.contains("function mv()"));
+        assert!(script.contains("function rm()"));
     }
 
     #[test]
@@ -152,27 +178,27 @@ mod tests {
     #[test]
     fn test_no_cmd() {
         let script = generate_init_script(&Shell::Bash, "b", None, None, None, true);
-        assert!(!script.contains("bcp()"));
-        assert!(!script.contains("bmv()"));
-        assert!(!script.contains("brm()"));
+        assert!(!script.contains("function bcp()"));
+        assert!(!script.contains("function bmv()"));
+        assert!(!script.contains("function brm()"));
     }
 
     #[test]
     fn test_suffix_only() {
         let script = generate_init_script(&Shell::Bash, "", None, Some("+"), None, false);
-        assert!(script.contains("cp+()"));
+        assert!(script.contains("function cp+()"));
     }
 
     #[test]
     fn test_prefix_and_suffix() {
         let script = generate_init_script(&Shell::Bash, "", Some("b"), Some("+"), None, false);
-        assert!(script.contains("bcp+()"));
+        assert!(script.contains("function bcp+()"));
     }
-    
+
     #[test]
     fn test_compat_cmd_with_suffix() {
         // cmd="b" acts as prefix, suffix="+" -> bcp+
         let script = generate_init_script(&Shell::Bash, "b", None, Some("+"), None, false);
-        assert!(script.contains("bcp+()"));
+        assert!(script.contains("function bcp+()"));
     }
 }
