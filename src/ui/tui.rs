@@ -302,7 +302,12 @@ impl TuiProgress {
         // Truncate if too long (account for borders and padding)
         let max_text_width = box_width.saturating_sub(4);
         let display_file_info = if file_info.len() > max_text_width {
-            format!("{}...", &file_info[..max_text_width.saturating_sub(3)])
+            let mut end_index = max_text_width.saturating_sub(3);
+            if !file_info.is_char_boundary(end_index) {
+                end_index = file_info.floor_char_boundary(end_index)
+            }
+
+            format!("{}...", &file_info[..end_index])
         } else {
             file_info
         };
