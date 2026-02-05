@@ -169,7 +169,16 @@ impl ProgressRenderer for InlineProgress {
     }
 
     fn finish(&mut self) -> io::Result<()> {
+        // Print a final overall summary (useful for logs / scrolling terminals)
+        let elapsed = self.data.elapsed();
+        let avg_bps = self.data.average_bytes_per_sec().unwrap_or(0.0);
         println!();
+        println!(
+            "Done: {} in {:.1}s | avg {}/s",
+            format_bytes(self.data.current_bytes as f64),
+            elapsed.as_secs_f64(),
+            format_bytes(avg_bps)
+        );
         Ok(())
     }
 }

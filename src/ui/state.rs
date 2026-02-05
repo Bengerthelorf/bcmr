@@ -6,9 +6,12 @@ pub struct ProgressData {
     pub current_file: String,
     pub current_file_size: u64,
     pub current_file_progress: u64,
+
+    pub start_time: Instant,
     pub last_update: Instant,
     pub last_bytes: u64,
     pub last_speed: f64,
+
     pub operation_type: String,
     pub items_total: Option<usize>, // Total number of items to process
     pub items_processed: usize,     // Number of items processed
@@ -23,9 +26,12 @@ impl ProgressData {
             current_file: String::new(),
             current_file_size: 0,
             current_file_progress: 0,
+
+            start_time: now,
             last_update: now,
             last_bytes: 0,
             last_speed: 0.0,
+
             operation_type: String::new(),
             items_total: None,
             items_processed: 0,
@@ -68,5 +74,17 @@ impl ProgressData {
         }
         let secs = (remaining_bytes / bytes_per_sec).ceil() as u64;
         Some(Duration::from_secs(secs))
+    }
+
+    pub fn elapsed(&self) -> Duration {
+        self.start_time.elapsed()
+    }
+
+    pub fn average_bytes_per_sec(&self) -> Option<f64> {
+        let secs = self.elapsed().as_secs_f64();
+        if secs <= 0.0 {
+            return None;
+        }
+        Some(self.current_bytes as f64 / secs)
     }
 }
