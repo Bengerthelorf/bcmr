@@ -219,18 +219,18 @@ impl TuiProgress {
                 )?;
                 write!(out, "{} ", vertical)?;
                 execute!(out, SetForegroundColor(text_color))?;
-                
+
                 // box_width - 2 (borders) - 1 (left space) -> max content width
                 let available_width = box_width.saturating_sub(3); // -2 borders, -1 left space
-                let content_len = content.chars().count(); 
+                let content_len = content.chars().count();
                 let display_content = if content_len > available_width {
                     &content[..available_width]
                 } else {
                     content
                 };
-                
+
                 write!(out, "{}", display_content)?;
-                
+
                 let padding = available_width.saturating_sub(display_content.chars().count());
                 if padding > 0 {
                     write!(out, "{}", " ".repeat(padding))?;
@@ -421,6 +421,16 @@ impl ProgressRenderer for TuiProgress {
             self.raw_mode_enabled = false;
             println!();
         }
+
+        // Print a final overall summary line
+        let elapsed = self.data.elapsed();
+        let avg_bps = self.data.average_bytes_per_sec().unwrap_or(0.0);
+        println!(
+            "Done: {} in {:.1}s | avg {}/s",
+            format_bytes(self.data.current_bytes as f64),
+            elapsed.as_secs_f64(),
+            format_bytes(avg_bps)
+        );
 
         self.finished = true;
         Ok(())
