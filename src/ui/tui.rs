@@ -1,6 +1,7 @@
 use crate::config::CONFIG;
 use crate::ui::progress::ProgressRenderer;
 use crate::ui::state::ProgressData;
+use crate::ui::suspend::{install_signal_forwarder, SuspendEvent};
 use crate::ui::utils::{format_bytes, format_eta, get_gradient_color, parse_hex_color};
 use crossterm::{
     cursor::{position, Hide, MoveTo, Show},
@@ -10,6 +11,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType},
 };
 use std::io::{self, stdout, Write};
+use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 // TUI progress
@@ -20,9 +22,68 @@ pub struct TuiProgress {
     raw_mode_enabled: bool,
     initialized: bool,
     finished: bool,
+
+    background_mode: bool,
+    sig_rx: Option<Receiver<SuspendEvent>>,
 }
 
 impl TuiProgress {
+    fn is_foreground(&self) -> bool {
+        unsafe {
+            let fg = libc::tcgetpgrp(libc::STDIN_FILENO);
+            if fg < 0 {
+                return true;
+            }
+            fg == libc::getpgrp()
+        }
+    }
+
+    fn suspend_terminal(&mut self) {
+        if self.raw_mode_enabled {
+            let _ = execute!(stdout(), Show);
+            let _ = disable_raw_mode();
+            self.raw_mode_enabled = false;
+        }
+    }
+
+    fn resume_terminal(&mut self) {
+        if !self.raw_mode_enabled {
+            let _ = enable_raw_mode();
+            let _ = execute!(stdout(), Hide);
+            self.raw_mode_enabled = true;
+        }
+    }
+
+    fn drain_signals(&mut self) {
+        let mut events = Vec::new();
+        if let Some(rx) = self.sig_rx.as_ref() {
+            while let Ok(ev) = rx.try_recv() {
+                events.push(ev);
+            }
+        } else {
+            return;
+        }
+
+        for ev in events {
+            match ev {
+                SuspendEvent::Suspend => {
+                    self.suspend_terminal();
+                    unsafe {
+                        libc::raise(libc::SIGSTOP);
+                    }
+                }
+                SuspendEvent::Continue => {
+                    self.background_mode = !self.is_foreground();
+                    if self.background_mode {
+                        self.suspend_terminal();
+                    } else {
+                        self.resume_terminal();
+                    }
+                }
+            }
+        }
+    }
+
     pub fn new(total_bytes: u64) -> io::Result<Self> {
         let data = ProgressData::new(total_bytes);
         Ok(Self {
@@ -32,6 +93,9 @@ impl TuiProgress {
             raw_mode_enabled: false,
             initialized: false,
             finished: false,
+
+            background_mode: false,
+            sig_rx: None,
         })
     }
 
@@ -39,6 +103,10 @@ impl TuiProgress {
         if self.initialized {
             return Ok(());
         }
+
+        // Install signal forwarder (Ctrl+Z / fg/bg) and detect current mode.
+        self.sig_rx = Some(install_signal_forwarder()?);
+        self.background_mode = !self.is_foreground();
 
         // Calc height
         let required_height = if self.data.items_total.is_some() {
@@ -82,6 +150,14 @@ impl TuiProgress {
 
     fn redraw(&mut self) -> io::Result<()> {
         if self.finished {
+            return Ok(());
+        }
+
+        // Handle Ctrl+Z / resume events.
+        self.drain_signals();
+
+        // If we're running in the background, don't render UI.
+        if self.background_mode {
             return Ok(());
         }
 
