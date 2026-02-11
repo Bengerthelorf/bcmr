@@ -89,7 +89,9 @@ async fn confirm_removal(files: &[commands::remove::FileToRemove]) -> Result<boo
 async fn handle_copy_command(args: &Commands) -> Result<()> {
     let test_mode = args.get_test_mode();
     let excludes = args.compile_excludes()?;
-    let (sources, dest) = args.get_sources_and_dest();
+    let (sources, dest) = args
+        .get_sources_and_dest()
+        .map_err(anyhow::Error::msg)?;
 
     // Validation
     if let Some(mode) = args.get_reflink_mode() {
@@ -229,7 +231,9 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
 async fn handle_move_command(args: &Commands) -> Result<()> {
     let test_mode = args.get_test_mode();
     let excludes = args.compile_excludes()?;
-    let (sources, dest) = args.get_sources_and_dest();
+    let (sources, dest) = args
+        .get_sources_and_dest()
+        .map_err(anyhow::Error::msg)?;
 
     if sources.len() > 1 && (!dest.exists() || !dest.is_dir()) {
         bail!(
@@ -341,7 +345,7 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
 async fn handle_remove_command(args: &Commands) -> Result<()> {
     let test_mode = args.get_test_mode();
     let excludes = args.compile_excludes()?;
-    let paths = args.get_remove_paths().unwrap();
+    let paths = args.get_remove_paths().map_err(anyhow::Error::msg)?;
 
     let files_to_remove =
         commands::remove::check_removes(paths, args.is_recursive(), args, &excludes).await?;

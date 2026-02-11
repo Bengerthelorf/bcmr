@@ -295,15 +295,15 @@ impl Commands {
     }
 
     // Split -> (sources, dest)
-    pub fn get_sources_and_dest(&self) -> (&[PathBuf], &PathBuf) {
+    pub fn get_sources_and_dest(&self) -> std::result::Result<(&[PathBuf], &PathBuf), String> {
         match self {
             Commands::Copy { paths, .. } | Commands::Move { paths, .. } => {
                 let (dest, sources) = paths
                     .split_last()
-                    .expect("Clap should ensure at least 2 args");
-                (sources, dest)
+                    .ok_or_else(|| "missing source/destination arguments".to_string())?;
+                Ok((sources, dest))
             }
-            _ => panic!("Command does not have source/dest structure"),
+            _ => Err("command does not have source/destination structure".to_string()),
         }
     }
 
@@ -395,10 +395,10 @@ impl Commands {
         }
     }
 
-    pub fn get_remove_paths(&self) -> Option<&Vec<PathBuf>> {
+    pub fn get_remove_paths(&self) -> std::result::Result<&Vec<PathBuf>, String> {
         match self {
-            Commands::Remove { paths, .. } => Some(paths),
-            _ => None,
+            Commands::Remove { paths, .. } => Ok(paths),
+            _ => Err("command does not support remove paths".to_string()),
         }
     }
 
