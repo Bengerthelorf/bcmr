@@ -23,7 +23,7 @@ fn default_reflink() -> String {
 }
 
 fn default_sparse() -> String {
-    "never".to_string()
+    "auto".to_string()
 }
 
 #[derive(Debug, Deserialize, Clone)]

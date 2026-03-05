@@ -250,7 +250,7 @@ box_style = "rounded"    # "rounded" (default), "double", "heavy", "single"
 
 [copy]
 reflink = "auto"         # "auto" (默认), "never" (不使用 reflink)
-sparse = "never"         # "never" (默认), "auto" (检测 >= 4KB 的零块)
+sparse = "auto"          # "auto" (默认, 检测 >= 4KB 的零块), "never"
 
 ```
 

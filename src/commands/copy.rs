@@ -579,6 +579,7 @@ where
             }
         }
         TestMode::None => {
+            const BLOCK_SIZE: usize = 4096;
             let mut pending_hole = 0u64;
 
             loop {
@@ -587,26 +588,39 @@ where
                     break;
                 }
 
-                let is_zeros = match sparse_mode {
-                    SparseMode::Always => buffer[..n].iter().all(|&b| b == 0),
-                    SparseMode::Auto => n >= 4096 && buffer[..n].iter().all(|&b| b == 0),
-                    SparseMode::Never => false,
-                };
-
-                if is_zeros {
-                    pending_hole += n as u64;
-                } else {
-                    if pending_hole > 0 {
-                        dst_file.seek(SeekFrom::Current(pending_hole as i64)).await?;
-                        pending_hole = 0;
+                match sparse_mode {
+                    SparseMode::Never => {
+                        if pending_hole > 0 {
+                            dst_file.seek(SeekFrom::Current(pending_hole as i64)).await?;
+                            pending_hole = 0;
+                        }
+                        dst_file.write_all(&buffer[..n]).await?;
                     }
-                    dst_file.write_all(&buffer[..n]).await?;
+                    SparseMode::Always | SparseMode::Auto => {
+                        let min_block = if matches!(sparse_mode, SparseMode::Always) { 1 } else { BLOCK_SIZE };
+                        let mut offset = 0;
+                        while offset < n {
+                            let end = (offset + BLOCK_SIZE).min(n);
+                            let chunk = &buffer[offset..end];
+                            let chunk_len = chunk.len();
+
+                            if chunk_len >= min_block && chunk.iter().all(|&b| b == 0) {
+                                pending_hole += chunk_len as u64;
+                            } else {
+                                if pending_hole > 0 {
+                                    dst_file.seek(SeekFrom::Current(pending_hole as i64)).await?;
+                                    pending_hole = 0;
+                                }
+                                dst_file.write_all(chunk).await?;
+                            }
+                            offset = end;
+                        }
+                    }
                 }
                 (callback.callback)(n as u64);
             }
 
             if pending_hole > 0 {
-                // If the file ends with a hole, extend the file size
                 let current_pos = dst_file.stream_position().await?;
                 dst_file.set_len(current_pos + pending_hole).await?;
             }

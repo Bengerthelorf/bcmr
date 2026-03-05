@@ -250,7 +250,7 @@ box_style = "rounded"    # "rounded" (default), "double", "heavy", "single"
 
 [copy]
 reflink = "auto"         # "auto" (default), "never"
-sparse = "never"         # "never" (default), "auto" (detect zero blocks >= 4KB)
+sparse = "auto"          # "auto" (default, detect zero blocks >= 4KB), "never"
 
 ```
 
