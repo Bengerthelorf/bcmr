@@ -1,7 +1,7 @@
 use crate::config::CONFIG;
 use crate::ui::progress::ProgressRenderer;
 use crate::ui::state::ProgressData;
-use crate::ui::suspend::install_suspend_handler;
+use crate::ui::suspend::{install_suspend_handler, suspend_now};
 use crate::ui::utils::{format_bytes, format_eta, get_gradient_color, parse_hex_color};
 use crossterm::{
     cursor::{position, Hide, MoveTo, Show},
@@ -107,14 +107,21 @@ impl TuiProgress {
             self.data.current_file = "File".to_string();
         }
 
-        // Poll Ctrl+C
+        // Poll keyboard events (Ctrl+C to quit, Ctrl+Z to suspend)
         if event::poll(Duration::from_millis(0))? {
             if let Event::Key(key) = event::read()? {
-                if key.code == KeyCode::Char('c')
-                    && key.modifiers.contains(event::KeyModifiers::CONTROL)
-                {
-                    self.finish()?;
-                    std::process::exit(130);
+                if key.modifiers.contains(event::KeyModifiers::CONTROL) {
+                    match key.code {
+                        KeyCode::Char('c') => {
+                            self.finish()?;
+                            std::process::exit(130);
+                        }
+                        KeyCode::Char('z') => {
+                            suspend_now(&self.suspended);
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
                 }
             }
         }

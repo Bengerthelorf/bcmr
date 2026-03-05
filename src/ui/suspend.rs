@@ -8,12 +8,33 @@ use std::sync::Arc;
 #[cfg(unix)]
 use std::thread;
 
-/// Tracks whether the TUI is currently suspended (backgrounded).
+/// Suspend the process: disable raw mode, show cursor, raise SIGSTOP.
 ///
-/// On SIGTSTP the signal thread disables raw mode, shows the cursor,
-/// then raises SIGSTOP to truly stop the process. On SIGCONT it
-/// re-enables raw mode if the process is in the foreground, and sets
-/// the `suspended` flag accordingly so the render loop can skip draws.
+/// Called from the TUI event loop when Ctrl+Z is pressed in raw mode
+/// (where Ctrl+Z doesn't generate SIGTSTP automatically).
+#[cfg(unix)]
+pub fn suspend_now(suspended: &AtomicBool) {
+    use crossterm::cursor::Show;
+    use crossterm::execute;
+    use crossterm::terminal::disable_raw_mode;
+
+    let _ = execute!(std::io::stdout(), Show);
+    let _ = disable_raw_mode();
+    suspended.store(true, Ordering::SeqCst);
+
+    unsafe {
+        libc::raise(libc::SIGSTOP);
+    }
+    // Execution resumes here after SIGCONT — the signal thread handles resume.
+}
+
+#[cfg(not(unix))]
+pub fn suspend_now(_suspended: &AtomicBool) {}
+
+/// Install a handler for SIGTSTP/SIGCONT signals.
+///
+/// Returns an `AtomicBool` that tracks whether the TUI is suspended.
+/// The signal thread handles terminal cleanup on suspend and restore on resume.
 pub fn install_suspend_handler() -> io::Result<Arc<AtomicBool>> {
     let suspended = Arc::new(AtomicBool::new(false));
 
