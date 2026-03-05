@@ -230,8 +230,7 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
             && args.should_prompt_for_overwrite()
             && !confirm_overwrite(&files_to_overwrite).await?
         {
-            println!("Operation cancelled.");
-            return Ok(());
+            return Err(BcmrError::Cancelled.into());
         }
     }
 
@@ -281,11 +280,11 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
     if !args.is_dry_run()
         && !files_to_remove.is_empty()
         && !args.is_force()
+        && !args.is_yes()
         && (!args.is_interactive() || files_to_remove.len() > 1)
         && !confirm_removal(&files_to_remove).await?
     {
-        println!("Operation cancelled.");
-        return Ok(());
+        return Err(BcmrError::Cancelled.into());
     }
 
     let total_size = files_to_remove.iter().map(|f| f.size).sum();

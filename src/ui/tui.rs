@@ -291,8 +291,13 @@ impl TuiProgress {
         );
         draw_line_content(&mut stdout, 2, &details)?;
 
-        // --- L3: Spacer ---
-        draw_line_content(&mut stdout, 3, "")?;
+        // --- L3: Item count or spacer ---
+        let items_line = if let Some(total) = self.data.items_total {
+            format!("Items:   {} / {}", self.data.items_processed, total)
+        } else {
+            String::new()
+        };
+        draw_line_content(&mut stdout, 3, &items_line)?;
 
         // --- L4: Current File ---
         let file_info = format!("Current: {}", self.data.current_file);

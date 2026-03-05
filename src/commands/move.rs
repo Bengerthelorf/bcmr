@@ -8,6 +8,18 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 pub use copy::FileToOverwrite;
 
+/// Check if a rename error indicates a cross-device move.
+fn is_cross_device_error(err: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    { err.raw_os_error() == Some(libc::EXDEV) }
+
+    #[cfg(windows)]
+    { err.raw_os_error() == Some(17) } // ERROR_NOT_SAME_DEVICE
+
+    #[cfg(not(any(unix, windows)))]
+    { false }
+}
+
 pub async fn check_overwrites(
     sources: &[PathBuf],
     dst: &Path,
@@ -78,7 +90,7 @@ where
 
         // Try rename -> EXDEV? Copy+Rm : Err
         if let Err(e) = fs::rename(src, &dst_path).await {
-            if e.raw_os_error() == Some(libc::EXDEV) {
+            if is_cross_device_error(&e) {
                 copy::copy_path(
                     src,
                     &dst_path,
@@ -161,7 +173,7 @@ where
             let _ = fs::remove_dir(src).await; 
 
         } else if let Err(e) = fs::rename(src, &new_dst).await {
-            if e.raw_os_error() == Some(libc::EXDEV) {
+            if is_cross_device_error(&e) {
                 copy::copy_path(
                     src,
                     dst,

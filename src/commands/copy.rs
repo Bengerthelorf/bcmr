@@ -276,7 +276,7 @@ where
                         fs::create_dir_all(&target_path).await?;
                     }
                     if preserve {
-                        set_dir_attributes(path, &target_path).await?;
+                        preserve_attributes(path, &target_path).await?;
                     }
                 } else if !target_path.exists() {
                     print_dry_run(
@@ -335,7 +335,7 @@ where
 
         // Set the attributes of the target directory (if needed)
         if preserve && !cli.is_dry_run() {
-            set_dir_attributes(src, &new_dst).await?;
+            preserve_attributes(src, &new_dst).await?;
         }
     } else if src.is_dir() {
         return Err(BcmrError::InvalidInput(format!(
@@ -349,7 +349,7 @@ where
     Ok(())
 }
 
-async fn set_dir_attributes(src: &Path, dst: &Path) -> std::result::Result<(), BcmrError> {
+async fn preserve_attributes(src: &Path, dst: &Path) -> std::result::Result<(), BcmrError> {
     let src_metadata = src.metadata()?;
     let permissions = src_metadata.permissions();
     tokio::fs::set_permissions(dst, permissions).await?;
@@ -416,10 +416,7 @@ where
          match mode.to_lowercase().as_str() {
              "force" => (true, true),
              "disable" => (false, false),
-             "auto" => (true, false),
-             _ => {
-                 return Err(BcmrError::InvalidInput(format!("Invalid reflink mode '{}'. Supported modes: force, disable, auto.", mode)));
-             }
+             _ => (true, false), // "auto" and any pre-validated value
          }
     } else {
         match config_reflink.to_lowercase().as_str() {
@@ -434,13 +431,12 @@ where
          match mode.to_lowercase().as_str() {
              "force" => SparseMode::Always,
              "disable" => SparseMode::Never,
-             "auto" => SparseMode::Auto,
-             _ => return Err(BcmrError::InvalidInput(format!("Invalid sparse mode '{}'. Supported modes: force, disable, auto.", mode))),
+             _ => SparseMode::Auto, // "auto" and any pre-validated value
          }
     } else {
          match config_sparse.to_lowercase().as_str() {
              "auto" => SparseMode::Auto,
-             _ => SparseMode::Never, // Default is never
+             _ => SparseMode::Never,
          }
     };
 
@@ -633,7 +629,7 @@ where
     }
 
     if preserve {
-        set_dir_attributes(src, dst).await?;
+        preserve_attributes(src, dst).await?;
     }
 
     // Verify if requested AND not already verified (e.g. strict match skipped)

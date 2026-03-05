@@ -202,6 +202,10 @@ pub enum Commands {
         #[arg(short = 'f', long)]
         force: bool,
 
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
+
         /// Interactively prompt before removal
         #[arg(short = 'i', long)]
         interactive: bool,
@@ -264,6 +268,15 @@ impl Commands {
         }
     }
 
+    pub fn is_yes(&self) -> bool {
+        match self {
+            Commands::Copy { yes, .. }
+            | Commands::Move { yes, .. }
+            | Commands::Remove { yes, .. } => *yes,
+            _ => false,
+        }
+    }
+
     pub fn should_prompt_for_overwrite(&self) -> bool {
         match self {
             Commands::Copy { force, yes, .. } | Commands::Move { force, yes, .. } => {
@@ -272,7 +285,7 @@ impl Commands {
             Commands::Remove {
                 force, interactive, ..
             } => !*force && *interactive,
-            Commands::Init { .. } => false, // Init command never needs overwrite prompts
+            Commands::Init { .. } => false,
         }
     }
 
