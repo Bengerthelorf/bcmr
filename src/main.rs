@@ -147,6 +147,8 @@ impl ProgressRunner {
 // --- Command handlers ---
 
 async fn handle_copy_command(args: &Commands) -> Result<()> {
+    use crate::core::remote::parse_remote_path;
+
     let test_mode = args.get_test_mode();
     let excludes = args.compile_excludes()?;
     let (sources, dest) = args
@@ -159,6 +161,20 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
     if let Some(mode) = args.get_sparse_mode() {
         validate_mode(&mode, "sparse")?;
     }
+
+    // Detect remote paths (SCP-like syntax: [user@]host:path)
+    let dest_str = dest.to_string_lossy();
+    let remote_dest = parse_remote_path(&dest_str);
+    let any_remote_source = sources
+        .iter()
+        .any(|s| parse_remote_path(&s.to_string_lossy()).is_some());
+
+    // Remote copy mode
+    if remote_dest.is_some() || any_remote_source {
+        return handle_remote_copy(args, sources, dest, &excludes).await;
+    }
+
+    // --- Local copy (original logic) ---
 
     if sources.len() > 1 && (!dest.exists() || !dest.is_dir()) {
         bail!(
@@ -206,6 +222,131 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
     }
 
     runner.finish_ok()
+}
+
+async fn handle_remote_copy(
+    args: &Commands,
+    sources: &[std::path::PathBuf],
+    dest: &std::path::Path,
+    _excludes: &[regex::Regex],
+) -> Result<()> {
+    use crate::core::remote::{self, parse_remote_path, RemotePath};
+
+    let dest_str = dest.to_string_lossy();
+    let remote_dest = parse_remote_path(&dest_str);
+
+    // Determine direction
+    if let Some(ref rdest) = remote_dest {
+        // Upload: local -> remote
+        // Calculate total size from local sources
+        let mut total_size = 0u64;
+        for src in sources {
+            if parse_remote_path(&src.to_string_lossy()).is_some() {
+                bail!("Cannot copy between two remote hosts. Use local as intermediary.");
+            }
+            if src.is_file() {
+                total_size += src.metadata()?.len();
+            } else if src.is_dir() && args.is_recursive() {
+                total_size += commands::copy::get_total_size(
+                    &[src.clone()], true, args, &[],
+                ).await?;
+            } else if src.is_dir() {
+                bail!(
+                    "Source '{}' is a directory. Use -r flag for recursive copy.",
+                    src.display()
+                );
+            } else {
+                bail!("Source '{}' not found", src.display());
+            }
+        }
+
+        let runner = ProgressRunner::new(total_size, is_plain_mode(args), false)?;
+        runner.progress().lock().set_operation_type("Uploading");
+
+        for src in sources {
+            if src.is_file() {
+                let file_remote = if sources.len() > 1 || rdest.path == "." {
+                    // Multiple sources -> dest is dir, append filename
+                    let fname = src.file_name().unwrap_or_default().to_string_lossy();
+                    RemotePath {
+                        user: rdest.user.clone(),
+                        host: rdest.host.clone(),
+                        path: format!("{}/{}", rdest.path, fname),
+                    }
+                } else {
+                    rdest.clone()
+                };
+                let inc = runner.inc_callback();
+                let file_cb = runner.file_callback();
+                remote::upload_file(src, &file_remote, &inc, &file_cb).await?;
+            } else if src.is_dir() && args.is_recursive() {
+                let dir_name = src.file_name().unwrap_or_default().to_string_lossy();
+                let dir_remote = RemotePath {
+                    user: rdest.user.clone(),
+                    host: rdest.host.clone(),
+                    path: format!("{}/{}", rdest.path, dir_name),
+                };
+                let inc = runner.inc_callback();
+                let file_cb = runner.file_callback();
+                remote::upload_directory(src, &dir_remote, &inc, &file_cb).await?;
+            }
+        }
+
+        runner.finish_ok()
+    } else {
+        // Download: remote -> local
+        let dest_local = dest;
+
+        // Collect remote sources
+        let mut remote_sources: Vec<(RemotePath, u64)> = Vec::new();
+        for src in sources {
+            let src_str = src.to_string_lossy();
+            let rsrc = parse_remote_path(&src_str).ok_or_else(|| {
+                anyhow::anyhow!("Mixed local/remote sources without remote destination")
+            })?;
+            let size = remote::remote_total_size(&rsrc, args.is_recursive()).await?;
+            remote_sources.push((rsrc, size));
+        }
+
+        let total_size: u64 = remote_sources.iter().map(|(_, s)| *s).sum();
+        let runner = ProgressRunner::new(total_size, is_plain_mode(args), false)?;
+        runner.progress().lock().set_operation_type("Downloading");
+
+        for (rsrc, _size) in &remote_sources {
+            let info = remote::remote_stat(rsrc).await?;
+            let inc = runner.inc_callback();
+            let file_cb = runner.file_callback();
+
+            if info.is_dir {
+                if !args.is_recursive() {
+                    bail!(
+                        "Remote source '{}' is a directory. Use -r flag for recursive copy.",
+                        rsrc
+                    );
+                }
+                let dir_name = rsrc.path.rsplit('/').next().unwrap_or(&rsrc.path);
+                let local_dir = if dest_local.is_dir() {
+                    dest_local.join(dir_name)
+                } else {
+                    dest_local.to_path_buf()
+                };
+                if !local_dir.exists() {
+                    tokio::fs::create_dir_all(&local_dir).await?;
+                }
+                remote::download_directory(rsrc, &local_dir, &inc, &file_cb).await?;
+            } else {
+                let local_path = if dest_local.is_dir() {
+                    let fname = rsrc.path.rsplit('/').next().unwrap_or(&rsrc.path);
+                    dest_local.join(fname)
+                } else {
+                    dest_local.to_path_buf()
+                };
+                remote::download_file(rsrc, &local_path, &inc, &file_cb, info.size).await?;
+            }
+        }
+
+        runner.finish_ok()
+    }
 }
 
 async fn handle_move_command(args: &Commands) -> Result<()> {
