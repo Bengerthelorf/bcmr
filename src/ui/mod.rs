@@ -4,3 +4,4 @@ pub mod state;
 pub mod tui;
 pub mod inline;
 pub mod display;
+pub mod suspend;
