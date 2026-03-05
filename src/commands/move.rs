@@ -30,6 +30,7 @@ pub async fn get_total_size(
 
 // use std::sync::Arc;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn move_path<F>(
     src: &Path,
     dst: &Path,
@@ -63,36 +64,35 @@ where
         }
 
         if cli.is_dry_run() {
-             print_dry_run(
-                ActionType::Move, 
+            print_dry_run(
+                ActionType::Move,
                 &src.to_string_lossy(),
                 Some(&dst_path.to_string_lossy())
             );
             return Ok(());
-        } else {
-            if dst_path.exists() && cli.is_force() {
-                fs::remove_file(&dst_path).await?;
-            }
-            
-            // Try rename -> EXDEV? Copy+Rm : Err
-            if let Err(e) = fs::rename(src, &dst_path).await {
-                if e.raw_os_error() == Some(libc::EXDEV) {
-                     // Fallback to copy+delete
-                     copy::copy_path(
-                        src, 
-                        &dst_path, 
-                        false, 
-                        preserve, 
-                        test_mode, 
-                        cli, 
-                        excludes, 
-                        progress_callback.clone(),
-                        on_new_file.clone()
-                     ).await?;
-                     fs::remove_file(src).await?;
-                } else {
-                    return Err(BcmrError::Io(e));
-                }
+        }
+
+        if dst_path.exists() && cli.is_force() {
+            fs::remove_file(&dst_path).await?;
+        }
+
+        // Try rename -> EXDEV? Copy+Rm : Err
+        if let Err(e) = fs::rename(src, &dst_path).await {
+            if e.raw_os_error() == Some(libc::EXDEV) {
+                copy::copy_path(
+                    src,
+                    &dst_path,
+                    false,
+                    preserve,
+                    test_mode,
+                    cli,
+                    excludes,
+                    progress_callback.clone(),
+                    on_new_file.clone()
+                ).await?;
+                fs::remove_file(src).await?;
+            } else {
+                return Err(BcmrError::Io(e));
             }
         }
     } else if recursive && src.is_dir() {
@@ -160,24 +160,22 @@ where
             remove_directory_contents(src, excludes).await?;
             let _ = fs::remove_dir(src).await; 
 
-        } else {
-             if let Err(e) = fs::rename(src, &new_dst).await {
-                if e.raw_os_error() == Some(libc::EXDEV) {
-                     copy::copy_path(
-                        src,
-                        dst,
-                        recursive,
-                        preserve,
-                        test_mode,
-                        cli,
-                        excludes,
-                        progress_callback.clone(),
-                        on_new_file.clone()
-                    ).await?;
-                    fs::remove_dir_all(src).await?;
-                } else {
-                    return Err(e.into());
-                }
+        } else if let Err(e) = fs::rename(src, &new_dst).await {
+            if e.raw_os_error() == Some(libc::EXDEV) {
+                copy::copy_path(
+                    src,
+                    dst,
+                    recursive,
+                    preserve,
+                    test_mode,
+                    cli,
+                    excludes,
+                    progress_callback.clone(),
+                    on_new_file.clone()
+                ).await?;
+                fs::remove_dir_all(src).await?;
+            } else {
+                return Err(e.into());
             }
         }
     } else if src.is_dir() {

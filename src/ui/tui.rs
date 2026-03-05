@@ -150,32 +150,9 @@ impl TuiProgress {
         // Draw fancy box
         let current_row = self.start_row;
 
-        // --- Top Border ---
-        execute!(
-            stdout,
-            MoveTo(0, current_row),
-            SetForegroundColor(border_color)
-        )?;
-        write!(stdout, "{}{} {}", top_left, horizontal, operation)?; // Start of title box
-
-        // Title
-        execute!(
-            stdout,
-            SetForegroundColor(title_color),
-            SetAttribute(Attribute::Bold)
-        )?;
-        write!(stdout, "{}", operation)?;
-
-        // Continue border
-        execute!(
-            stdout,
-            SetAttribute(Attribute::Reset),
-            SetForegroundColor(border_color)
-        )?;
-
         let title_len = operation.len();
 
-        // Reset and just draw the top line with title embedded
+        // --- Top Border ---
         execute!(
             stdout,
             MoveTo(0, current_row),
@@ -391,7 +368,7 @@ impl ProgressRenderer for TuiProgress {
         self.data.current_bytes += delta;
         self.data.current_file_progress += delta;
         // Only redraw every 1MB to reduce flicker and improve visibility
-        if self.data.current_bytes % (1024 * 1024) == 0
+        if self.data.current_bytes.is_multiple_of(1024 * 1024)
             || self.data.current_bytes >= self.data.total_bytes
         {
             let _ = self.redraw();

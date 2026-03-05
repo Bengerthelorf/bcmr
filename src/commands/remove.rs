@@ -80,10 +80,8 @@ fn check_removes_sync(
                     });
                 }
             }
-        } else {
-            if !force {
-                return Err(BcmrError::SourceNotFound(path.to_path_buf()));
-            }
+        } else if !force {
+            return Err(BcmrError::SourceNotFound(path.to_path_buf()));
         }
     }
 
@@ -97,7 +95,6 @@ pub async fn check_removes(
     excludes: &[regex::Regex],
 ) -> std::result::Result<Vec<FileToRemove>, BcmrError> {
     let paths = paths.to_vec();
-    let recursive = recursive;
     let dir_only = cli.is_dir_only();
     let force = cli.is_force();
     let excludes = excludes.to_vec();
@@ -144,7 +141,6 @@ pub async fn get_total_size(
     excludes: &[regex::Regex],
 ) -> std::result::Result<u64, BcmrError> {
     let paths = paths.to_vec();
-    let recursive = recursive;
     let excludes = excludes.to_vec();
 
     tokio::task::spawn_blocking(move || get_total_size_sync(paths, recursive, excludes)).await?
@@ -180,6 +176,7 @@ async fn confirm_remove(path: &Path, is_dir: bool) -> std::result::Result<bool, 
     Ok(input.trim().to_lowercase() == "y" || input.trim().to_lowercase() == "yes")
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn remove_path(
     path: &Path,
     is_dir: bool,
@@ -195,10 +192,8 @@ pub async fn remove_path(
     }
 
     // Handle interactive mode
-    if cli.is_interactive() && !cli.is_force() {
-        if !confirm_remove(path, is_dir).await? {
-            return Ok(());
-        }
+    if cli.is_interactive() && !cli.is_force() && !confirm_remove(path, is_dir).await? {
+        return Ok(());
     }
 
     let file_name = path
@@ -373,6 +368,9 @@ impl ProgressState {
     }
 }
 
+type FileCallback = Box<dyn Fn(&str, u64) + Send + Sync>;
+
+#[allow(clippy::too_many_arguments)]
 pub async fn remove_paths(
     paths: &[PathBuf],
     test_mode: TestMode,
@@ -380,7 +378,7 @@ pub async fn remove_paths(
     excludes: &[regex::Regex],
     progress: Arc<Mutex<CopyProgress>>,
     progress_callback: impl Fn(u64) + Send + Sync + Clone + 'static,
-    on_new_file: Box<dyn Fn(&str, u64) + Send + Sync>,
+    on_new_file: FileCallback,
 ) -> std::result::Result<(), BcmrError> {
     // First, calculate total number of items to process
     let files_to_remove = check_removes(paths, cli.is_recursive(), cli, excludes).await?;

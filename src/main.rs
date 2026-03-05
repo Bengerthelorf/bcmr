@@ -128,10 +128,11 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         let files_to_overwrite =
         commands::copy::check_overwrites(sources, dest, args.is_recursive(), args, &excludes).await?;
 
-        if !files_to_overwrite.is_empty() && args.should_prompt_for_overwrite() {
-            if !confirm_overwrite(&files_to_overwrite).await? {
-                return Err(BcmrError::Cancelled.into());
-            }
+        if !files_to_overwrite.is_empty()
+            && args.should_prompt_for_overwrite()
+            && !confirm_overwrite(&files_to_overwrite).await?
+        {
+            return Err(BcmrError::Cancelled.into());
         }
     }
 
@@ -224,7 +225,6 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         bail!("Copy operation encountered errors.");
     }
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
     Ok(())
 }
 
@@ -246,11 +246,12 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
         let files_to_overwrite =
             commands::r#move::check_overwrites(sources, dest, args.is_recursive(), args, &excludes).await?;
 
-        if !files_to_overwrite.is_empty() && args.should_prompt_for_overwrite() {
-            if !confirm_overwrite(&files_to_overwrite).await? {
-                println!("Operation cancelled.");
-                return Ok(());
-            }
+        if !files_to_overwrite.is_empty()
+            && args.should_prompt_for_overwrite()
+            && !confirm_overwrite(&files_to_overwrite).await?
+        {
+            println!("Operation cancelled.");
+            return Ok(());
         }
     }
 
@@ -338,7 +339,6 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
         bail!("Move operation encountered errors.");
     }
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
     Ok(())
 }
 
@@ -359,11 +359,10 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         && !files_to_remove.is_empty()
         && !args.is_force()
         && (!args.is_interactive() || files_to_remove.len() > 1)
+        && !confirm_removal(&files_to_remove).await?
     {
-        if !confirm_removal(&files_to_remove).await? {
-            println!("Operation cancelled.");
-            return Ok(());
-        }
+        println!("Operation cancelled.");
+        return Ok(());
     }
 
     // Total size
@@ -442,8 +441,6 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         }
     }
 
-    // Wait for final status
-    tokio::time::sleep(Duration::from_secs(1)).await;
     Ok(())
 }
 

@@ -1,10 +1,8 @@
-use crate::cli::{Commands, TestMode, SparseMode}; // Added SparseMode
+use crate::cli::{Commands, TestMode, SparseMode};
 use crate::core::traversal;
 use crate::core::checksum;
 use crate::core::error::BcmrError;
 use crate::ui::display::{print_dry_run, ActionType};
-
-
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -126,17 +124,57 @@ pub async fn get_total_size(
     excludes: &[regex::Regex],
 ) -> std::result::Result<u64, BcmrError> {
     let sources = sources.to_vec();
-    let recursive = recursive;
     let excludes = excludes.to_vec();
 
     tokio::task::spawn_blocking(move || get_total_size_sync(sources, recursive, excludes)).await?
 }
 
+fn determine_dry_run_action(
+    src: &Path,
+    dst: &Path,
+    cli: &Commands,
+) -> std::result::Result<ActionType, BcmrError> {
+    if !dst.exists() {
+        return Ok(ActionType::Add);
+    }
+    let src_meta = src.metadata()?;
+    let dst_meta = dst.metadata()?;
+    let src_len = src_meta.len();
+    let dst_len = dst_meta.len();
+
+    if cli.is_strict() || cli.is_append() {
+        if dst_len == src_len {
+            return Ok(ActionType::Skip);
+        } else if dst_len < src_len {
+            return Ok(ActionType::Append);
+        }
+        return Ok(ActionType::Overwrite);
+    }
+
+    if cli.is_resume() {
+        let src_mtime = src_meta.modified()?;
+        let dst_mtime = dst_meta.modified()?;
+        if src_mtime != dst_mtime {
+            return Ok(ActionType::Overwrite);
+        }
+        if dst_len == src_len {
+            return Ok(ActionType::Skip);
+        } else if dst_len < src_len {
+            return Ok(ActionType::Append);
+        }
+        return Ok(ActionType::Overwrite);
+    }
+
+    Ok(ActionType::Overwrite)
+}
+
+#[allow(clippy::type_complexity)]
 pub struct ProgressCallback<F> {
     callback: F,
     on_new_file: Box<dyn Fn(&str, u64) + Send + Sync>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn copy_path<F>(
     src: &Path,
     dst: &Path,
@@ -177,55 +215,7 @@ where
         }
 
         if cli.is_dry_run() {
-            let action = if !dst_path.exists() {
-                ActionType::Add
-            } else {
-                // Logic duplicating copy_file checks for Dry Run accuracy
-                let src_meta = src.metadata()?;
-                let dst_meta = dst_path.metadata()?;
-                let src_len = src_meta.len();
-                let dst_len = dst_meta.len();
-
-                let should_resume = if cli.is_strict() {
-                    if dst_len == src_len {
-                         // Hash check -> SKIP | OVERWRITE
-                         ActionType::Skip // Optimistic
-                    } else if dst_len < src_len {
-                        ActionType::Append
-                    } else {
-                        ActionType::Overwrite
-                    }
-                } else if cli.is_append() {
-                    if dst_len == src_len {
-                        ActionType::Skip
-                    } else if dst_len < src_len {
-                        ActionType::Append
-                    } else {
-                        ActionType::Overwrite
-                    }
-                } else if cli.is_resume() {
-                    // Check Mtime
-                    let src_mtime = src_meta.modified()?;
-                    let dst_mtime = dst_meta.modified()?;
-                    
-                    if src_mtime != dst_mtime {
-                        ActionType::Overwrite
-                    } else {
-                        if dst_len == src_len {
-                            ActionType::Skip
-                        } else if dst_len < src_len {
-                            ActionType::Append
-                        } else {
-                            ActionType::Overwrite
-                        }
-                    }
-                } else {
-                    ActionType::Overwrite
-                };
-                
-                should_resume
-            };
-            
+            let action = determine_dry_run_action(src, &dst_path, cli)?;
             print_dry_run(
                 action,
                 &src.to_string_lossy(),
@@ -238,7 +228,12 @@ where
             fs::remove_file(&dst_path).await?;
         }
 
-        copy_file(src, &dst_path, preserve, cli.is_verify(), cli.is_resume(), cli.is_strict(), cli.is_append(), cli.get_reflink_mode(), cli.get_sparse_mode(), test_mode, &callback).await?;
+        copy_file(src, &dst_path, CopyFileOptions {
+            preserve, verify: cli.is_verify(), resume: cli.is_resume(),
+            strict: cli.is_strict(), append: cli.is_append(),
+            reflink_arg: cli.get_reflink_mode(), sparse_arg: cli.get_sparse_mode(),
+            test_mode,
+        }, &callback).await?;
     } else if recursive && src.is_dir() {
         let src_dir_name = src
             .file_name()
@@ -249,14 +244,12 @@ where
             dst.to_path_buf()
         };
 
-        if cli.is_dry_run() {
-             if !new_dst.exists() {
-                 print_dry_run(
-                     ActionType::Add,
-                     &src.to_string_lossy(),
-                     Some(&format!("(DIR) -> {}", new_dst.display()))
-                 );
-             }
+        if cli.is_dry_run() && !new_dst.exists() {
+            print_dry_run(
+                ActionType::Add,
+                &src.to_string_lossy(),
+                Some(&format!("(DIR) -> {}", new_dst.display()))
+            );
         }
 
         // Create the target directory (if it does not exist)
@@ -280,14 +273,12 @@ where
                     if preserve {
                         set_dir_attributes(path, &target_path).await?;
                     }
-                } else {
-                    if !target_path.exists() {
-                        print_dry_run(
-                            ActionType::Add,
-                            &path.to_string_lossy(),
-                            Some(&format!("(DIR) -> {}", target_path.display()))
-                        );
-                    }
+                } else if !target_path.exists() {
+                    print_dry_run(
+                        ActionType::Add,
+                        &path.to_string_lossy(),
+                        Some(&format!("(DIR) -> {}", target_path.display()))
+                    );
                 }
             } else if path.is_file() {
                 files_to_copy.push((path.to_path_buf(), target_path));
@@ -308,34 +299,7 @@ where
             }
 
             if cli.is_dry_run() {
-                let action = if !dst_path.exists() {
-                    ActionType::Add
-                } else {
-                    let src_meta = src_path.metadata()?;
-                    let dst_meta = dst_path.metadata()?;
-                    let src_len = src_meta.len();
-                    let dst_len = dst_meta.len();
-
-                    if cli.is_strict() {
-                        if dst_len == src_len { ActionType::Skip }
-                        else if dst_len < src_len { ActionType::Append }
-                        else { ActionType::Overwrite }
-                    } else if cli.is_append() {
-                        if dst_len == src_len { ActionType::Skip }
-                        else if dst_len < src_len { ActionType::Append }
-                        else { ActionType::Overwrite }
-                    } else if cli.is_resume() {
-                        let src_mtime = src_meta.modified()?;
-                        let dst_mtime = dst_meta.modified()?;
-                        if src_mtime != dst_mtime { ActionType::Overwrite }
-                        else if dst_len == src_len { ActionType::Skip }
-                        else if dst_len < src_len { ActionType::Append }
-                        else { ActionType::Overwrite }
-                    } else {
-                        ActionType::Overwrite
-                    }
-                };
-
+                let action = determine_dry_run_action(&src_path, &dst_path, cli)?;
                 print_dry_run(
                     action,
                     &src_path.to_string_lossy(),
@@ -345,18 +309,19 @@ where
                 if dst_path.exists() && cli.is_force() && !cli.is_resume() && !cli.is_append() && !cli.is_strict() {
                     fs::remove_file(&dst_path).await?;
                 }
-
                 copy_file(
                     &src_path,
                     &dst_path,
-                    preserve,
-                    cli.is_verify(),
-                    cli.is_resume(),
-                    cli.is_strict(),
-                    cli.is_append(),
-                    cli.get_reflink_mode(),
-                    cli.get_sparse_mode(),
-                    test_mode.clone(),
+                    CopyFileOptions {
+                        preserve,
+                        verify: cli.is_verify(),
+                        resume: cli.is_resume(),
+                        strict: cli.is_strict(),
+                        append: cli.is_append(),
+                        reflink_arg: cli.get_reflink_mode(),
+                        sparse_arg: cli.get_sparse_mode(),
+                        test_mode: test_mode.clone(),
+                    },
                     &callback,
                 )
                 .await?;
@@ -407,29 +372,31 @@ async fn set_dir_attributes(src: &Path, dst: &Path) -> std::result::Result<(), B
     Ok(())
 }
 
-// Add to imports if not present. But create::config::CONFIG is needed.
-// Add `use crate::config::CONFIG;` to top of file? No, we need to import it.
-// Let's modify the imports first in a separate call if needed, or assume it's available?
-// Better to import it inside the function or make sure it's imported.
-// Let's assume we need to import it.
-// Better to update imports first.
-
-async fn copy_file<F>(
-    src: &Path,
-    dst: &Path,
+struct CopyFileOptions {
     preserve: bool,
     verify: bool,
     resume: bool,
     strict: bool,
-    append: bool, // Fixed duplicate
+    append: bool,
     reflink_arg: Option<String>,
     sparse_arg: Option<String>,
     test_mode: TestMode,
+}
+
+async fn copy_file<F>(
+    src: &Path,
+    dst: &Path,
+    opts: CopyFileOptions,
     callback: &ProgressCallback<F>,
 ) -> std::result::Result<(), BcmrError>
 where
     F: Fn(u64),
 {
+    let CopyFileOptions {
+        preserve, verify, resume, strict, append,
+        reflink_arg, sparse_arg, test_mode,
+    } = opts;
+
     let file_size = src.metadata()?.len();
     let file_name = src
         .file_name()
@@ -481,7 +448,7 @@ where
 
     // Try reflink if requested
     // But if SparseMode is Always (Force), we MUST scan the file, so we disable reflink.
-    if try_reflink && matches!(sparse_mode, SparseMode::Always) == false {
+    if try_reflink && !matches!(sparse_mode, SparseMode::Always) {
         let src_path = src.to_path_buf();
         let dst_path = dst.to_path_buf();
         let result = tokio::task::spawn_blocking(move || reflink_copy::reflink(&src_path, &dst_path))
@@ -554,17 +521,11 @@ where
 
             if src_mtime != dst_mtime {
                 false
+            } else if dst_len == file_size {
+                (callback.callback)(file_size);
+                return Ok(());
             } else {
-                if dst_len == file_size {
-                    (callback.callback)(file_size);
-                    return Ok(());
-                } else if dst_len < file_size {
-                    // Partial match -> Append
-                    true
-                } else {
-                    // dst > src -> Overwrite
-                    false 
-                }
+                dst_len < file_size
             }
         };
 

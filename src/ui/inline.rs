@@ -113,7 +113,11 @@ impl InlineProgress {
 
         let file_info = &self.data.current_file;
         let display_file = if file_info.len() > name_width {
-            format!("{}...", &file_info[..name_width.saturating_sub(3)])
+            let mut end = name_width.saturating_sub(3);
+            if !file_info.is_char_boundary(end) {
+                end = file_info.floor_char_boundary(end);
+            }
+            format!("{}...", &file_info[..end])
         } else {
             format!("{:width$}", file_info, width = name_width)
         };

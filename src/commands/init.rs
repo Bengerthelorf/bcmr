@@ -133,7 +133,6 @@ unset -f cp mv rm bcp bmv brm 2>/dev/null || true
         .to_string(),
 
         Shell::Fish => r#"
-        Shell::Fish => r#"
 functions -e cp mv rm bcp bmv brm 2>/dev/null || true
 "#
         .to_string(),
