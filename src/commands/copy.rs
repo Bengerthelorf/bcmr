@@ -359,15 +359,9 @@ async fn set_dir_attributes(src: &Path, dst: &Path) -> std::result::Result<(), B
 
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-        if let (Ok(atime), Ok(mtime)) = (
-            src_metadata.last_access_time().try_into(),
-            src_metadata.last_write_time().try_into(),
-        ) {
-            let atime = filetime::FileTime::from_windows_file_time(atime);
-            let mtime = filetime::FileTime::from_windows_file_time(mtime);
-            filetime::set_file_times(dst, atime, mtime)?;
-        }
+        let atime = filetime::FileTime::from_last_access_time(&src_metadata);
+        let mtime = filetime::FileTime::from_last_modification_time(&src_metadata);
+        filetime::set_file_times(dst, atime, mtime)?;
     }
     Ok(())
 }

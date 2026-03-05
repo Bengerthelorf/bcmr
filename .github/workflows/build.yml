@@ -16,8 +16,12 @@ env:
 
 jobs:
   test:
-    name: Test Suite
-    runs-on: ubuntu-latest
+    name: Test Suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -68,6 +72,12 @@ jobs:
             name: bcmr-aarch64-macos
             strip: true
 
+          # Windows x86_64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: bcmr-x86_64-windows
+            strip: false
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -99,23 +109,18 @@ jobs:
 
       - name: Strip binary
         if: matrix.strip
-        run: |
-          case ${{ matrix.target }} in
-            aarch64-apple-darwin)
-              strip target/${{ matrix.target }}/release/bcmr
-              ;;
-            x86_64-apple-darwin)
-              strip target/${{ matrix.target }}/release/bcmr
-              ;;
-            x86_64-unknown-linux-musl)
-              strip target/${{ matrix.target }}/release/bcmr
-              ;;
-          esac
+        shell: bash
+        run: strip target/${{ matrix.target }}/release/bcmr
 
       - name: Prepare binary
+        shell: bash
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/bcmr dist/
+          if [ -f target/${{ matrix.target }}/release/bcmr.exe ]; then
+            cp target/${{ matrix.target }}/release/bcmr.exe dist/
+          else
+            cp target/${{ matrix.target }}/release/bcmr dist/
+          fi
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
@@ -147,7 +152,11 @@ jobs:
           cd dist
           for dir in */; do
             cd "$dir"
-            tar czf "../${dir%/}.tar.gz" bcmr
+            if ls bcmr.exe 1>/dev/null 2>&1; then
+              tar czf "../${dir%/}.tar.gz" bcmr.exe
+            else
+              tar czf "../${dir%/}.tar.gz" bcmr
+            fi
             cd ..
           done
 
@@ -176,6 +185,7 @@ jobs:
           echo "- **Linux x86_64**: bcmr-x86_64-linux.tar.gz (statically linked, compatible with most Linux distributions)" >> CHANGELOG.md
           echo "- **macOS Intel**: bcmr-x86_64-macos.tar.gz" >> CHANGELOG.md
           echo "- **macOS Apple Silicon**: bcmr-aarch64-macos.tar.gz" >> CHANGELOG.md
+          echo "- **Windows x86_64**: bcmr-x86_64-windows.tar.gz" >> CHANGELOG.md
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
