@@ -1,0 +1,37 @@
+name: Publish to WinGet
+
+on:
+  release:
+    types: [released]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.3.30)'
+        required: true
+
+jobs:
+  publish:
+    name: Publish to WinGet
+    runs-on: windows-latest
+    steps:
+      - name: Get version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          VERSION="${TAG#v}"
+          echo "TAG=$TAG" >> $GITHUB_OUTPUT
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Submit to WinGet
+        uses: vedantmgoyal9/winget-releaser@main
+        with:
+          identifier: Bengerthelorf.bcmr
+          version: ${{ steps.version.outputs.VERSION }}
+          installers-regex: 'bcmr-x86_64-windows\.zip$'
+          release-tag: ${{ steps.version.outputs.TAG }}
+          token: ${{ secrets.WINGET_TOKEN }}

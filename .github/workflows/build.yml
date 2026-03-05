@@ -154,6 +154,7 @@ jobs:
             cd "$dir"
             if ls bcmr.exe 1>/dev/null 2>&1; then
               tar czf "../${dir%/}.tar.gz" bcmr.exe
+              zip "../${dir%/}.zip" bcmr.exe
             else
               tar czf "../${dir%/}.tar.gz" bcmr
             fi
@@ -190,7 +191,9 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: dist/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
           body_path: CHANGELOG.md
           draft: false
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
