@@ -26,49 +26,21 @@ impl ProgressRenderer for SilentProgress {
     }
 }
 
-// Public interface
-pub struct CopyProgress {
-    inner: Box<dyn ProgressRenderer>,
-}
-
-impl CopyProgress {
-    pub fn new(total_bytes: u64, tui_mode: bool, silent: bool) -> io::Result<Self> {
-        let inner: Box<dyn ProgressRenderer> = if silent {
-            Box::new(SilentProgress)
-        } else if tui_mode {
-            Box::new(InlineProgress::new(total_bytes)?)
-        } else {
-            Box::new(TuiProgress::new(total_bytes)?)
-        };
-
-        Ok(Self { inner })
-    }
-
-    pub fn set_total_items(&mut self, total: usize) {
-        self.inner.set_total_items(total);
-    }
-
-    pub fn inc_items_processed(&mut self) {
-        self.inner.inc_items_processed();
-    }
-
-    pub fn set_current_file(&mut self, file_name: &str, file_size: u64) {
-        self.inner.set_current_file(file_name, file_size);
-    }
-
-    pub fn inc_current(&mut self, delta: u64) {
-        self.inner.inc_current(delta);
-    }
-
-    pub fn set_operation_type(&mut self, operation: &str) {
-        self.inner.set_operation_type(operation);
-    }
-
-    pub fn tick(&mut self) {
-        self.inner.tick();
-    }
-
-    pub fn finish(&mut self) -> io::Result<()> {
-        self.inner.finish()
+/// Creates the appropriate progress renderer based on display mode.
+///
+/// - `silent`: no output (dry-run mode)
+/// - `plain`: inline 3-line text progress (--tui flag or config)
+/// - default: fancy TUI box with gradient progress bar
+pub fn create_renderer(
+    total_bytes: u64,
+    plain: bool,
+    silent: bool,
+) -> io::Result<Box<dyn ProgressRenderer>> {
+    if silent {
+        Ok(Box::new(SilentProgress))
+    } else if plain {
+        Ok(Box::new(InlineProgress::new(total_bytes)?))
+    } else {
+        Ok(Box::new(TuiProgress::new(total_bytes)?))
     }
 }

@@ -124,21 +124,6 @@ end
     }
 }
 
-#[allow(dead_code)]
-pub fn generate_uninstall_script(shell: &Shell) -> String {
-    match shell {
-        Shell::Bash | Shell::Zsh => r#"
-unset -f cp mv rm bcp bmv brm 2>/dev/null || true
-"#
-        .to_string(),
-
-        Shell::Fish => r#"
-functions -e cp mv rm bcp bmv brm 2>/dev/null || true
-"#
-        .to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

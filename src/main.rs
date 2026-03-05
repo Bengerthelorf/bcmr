@@ -9,15 +9,25 @@ use crate::core::error::BcmrError;
 use anyhow::{bail, Result};
 use cli::Commands;
 use parking_lot::Mutex;
-use ui::progress::CopyProgress;
+use ui::progress::{self, ProgressRenderer};
 use std::io::{self, Write};
 use std::sync::Arc;
 
 use tokio::signal::ctrl_c;
 use tokio::time::Duration;
 
-fn is_plain_mode_enabled(args: &Commands) -> bool {
+fn is_plain_mode(args: &Commands) -> bool {
     args.is_tui_mode() || CONFIG.progress.style.eq_ignore_ascii_case("plain")
+}
+
+// --- Confirmation dialogs ---
+
+fn prompt_yes_no(message: &str) -> Result<bool> {
+    print!("{} [y/N] ", message);
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(input.trim().eq_ignore_ascii_case("y"))
 }
 
 async fn confirm_overwrite(files: &[commands::copy::FileToOverwrite]) -> Result<bool> {
@@ -29,18 +39,10 @@ async fn confirm_overwrite(files: &[commands::copy::FileToOverwrite]) -> Result<
             file.path.display()
         );
     }
-
-    print!("\nDo you want to proceed? [y/N] ");
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-
-    Ok(input.trim().to_lowercase() == "y")
+    prompt_yes_no("\nDo you want to proceed?")
 }
 
 async fn confirm_removal(files: &[commands::remove::FileToRemove]) -> Result<bool> {
-    // Calc stats
     let mut total_size = 0u64;
     let mut file_count = 0;
     let mut dir_count = 0;
@@ -77,14 +79,72 @@ async fn confirm_removal(files: &[commands::remove::FileToRemove]) -> Result<boo
         );
     }
 
-    print!("\nDo you want to proceed? [y/N] ");
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-
-    Ok(input.trim().to_lowercase() == "y")
+    prompt_yes_no("\nDo you want to proceed?")
 }
+
+// --- Progress runner: shared boilerplate for all commands ---
+
+struct ProgressRunner {
+    progress: Arc<Mutex<Box<dyn ProgressRenderer>>>,
+    ticker_handle: tokio::task::JoinHandle<()>,
+}
+
+impl ProgressRunner {
+    fn new(total_size: u64, plain: bool, silent: bool) -> io::Result<Self> {
+        let renderer = progress::create_renderer(total_size, plain, silent)?;
+        let progress = Arc::new(Mutex::new(renderer));
+
+        let ticker = Arc::clone(&progress);
+        let ticker_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(100));
+            loop {
+                interval.tick().await;
+                ticker.lock().tick();
+            }
+        });
+
+        let signal = Arc::clone(&progress);
+        tokio::spawn(async move {
+            if let Ok(()) = ctrl_c().await {
+                let _ = signal.lock().finish();
+                std::process::exit(0);
+            }
+        });
+
+        Ok(Self {
+            progress,
+            ticker_handle,
+        })
+    }
+
+    fn progress(&self) -> &Arc<Mutex<Box<dyn ProgressRenderer>>> {
+        &self.progress
+    }
+
+    fn inc_callback(&self) -> impl Fn(u64) + Send + Sync + Clone + 'static {
+        let p = Arc::clone(&self.progress);
+        move |n| p.lock().inc_current(n)
+    }
+
+    fn file_callback(&self) -> impl Fn(&str, u64) + Send + Sync + Clone + 'static {
+        let p = Arc::clone(&self.progress);
+        move |name, size| p.lock().set_current_file(name, size)
+    }
+
+    fn finish_ok(self) -> Result<()> {
+        self.ticker_handle.abort();
+        self.progress.lock().finish()?;
+        Ok(())
+    }
+
+    fn finish_err(self, msg: String) -> Result<()> {
+        self.ticker_handle.abort();
+        let _ = self.progress.lock().finish();
+        bail!("{}", msg);
+    }
+}
+
+// --- Command handlers ---
 
 async fn handle_copy_command(args: &Commands) -> Result<()> {
     let test_mode = args.get_test_mode();
@@ -93,27 +153,11 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         .get_sources_and_dest()
         .map_err(anyhow::Error::msg)?;
 
-    // Validation
     if let Some(mode) = args.get_reflink_mode() {
-         match mode.to_lowercase().as_str() {
-             "force" => {},
-             "disable" => {},
-             "auto" => {},
-             other => {
-                 return Err(BcmrError::InvalidInput(format!("Invalid reflink mode '{}'. Supported modes: force, disable, auto.", other)).into());
-             }
-         }
+        validate_mode(&mode, "reflink")?;
     }
-
     if let Some(mode) = args.get_sparse_mode() {
-         match mode.to_lowercase().as_str() {
-             "force" => {},
-             "disable" => {},
-             "auto" => {},
-             other => {
-                 return Err(BcmrError::InvalidInput(format!("Invalid sparse mode '{}'. Supported modes: force, disable, auto.", other)).into());
-             }
-         }
+        validate_mode(&mode, "sparse")?;
     }
 
     if sources.len() > 1 && (!dest.exists() || !dest.is_dir()) {
@@ -124,9 +168,8 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
     }
 
     if args.is_force() {
-    // Force -> Check overwrites
         let files_to_overwrite =
-        commands::copy::check_overwrites(sources, dest, args.is_recursive(), args, &excludes).await?;
+            commands::copy::check_overwrites(sources, dest, args.is_recursive(), args, &excludes).await?;
 
         if !files_to_overwrite.is_empty()
             && args.should_prompt_for_overwrite()
@@ -140,92 +183,29 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         println!("DRY RUN MODE: No changes will be made.");
     }
 
-    // Total size
     let total_size = commands::copy::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
-    let progress = Arc::new(Mutex::new(CopyProgress::new(
-        total_size,
-        is_plain_mode_enabled(args),
-        args.is_dry_run(),
-    )?));
+    let runner = ProgressRunner::new(total_size, is_plain_mode(args), args.is_dry_run())?;
 
-    // Init display
     if let Some(first) = sources.first() {
         let display_name = first.file_name().unwrap_or_default().to_string_lossy();
-        progress.lock().set_current_file(&display_name, total_size);
+        runner.progress().lock().set_current_file(&display_name, total_size);
     }
 
-    // Clones
-    let progress_for_inc = Arc::clone(&progress);
-    let progress_for_file = Arc::clone(&progress);
-
-    let progress_for_signal = Arc::clone(&progress);
-
-    let progress_ticker = Arc::clone(&progress);
-    // Spawn ticker
-    let ticker_handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(100));
-        loop {
-            interval.tick().await;
-            progress_ticker.lock().tick();
-        }
-    });
-
-    // Ctrl+C handler
-    tokio::spawn(async move {
-        if let Ok(()) = ctrl_c().await {
-            let _ = progress_for_signal.lock().finish();
-            std::process::exit(0);
-        }
-    });
-
-    // Process sources
-    let mut success = true;
     for src in sources {
         let result = commands::copy::copy_path(
-            src,
-            dest,
-            args.is_recursive(),
-            args.is_preserve(),
-            test_mode.clone(),
-            args,
-            &excludes,
-            {
-                let p = Arc::clone(&progress_for_inc);
-                move |n| p.lock().inc_current(n)
-            },
-            {
-                let p = Arc::clone(&progress_for_file);
-                move |name, size| p.lock().set_current_file(name, size)
-            },
-        )
-        .await;
+            src, dest,
+            args.is_recursive(), args.is_preserve(),
+            test_mode.clone(), args, &excludes,
+            runner.inc_callback(), runner.file_callback(),
+        ).await;
 
         if let Err(e) = result {
-            // Stop TUI, print error
-            ticker_handle.abort();
-            let mut p = progress.lock();
-            let _ = p.finish(); // Ignore error during finish if any, to ensure we print the actual error
-            drop(p);
-
             eprintln!("Error copying '{}': {}", src.display(), e);
-            success = false;
-            // Stop on error
-            break;
+            return runner.finish_err("Copy operation encountered errors.".into());
         }
     }
-    
-    // Success? Finish
-    if success {
-        ticker_handle.abort();
-        let mut progress = progress.lock();
-        progress.finish()?;
-    }
 
-    if !success {
-        bail!("Copy operation encountered errors.");
-    }
-
-    Ok(())
+    runner.finish_ok()
 }
 
 async fn handle_move_command(args: &Commands) -> Result<()> {
@@ -260,86 +240,30 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
     }
 
     let total_size = commands::r#move::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
-    let progress = Arc::new(Mutex::new(CopyProgress::new(
-        total_size,
-        is_plain_mode_enabled(args),
-        args.is_dry_run(),
-    )?));
+    let runner = ProgressRunner::new(total_size, is_plain_mode(args), args.is_dry_run())?;
 
     if let Some(first) = sources.first() {
         let display_name = first.file_name().unwrap_or_default().to_string_lossy();
-        {
-            let mut progress_guard = progress.lock();
-            progress_guard.set_current_file(&display_name, total_size);
-            progress_guard.set_operation_type("Moving");
-        }
+        let mut p = runner.progress().lock();
+        p.set_current_file(&display_name, total_size);
+        p.set_operation_type("Moving");
     }
 
-    let progress_for_inc = Arc::clone(&progress);
-    let progress_for_file = Arc::clone(&progress);
-    let progress_for_signal = Arc::clone(&progress);
-
-    // Spawn ticker
-    let progress_ticker = Arc::clone(&progress);
-    let ticker_handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(100));
-        loop {
-            interval.tick().await;
-            progress_ticker.lock().tick();
-        }
-    });
-
-    tokio::spawn(async move {
-        if let Ok(()) = ctrl_c().await {
-            let _ = progress_for_signal.lock().finish();
-            std::process::exit(0);
-        }
-    });
-
-    let mut success = true;
     for src in sources {
         let result = commands::r#move::move_path(
-            src,
-            dest,
-            args.is_recursive(),
-            args.is_preserve(),
-            test_mode.clone(),
-            args,
-            &excludes,
-            {
-                let p = Arc::clone(&progress_for_inc);
-                move |n| p.lock().inc_current(n)
-            },
-            {
-                let p = Arc::clone(&progress_for_file);
-                move |name, size| p.lock().set_current_file(name, size)
-            },
-        )
-        .await;
+            src, dest,
+            args.is_recursive(), args.is_preserve(),
+            test_mode.clone(), args, &excludes,
+            runner.inc_callback(), runner.file_callback(),
+        ).await;
 
         if let Err(e) = result {
-            ticker_handle.abort();
-            let mut p = progress.lock();
-            let _ = p.finish();
-            drop(p);
-            
             eprintln!("Error moving '{}': {}", src.display(), e);
-            success = false;
-            break;
+            return runner.finish_err("Move operation encountered errors.".into());
         }
     }
 
-    if success {
-         ticker_handle.abort();
-         let mut progress = progress.lock();
-         progress.finish()?;
-    }
-
-    if !success {
-        bail!("Move operation encountered errors.");
-    }
-
-    Ok(())
+    runner.finish_ok()
 }
 
 async fn handle_remove_command(args: &Commands) -> Result<()> {
@@ -354,7 +278,6 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         println!("DRY RUN MODE: No changes will be made.");
     }
 
-    // Confirm? (skip in dry-run)
     if !args.is_dry_run()
         && !files_to_remove.is_empty()
         && !args.is_force()
@@ -365,96 +288,34 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         return Ok(());
     }
 
-    // Total size
     let total_size = files_to_remove.iter().map(|f| f.size).sum();
+    let runner = ProgressRunner::new(total_size, is_plain_mode(args), args.is_dry_run())?;
 
-    // Init display
-    let progress = Arc::new(Mutex::new(CopyProgress::new(
-        total_size,
-        is_plain_mode_enabled(args),
-        args.is_dry_run(),
-    )?));
+    runner.progress().lock().set_operation_type("Removing");
 
-    progress.lock().set_operation_type("Removing");
-
-    // Initial display
     if let Some(first_path) = paths.first() {
         let display_name = first_path.file_name().unwrap_or_default().to_string_lossy();
-        progress.lock().set_current_file(&display_name, total_size);
+        runner.progress().lock().set_current_file(&display_name, total_size);
     }
 
-    // Clones
-    let progress_for_inc = Arc::clone(&progress);
-    let progress_for_file = Arc::clone(&progress);
+    commands::remove::remove_paths(
+        paths,
+        test_mode,
+        args,
+        &excludes,
+        Arc::clone(runner.progress()),
+        runner.inc_callback(),
+        Box::new(runner.file_callback()),
+    ).await?;
 
-    // Ctrl+C handler
-    let progress_for_signal = Arc::clone(&progress);
-    #[allow(unused_mut)]
-    let (tx, mut rx) = tokio::sync::oneshot::channel();
-
-    // Spawn ticker
-    let progress_ticker = Arc::clone(&progress);
-    let ticker_handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(100));
-        loop {
-            interval.tick().await;
-            progress_ticker.lock().tick();
-        }
-    });
-
-    tokio::spawn(async move {
-        if let Ok(()) = ctrl_c().await {
-            let _ = progress_for_signal.lock().finish();
-            let _ = tx.send(());
-        }
-    });
-
-    // Callbacks
-    let inc_callback = move |n| progress_for_inc.lock().inc_current(n);
-    let file_callback = Box::new(move |name: &str, size: u64| {
-        progress_for_file.lock().set_current_file(name, size);
-    });
-
-    // Run | Ctrl+C
-    tokio::select! {
-        result = commands::remove::remove_paths(
-            paths,
-            test_mode,
-            args,
-            &excludes,
-            Arc::clone(&progress),
-            inc_callback,
-            file_callback,
-        ) => {
-            // Cleanup
-            let mut progress = progress.lock();
-            if let Err(e) = result {
-                progress.finish()?;
-                return Err(e.into());
-            }
-            progress.finish()?;
-        }
-        _ = rx => {
-            ticker_handle.abort();
-            println!("\nOperation cancelled by user.");
-            return Ok(());
-        }
-    }
-
-    Ok(())
+    runner.finish_ok()
 }
 
 fn handle_init_command(args: &Commands) -> Result<()> {
     match args {
         Commands::Init {
-            shell,
-            cmd,
-            prefix,
-            suffix,
-            path,
-            no_cmd,
+            shell, cmd, prefix, suffix, path, no_cmd,
         } => {
-            // Script generation
             let script = commands::init::generate_init_script(
                 shell,
                 cmd.as_deref().unwrap_or(""),
@@ -463,20 +324,25 @@ fn handle_init_command(args: &Commands) -> Result<()> {
                 path.as_ref(),
                 *no_cmd
             );
-
-            // Print script for eval
             print!("{}", script);
-
             Ok(())
         }
         _ => unreachable!(),
     }
 }
 
+fn validate_mode(mode: &str, name: &str) -> Result<()> {
+    match mode.to_lowercase().as_str() {
+        "force" | "disable" | "auto" => Ok(()),
+        other => Err(BcmrError::InvalidInput(
+            format!("Invalid {} mode '{}'. Supported modes: force, disable, auto.", name, other)
+        ).into()),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = cli::parse_args();
-    // Load config (lazy static)
 
     match &cli.command {
         Commands::Copy { .. } => handle_copy_command(&cli.command).await?,

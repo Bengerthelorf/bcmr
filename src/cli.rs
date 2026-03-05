@@ -402,15 +402,6 @@ impl Commands {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn get_operation_type(&self) -> &'static str {
-        match self {
-            Commands::Copy { .. } => "Copying",
-            Commands::Move { .. } => "Moving",
-            Commands::Remove { .. } => "Removing",
-            Commands::Init { .. } => "Initializing",
-        }
-    }
 }
 
 pub fn parse_args() -> Cli {

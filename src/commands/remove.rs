@@ -1,5 +1,5 @@
 use crate::cli::{Commands, TestMode};
-use crate::ui::progress::CopyProgress;
+use crate::ui::progress::ProgressRenderer;
 use crate::ui::display::{print_dry_run, ActionType};
 use crate::core::traversal;
 use crate::core::error::BcmrError;
@@ -105,46 +105,6 @@ pub async fn check_removes(
     .await?
 }
 
-fn get_total_size_sync(
-    paths: Vec<PathBuf>,
-    recursive: bool,
-    excludes: Vec<regex::Regex>,
-) -> std::result::Result<u64, BcmrError> {
-    let mut total_size = 0;
-
-    for path in paths {
-        if traversal::is_excluded(&path, &excludes) {
-            continue;
-        }
-
-        if path.is_file() {
-            total_size += path.metadata()?.len();
-        } else if recursive && path.is_dir() {
-            for entry in traversal::walk(&path, true, false, 1, &excludes) {
-                let entry = entry?;
-                let p = entry.path();
-                if p.is_file() {
-                    total_size += entry.metadata()?.len();
-                }
-            }
-        }
-    }
-
-    Ok(total_size)
-}
-
-#[allow(dead_code)]
-pub async fn get_total_size(
-    paths: &[PathBuf],
-    recursive: bool,
-    _cli: &Commands,
-    excludes: &[regex::Regex],
-) -> std::result::Result<u64, BcmrError> {
-    let paths = paths.to_vec();
-    let excludes = excludes.to_vec();
-
-    tokio::task::spawn_blocking(move || get_total_size_sync(paths, recursive, excludes)).await?
-}
 
 async fn confirm_remove(path: &Path, is_dir: bool) -> std::result::Result<bool, BcmrError> {
     use crossterm::{
@@ -350,11 +310,11 @@ pub async fn remove_path(
 
 pub struct ProgressState {
     processed_items: usize,
-    progress: Arc<Mutex<CopyProgress>>,
+    progress: Arc<Mutex<Box<dyn ProgressRenderer>>>,
 }
 
 impl ProgressState {
-    pub fn new(total_items: usize, progress: Arc<Mutex<CopyProgress>>) -> Self {
+    pub fn new(total_items: usize, progress: Arc<Mutex<Box<dyn ProgressRenderer>>>) -> Self {
         progress.lock().set_total_items(total_items);
         Self {
             processed_items: 0,
@@ -376,7 +336,7 @@ pub async fn remove_paths(
     test_mode: TestMode,
     cli: &Commands,
     excludes: &[regex::Regex],
-    progress: Arc<Mutex<CopyProgress>>,
+    progress: Arc<Mutex<Box<dyn ProgressRenderer>>>,
     progress_callback: impl Fn(u64) + Send + Sync + Clone + 'static,
     on_new_file: FileCallback,
 ) -> std::result::Result<(), BcmrError> {

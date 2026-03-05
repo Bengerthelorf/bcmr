@@ -129,6 +129,11 @@ pub async fn get_total_size(
     tokio::task::spawn_blocking(move || get_total_size_sync(sources, recursive, excludes)).await?
 }
 
+/// Check if the destination should be treated as a normal write (no resume/append/strict).
+fn is_normal_write(cli: &Commands) -> bool {
+    !cli.is_resume() && !cli.is_append() && !cli.is_strict()
+}
+
 fn determine_dry_run_action(
     src: &Path,
     dst: &Path,
@@ -210,7 +215,7 @@ where
         };
 
         // For files, only check when the target file exists
-        if dst_path.exists() && !cli.is_force() && !cli.is_resume() && !cli.is_append() && !cli.is_strict() {
+        if dst_path.exists() && !cli.is_force() && is_normal_write(cli) {
             return Err(BcmrError::TargetExists(dst_path));
         }
 
@@ -224,7 +229,7 @@ where
             return Ok(());
         }
 
-        if dst_path.exists() && cli.is_force() && !cli.is_resume() && !cli.is_append() && !cli.is_strict() {
+        if dst_path.exists() && cli.is_force() && is_normal_write(cli) {
             fs::remove_file(&dst_path).await?;
         }
 
@@ -294,7 +299,7 @@ where
             }
 
             // Check each file to see if it needs to be overwritten
-            if dst_path.exists() && !cli.is_force() && !cli.is_resume() && !cli.is_append() && !cli.is_strict() {
+            if dst_path.exists() && !cli.is_force() && is_normal_write(cli) {
                 return Err(BcmrError::TargetExists(dst_path));
             }
 
@@ -306,7 +311,7 @@ where
                     Some(&dst_path.to_string_lossy())
                 );
             } else {
-                if dst_path.exists() && cli.is_force() && !cli.is_resume() && !cli.is_append() && !cli.is_strict() {
+                if dst_path.exists() && cli.is_force() && is_normal_write(cli) {
                     fs::remove_file(&dst_path).await?;
                 }
                 copy_file(
