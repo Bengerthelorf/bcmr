@@ -104,8 +104,9 @@ impl ProgressRunner {
         let signal = Arc::clone(&progress);
         tokio::spawn(async move {
             if let Ok(()) = ctrl_c().await {
+                commands::copy::cleanup_partial_files();
                 let _ = signal.lock().finish();
-                std::process::exit(0);
+                std::process::exit(130);
             }
         });
 

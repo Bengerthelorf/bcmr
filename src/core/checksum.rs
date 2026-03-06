@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{self, BufReader, Read};
 use std::path::Path;
 
-const BUFFER_SIZE: usize = 1024 * 1024; // 1MB — matches copy buffer, better for BLAKE3 SIMD
+const BUFFER_SIZE: usize = 4 * 1024 * 1024; // 4MB — matches copy buffer, better for BLAKE3 SIMD
 
 /// BLAKE3 hash
 pub fn calculate_hash(path: &Path) -> io::Result<String> {

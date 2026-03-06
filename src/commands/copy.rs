@@ -4,10 +4,136 @@ use crate::core::checksum;
 use crate::core::error::BcmrError;
 use crate::ui::display::{print_dry_run, ActionType};
 
+use once_cell::sync::Lazy;
+use parking_lot::Mutex as ParkingMutex;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncSeekExt, SeekFrom};
+
+// --- Global cleanup registry for partial/temp files ---
+
+static CLEANUP_PATHS: Lazy<ParkingMutex<Vec<PathBuf>>> = Lazy::new(|| ParkingMutex::new(Vec::new()));
+
+fn register_cleanup(path: &Path) {
+    CLEANUP_PATHS.lock().push(path.to_path_buf());
+}
+
+fn unregister_cleanup(path: &Path) {
+    CLEANUP_PATHS.lock().retain(|p| p != path);
+}
+
+/// Remove all registered partial/temp files. Called on Ctrl+C.
+pub fn cleanup_partial_files() {
+    for path in CLEANUP_PATHS.lock().drain(..) {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// RAII guard that removes a temp file on drop unless disarmed.
+struct TempFileGuard {
+    path: PathBuf,
+    active: bool,
+}
+
+impl TempFileGuard {
+    fn new(path: PathBuf) -> Self {
+        register_cleanup(&path);
+        Self { path, active: true }
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+        unregister_cleanup(&self.path);
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = std::fs::remove_file(&self.path);
+            unregister_cleanup(&self.path);
+        }
+    }
+}
+
+/// Generate a temp file path in the same directory as dst.
+fn temp_path_for(dst: &Path) -> PathBuf {
+    let name = dst.file_name().unwrap_or_default().to_string_lossy();
+    dst.with_file_name(format!(".{}.bcmr.tmp", name))
+}
+
+// --- Platform-native fast copy (Linux) ---
+
+#[cfg(target_os = "linux")]
+async fn try_copy_file_range(
+    src: &Path,
+    dst: &Path,
+    file_size: u64,
+    callback: &impl Fn(u64),
+    sync: bool,
+) -> Option<Result<(), BcmrError>> {
+    use std::os::unix::io::AsRawFd;
+
+    let src_file = std::fs::File::open(src).ok()?;
+    let dst_file = std::fs::OpenOptions::new()
+        .write(true).create(true).truncate(true)
+        .open(dst).ok()?;
+
+    let src_fd = src_file.as_raw_fd();
+    let dst_fd = dst_file.as_raw_fd();
+
+    // Pre-allocate (best-effort, ignore errors)
+    if file_size > 0 {
+        unsafe { libc::fallocate(dst_fd, 0, 0, file_size as libc::off_t); }
+    }
+
+    const CHUNK: usize = 4 * 1024 * 1024;
+    let mut remaining = file_size;
+
+    while remaining > 0 {
+        let to_copy = (remaining as usize).min(CHUNK);
+        let sfd = src_fd;
+        let dfd = dst_fd;
+
+        let result = tokio::task::spawn_blocking(move || unsafe {
+            libc::copy_file_range(
+                sfd, std::ptr::null_mut(),
+                dfd, std::ptr::null_mut(),
+                to_copy, 0,
+            )
+        }).await.ok()?;
+
+        if result < 0 {
+            let err = std::io::Error::last_os_error();
+            let errno = err.raw_os_error().unwrap_or(0);
+            // Not available or not supported — fall back to buffer copy
+            if errno == libc::ENOSYS || errno == libc::EXDEV
+                || errno == libc::EINVAL || errno == libc::EOPNOTSUPP
+            {
+                drop(dst_file);
+                let _ = std::fs::remove_file(dst);
+                return None;
+            }
+            return Some(Err(BcmrError::Io(err)));
+        }
+        if result == 0 { break; }
+
+        let n = result as u64;
+        remaining -= n;
+        callback(n);
+    }
+
+    if sync {
+        if let Err(e) = dst_file.sync_data() {
+            return Some(Err(BcmrError::Io(e)));
+        }
+    }
+
+    Some(Ok(()))
+}
+
+// --- Public API ---
 
 pub struct FileToOverwrite {
     pub path: PathBuf,
@@ -56,7 +182,6 @@ pub async fn check_overwrites(
                 dst.to_path_buf()
             };
 
-            // If the target directory exists, check for files that will be overwritten
             if new_dst.exists() {
                 for entry in traversal::walk(src, true, false, 1, excludes) {
                     let entry = entry?;
@@ -229,13 +354,16 @@ where
             return Ok(());
         }
 
-        if dst_path.exists() && cli.is_force() && is_normal_write(cli) {
+        // For resume/append modes with force, remove existing file before overwrite
+        if dst_path.exists() && cli.is_force() && !is_normal_write(cli) {
             fs::remove_file(&dst_path).await?;
         }
+        // For normal writes: atomic rename handles overwrite, no pre-deletion needed
 
         copy_file(src, &dst_path, CopyFileOptions {
             preserve, verify: cli.is_verify(), resume: cli.is_resume(),
             strict: cli.is_strict(), append: cli.is_append(),
+            sync: cli.is_sync(),
             reflink_arg: cli.get_reflink_mode(), sparse_arg: cli.get_sparse_mode(),
             test_mode,
         }, &callback).await?;
@@ -270,7 +398,7 @@ where
         for entry in traversal::walk(src, true, false, 1, excludes) {
             let entry = entry?;
             let path = entry.path();
-            
+
             let relative_path = path.strip_prefix(src)?;
             let target_path = new_dst.join(relative_path);
 
@@ -315,9 +443,11 @@ where
                     Some(&dst_path.to_string_lossy())
                 );
             } else {
-                if dst_path.exists() && cli.is_force() && is_normal_write(cli) {
+                // For resume/append modes with force, remove existing file
+                if dst_path.exists() && cli.is_force() && !is_normal_write(cli) {
                     fs::remove_file(&dst_path).await?;
                 }
+
                 copy_file(
                     &src_path,
                     &dst_path,
@@ -327,6 +457,7 @@ where
                         resume: cli.is_resume(),
                         strict: cli.is_strict(),
                         append: cli.is_append(),
+                        sync: cli.is_sync(),
                         reflink_arg: cli.get_reflink_mode(),
                         sparse_arg: cli.get_sparse_mode(),
                         test_mode: test_mode.clone(),
@@ -385,6 +516,7 @@ struct CopyFileOptions {
     resume: bool,
     strict: bool,
     append: bool,
+    sync: bool,
     reflink_arg: Option<String>,
     sparse_arg: Option<String>,
     test_mode: TestMode,
@@ -400,7 +532,7 @@ where
     F: Fn(u64),
 {
     let CopyFileOptions {
-        preserve, verify, resume, strict, append,
+        preserve, verify, resume, strict, append, sync,
         reflink_arg, sparse_arg, test_mode,
     } = opts;
 
@@ -413,18 +545,13 @@ where
 
     (callback.on_new_file)(&file_name, file_size);
 
-    // Reflink: CLI > Config
-
+    // Determine reflink mode
     let config_reflink = &crate::config::CONFIG.copy.reflink;
-    
-    // Action: (try, fail_on_err)
-    // - CLI: force=(T,T), disable=(F,F), auto=(T,F)
-    // - Cfg: never/disable=(F,F), *=(T,F)
     let (try_reflink, fail_on_error) = if let Some(mode) = reflink_arg {
          match mode.to_lowercase().as_str() {
              "force" => (true, true),
              "disable" => (false, false),
-             _ => (true, false), // "auto" and any pre-validated value
+             _ => (true, false),
          }
     } else {
         match config_reflink.to_lowercase().as_str() {
@@ -433,13 +560,13 @@ where
         }
     };
 
-    // Sparse: CLI > Config
+    // Determine sparse mode
     let config_sparse = &crate::config::CONFIG.copy.sparse;
     let sparse_mode = if let Some(mode) = sparse_arg {
          match mode.to_lowercase().as_str() {
              "force" => SparseMode::Always,
              "disable" => SparseMode::Never,
-             _ => SparseMode::Auto, // "auto" and any pre-validated value
+             _ => SparseMode::Auto,
          }
     } else {
          match config_sparse.to_lowercase().as_str() {
@@ -448,19 +575,46 @@ where
          }
     };
 
+    // Ensure parent directory exists (needed for both temp file and direct write)
+    if let Some(parent) = dst.parent() {
+        if !parent.exists() {
+            fs::create_dir_all(parent).await?;
+        }
+    }
 
-    // Try reflink if requested
-    // But if SparseMode is Always (Force), we MUST scan the file, so we disable reflink.
+    // Determine if we can use atomic writes (temp file + rename)
+    let use_atomic = !resume && !append && !strict;
+    let write_target;
+    let mut guard: Option<TempFileGuard> = None;
+
+    if use_atomic {
+        let temp = temp_path_for(dst);
+        // Clean up stale temp file from previous crash
+        if temp.exists() {
+            let _ = fs::remove_file(&temp).await;
+        }
+        guard = Some(TempFileGuard::new(temp.clone()));
+        write_target = temp;
+    } else {
+        write_target = dst.to_path_buf();
+    }
+
+    // Try reflink (writes to write_target)
     if try_reflink && !matches!(sparse_mode, SparseMode::Always) {
         let src_path = src.to_path_buf();
-        let dst_path = dst.to_path_buf();
-        let result = tokio::task::spawn_blocking(move || reflink_copy::reflink(&src_path, &dst_path))
+        let target_path = write_target.clone();
+        let result = tokio::task::spawn_blocking(move || reflink_copy::reflink(&src_path, &target_path))
             .await?;
-        
+
         match result {
             Ok(_) => {
-                // Reflink successful!
+                // Reflink successful — atomic rename if needed
+                if use_atomic {
+                    fs::rename(&write_target, dst).await?;
+                    if let Some(ref mut g) = guard { g.disarm(); }
+                }
                 (callback.callback)(file_size);
+                if preserve { preserve_attributes(src, dst).await?; }
                 return Ok(());
             }
             Err(e) => {
@@ -471,15 +625,36 @@ where
         }
     }
 
+    // Try copy_file_range on Linux (only for fresh writes, no sparse, no test mode)
+    #[cfg(target_os = "linux")]
+    if use_atomic && matches!(test_mode, TestMode::None) && matches!(sparse_mode, SparseMode::Never) {
+        match try_copy_file_range(src, &write_target, file_size, &callback.callback, sync).await {
+            Some(Ok(())) => {
+                fs::rename(&write_target, dst).await?;
+                if let Some(ref mut g) = guard { g.disarm(); }
+                if preserve { preserve_attributes(src, dst).await?; }
+                if verify { verify_copy(src, dst).await?; }
+                return Ok(());
+            }
+            Some(Err(e)) => {
+                return Err(e);
+            }
+            None => {
+                // copy_file_range not available, fall through to buffer copy
+            }
+        }
+    }
+
+    // --- Buffer copy path ---
+
     let mut start_offset = 0;
     let mut file_flags = fs::OpenOptions::new();
     file_flags.write(true);
 
     if (resume || append || strict) && dst.exists() {
         let dst_len = dst.metadata()?.len();
-        
+
         let should_resume = if strict {
-            // STRICT: Hash check
             if dst_len == file_size {
                  let src_path = src.to_path_buf();
                  let dst_path = dst.to_path_buf();
@@ -494,7 +669,7 @@ where
                      (callback.callback)(file_size);
                      return Ok(());
                  }
-                 false 
+                 false
             } else if dst_len < file_size {
                  let src_path = src.to_path_buf();
                  let dst_path = dst.to_path_buf();
@@ -511,22 +686,15 @@ where
                  false
             }
         } else if append {
-            // APPEND: Size check (ignore mtime)
-            // dst == src -> Skip
-            // dst < src -> Append
-            // dst > src -> Overwrite
             if dst_len == file_size {
                 (callback.callback)(file_size);
                 return Ok(());
             } else if dst_len < file_size {
-                // File smaller -> Append
                 true
             } else {
-                // File larger -> Overwrite
                 false
             }
         } else {
-            // DEFAULT: Mtime + Size
             let src_mtime = src.metadata()?.modified()?;
             let dst_mtime = dst.metadata()?.modified()?;
 
@@ -554,13 +722,26 @@ where
     }
 
     let mut src_file = File::open(src).await?;
-    let mut dst_file = file_flags.open(dst).await?;
+    let mut dst_file = file_flags.open(&write_target).await?;
 
     if start_offset > 0 {
         src_file.seek(SeekFrom::Start(start_offset)).await?;
     }
 
-    let mut buffer = vec![0; 1024 * 1024]; // 1MB buffer
+    // Pre-allocate on Linux (best-effort)
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let remaining = file_size.saturating_sub(start_offset);
+        if remaining > 0 {
+            let fd = dst_file.as_raw_fd();
+            unsafe {
+                libc::fallocate(fd, 0, start_offset as libc::off_t, remaining as libc::off_t);
+            }
+        }
+    }
+
+    let mut buffer = vec![0; 4 * 1024 * 1024]; // 4MB buffer
 
     match test_mode {
         TestMode::Delay(ms) => loop {
@@ -577,7 +758,6 @@ where
             let mut start_time = Instant::now();
 
             loop {
-                // Read a chunk
                 let n = src_file.read(&mut buffer[..chunk_size as usize]).await?;
                 if n == 0 {
                     break;
@@ -640,25 +820,43 @@ where
         },
     }
 
+    // Sync data to disk if requested
+    if sync {
+        dst_file.sync_data().await?;
+    }
+
+    // Close file before rename
+    drop(dst_file);
+
+    // Atomic rename: temp → final destination
+    if use_atomic {
+        fs::rename(&write_target, dst).await?;
+        if let Some(ref mut g) = guard { g.disarm(); }
+    }
+
     if preserve {
         preserve_attributes(src, dst).await?;
     }
 
-    // Verify if requested AND not already verified (e.g. strict match skipped)
     if verify {
-        let src_path = src.to_path_buf();
-        let dst_path = dst.to_path_buf();
-        let (src_hash, dst_hash) = tokio::join!(
-            tokio::task::spawn_blocking(move || checksum::calculate_hash(&src_path)),
-            tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)),
-        );
-        let src_hash = src_hash??;
-        let dst_hash = dst_hash??;
-
-        if src_hash != dst_hash {
-            return Err(BcmrError::VerificationError(dst.to_path_buf()));
-        }
+        verify_copy(src, dst).await?;
     }
 
+    Ok(())
+}
+
+async fn verify_copy(src: &Path, dst: &Path) -> std::result::Result<(), BcmrError> {
+    let src_path = src.to_path_buf();
+    let dst_path = dst.to_path_buf();
+    let (src_hash, dst_hash) = tokio::join!(
+        tokio::task::spawn_blocking(move || checksum::calculate_hash(&src_path)),
+        tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)),
+    );
+    let src_hash = src_hash??;
+    let dst_hash = dst_hash??;
+
+    if src_hash != dst_hash {
+        return Err(BcmrError::VerificationError(dst.to_path_buf()));
+    }
     Ok(())
 }

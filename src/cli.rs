@@ -125,6 +125,10 @@ pub enum Commands {
         #[arg(short = 'a', long, default_value_t = false)]
         append: bool,
 
+        /// Sync data to disk after copy (fsync)
+        #[arg(long, default_value_t = false)]
+        sync: bool,
+
         /// Use Copy-on-Write (reflink) if supported
         /// Modes: force, auto (default), disable
         #[arg(long, num_args = 0..=1, default_missing_value = "auto")]
@@ -194,6 +198,10 @@ pub enum Commands {
         /// Append data to existing file (ignores mtime, checks size only)
         #[arg(short = 'a', long, default_value_t = false)]
         append: bool,
+
+        /// Sync data to disk after move (fsync, cross-device only)
+        #[arg(long, default_value_t = false)]
+        sync: bool,
     },
 
     /// Remove files or directories
@@ -352,6 +360,13 @@ impl Commands {
     pub fn is_append(&self) -> bool {
         match self {
             Commands::Copy { append, .. } | Commands::Move { append, .. } => *append,
+            _ => false,
+        }
+    }
+
+    pub fn is_sync(&self) -> bool {
+        match self {
+            Commands::Copy { sync, .. } | Commands::Move { sync, .. } => *sync,
             _ => false,
         }
     }
