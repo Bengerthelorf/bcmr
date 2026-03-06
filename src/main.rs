@@ -202,9 +202,13 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
     let total_size = commands::copy::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
     let runner = ProgressRunner::new(total_size, is_plain_mode(args), args.is_dry_run())?;
 
-    if let Some(first) = sources.first() {
-        let display_name = first.file_name().unwrap_or_default().to_string_lossy();
-        runner.progress().lock().set_current_file(&display_name, total_size);
+    {
+        let mut p = runner.progress().lock();
+        p.set_operation_type("Copying");
+        if let Some(first) = sources.first() {
+            let display_name = first.file_name().unwrap_or_default().to_string_lossy();
+            p.set_current_file(&display_name, total_size);
+        }
     }
 
     for src in sources {
