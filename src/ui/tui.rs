@@ -282,11 +282,16 @@ impl TuiProgress {
             None => "--".to_string(),
         };
 
+        let speed_str = if speed > 0.0 {
+            format!("{}/s", format_bytes(speed * 1024.0 * 1024.0))
+        } else {
+            "-- /s".to_string()
+        };
         let details = format!(
-            "Detail:  {} / {} | {}/s | ETA: {}",
+            "Detail:  {} / {} | {} | ETA: {}",
             format_bytes(self.data.current_bytes as f64),
             format_bytes(self.data.total_bytes as f64),
-            format_bytes(speed * 1024.0 * 1024.0),
+            speed_str,
             eta_str
         );
         draw_line_content(&mut stdout, 2, &details)?;
