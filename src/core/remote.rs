@@ -101,6 +101,46 @@ pub struct RemoteFileInfo {
     pub size: u64,
 }
 
+/// Classify SSH stderr into a user-friendly error message.
+fn ssh_error_message(stderr: &str, context: &str) -> String {
+    let stderr_lower = stderr.to_lowercase();
+    if stderr_lower.contains("connection refused") {
+        format!("{}: SSH connection refused (is sshd running on the host?)", context)
+    } else if stderr_lower.contains("no route to host") || stderr_lower.contains("network is unreachable") {
+        format!("{}: host unreachable (check network connectivity)", context)
+    } else if stderr_lower.contains("permission denied") {
+        format!("{}: SSH authentication failed (check credentials/keys)", context)
+    } else if stderr_lower.contains("could not resolve") || stderr_lower.contains("name or service not known") {
+        format!("{}: unknown host (check hostname)", context)
+    } else if stderr_lower.contains("no such file") || stderr_lower.contains("not a regular file") {
+        format!("{}: remote file not found", context)
+    } else if stderr_lower.contains("timed out") || stderr_lower.contains("connection timed out") {
+        format!("{}: SSH connection timed out", context)
+    } else {
+        format!("{}: {}", context, stderr.trim())
+    }
+}
+
+/// Validate SSH connectivity to a remote host before starting transfers.
+pub async fn validate_ssh_connection(remote: &RemotePath) -> Result<(), BcmrError> {
+    let output = Command::new("ssh")
+        .arg("-o").arg("BatchMode=yes")
+        .arg("-o").arg("ConnectTimeout=10")
+        .arg(remote.ssh_target())
+        .arg("echo ok")
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(BcmrError::InvalidInput(ssh_error_message(
+            &stderr,
+            &format!("Cannot connect to '{}'", remote.ssh_target()),
+        )));
+    }
+    Ok(())
+}
+
 /// Query remote file info via SSH + stat.
 pub async fn remote_stat(remote: &RemotePath) -> Result<RemoteFileInfo, BcmrError> {
     let output = Command::new("ssh")
@@ -115,9 +155,9 @@ pub async fn remote_stat(remote: &RemotePath) -> Result<RemoteFileInfo, BcmrErro
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(BcmrError::InvalidInput(format!(
-            "Cannot stat remote path '{}': {}",
-            remote, stderr.trim()
+        return Err(BcmrError::InvalidInput(ssh_error_message(
+            &stderr,
+            &format!("Cannot stat remote path '{}'", remote),
         )));
     }
 
@@ -174,40 +214,45 @@ pub async fn remote_total_size(remote: &RemotePath, recursive: bool) -> Result<u
 }
 
 /// List files in a remote directory (returns relative paths with sizes).
+/// Uses null-separated output to safely handle filenames with special characters.
 pub async fn remote_list_files(
     remote: &RemotePath,
 ) -> Result<Vec<(String, u64, bool)>, BcmrError> {
-    // Returns (relative_path, size, is_dir) tuples
+    // Use null bytes as record separators and field separators for safety
+    // Format: relative_path\0size\0type\0  (type is 'd' for dir, 'f' for file, etc.)
     let output = Command::new("ssh")
         .arg("-o").arg("BatchMode=yes")
         .arg(remote.ssh_target())
         .arg(format!(
-            "find '{}' -printf '%P\\t%s\\t%y\\n' 2>/dev/null || find '{}' -exec stat -f '%N\\t%z\\t%HT' {{}} +",
-            remote.path, remote.path
+            "find '{}' -printf '%P\\0%s\\0%y\\0' 2>/dev/null || find '{}' ! -path '{}' -exec stat -f '%N\\0%z\\0%HT\\0' {{}} +",
+            remote.path, remote.path, remote.path
         ))
         .output()
         .await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(BcmrError::InvalidInput(format!(
-            "Cannot list remote directory '{}': {}",
-            remote, stderr.trim()
+        return Err(BcmrError::InvalidInput(ssh_error_message(
+            &stderr,
+            &format!("Cannot list remote directory '{}'", remote),
         )));
     }
 
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let fields: Vec<&str> = raw.split('\0').collect();
     let mut entries = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let parts: Vec<&str> = line.splitn(3, '\t').collect();
-        if parts.len() < 3 {
-            continue;
-        }
-        let rel_path = parts[0].to_string();
+
+    // Process in groups of 3 (path, size, type) + trailing empty from last \0
+    let mut i = 0;
+    while i + 2 < fields.len() {
+        let rel_path = fields[i].to_string();
+        let size: u64 = fields[i + 1].parse().unwrap_or(0);
+        let is_dir = fields[i + 2] == "d" || fields[i + 2].to_lowercase().contains("directory");
+        i += 3;
+
         if rel_path.is_empty() {
             continue; // skip root dir itself
         }
-        let size: u64 = parts[1].parse().unwrap_or(0);
-        let is_dir = parts[2] == "d" || parts[2].to_lowercase().contains("directory");
         entries.push((rel_path, size, is_dir));
     }
 
@@ -247,6 +292,7 @@ pub async fn download_file(
     let mut stdout = child.stdout.take().ok_or_else(|| {
         BcmrError::InvalidInput("Failed to capture SSH stdout".to_string())
     })?;
+    let mut stderr_pipe = child.stderr.take();
 
     let mut dst_file = tokio::fs::File::create(local_dst).await?;
     let mut buffer = vec![0u8; 1024 * 1024];
@@ -262,9 +308,15 @@ pub async fn download_file(
 
     let status = child.wait().await?;
     if !status.success() {
-        return Err(BcmrError::InvalidInput(format!(
-            "SSH download failed for '{}'",
-            remote
+        let mut stderr_buf = String::new();
+        if let Some(ref mut pipe) = stderr_pipe {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf).await;
+            stderr_buf = String::from_utf8_lossy(&buf).to_string();
+        }
+        return Err(BcmrError::InvalidInput(ssh_error_message(
+            &stderr_buf,
+            &format!("Download failed for '{}'", remote),
         )));
     }
 
@@ -285,6 +337,18 @@ pub async fn upload_file(
         .to_string_lossy()
         .to_string();
     on_new_file(&file_name, file_size);
+
+    // Ensure remote parent directory exists
+    if let Some(parent) = remote.path.rsplit_once('/') {
+        if !parent.0.is_empty() {
+            Command::new("ssh")
+                .arg("-o").arg("BatchMode=yes")
+                .arg(remote.ssh_target())
+                .arg(format!("mkdir -p '{}'", parent.0))
+                .output()
+                .await?;
+        }
+    }
 
     let mut child = Command::new("ssh")
         .arg("-o").arg("BatchMode=yes")
@@ -311,12 +375,12 @@ pub async fn upload_file(
     }
 
     drop(stdin); // Close stdin to signal EOF
-    let status = child.wait().await?;
-    if !status.success() {
-        return Err(BcmrError::InvalidInput(format!(
-            "SSH upload failed for '{}' -> {}",
-            local_src.display(),
-            remote
+    let output = child.wait_with_output().await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(BcmrError::InvalidInput(ssh_error_message(
+            &stderr,
+            &format!("Upload failed for '{}' -> {}", local_src.display(), remote),
         )));
     }
 

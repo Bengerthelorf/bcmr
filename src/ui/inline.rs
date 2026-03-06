@@ -159,7 +159,12 @@ impl ProgressRenderer for InlineProgress {
     fn inc_current(&mut self, delta: u64) {
         self.data.current_bytes += delta;
         self.data.current_file_progress += delta;
-        let _ = self.redraw();
+        // Only redraw every 1MB to reduce flickering (tick() handles regular updates)
+        if self.data.current_bytes.is_multiple_of(1024 * 1024)
+            || self.data.current_bytes >= self.data.total_bytes
+        {
+            let _ = self.redraw();
+        }
     }
 
     fn set_operation_type(&mut self, operation: &str) {

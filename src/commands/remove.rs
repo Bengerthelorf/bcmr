@@ -220,10 +220,14 @@ pub async fn remove_path(
                         tokio::time::sleep(Duration::from_millis(ms)).await;
                     }
                     TestMode::SpeedLimit(bps) => {
-                        let chunks = size / bps + 1;
-                        for _ in 0..chunks {
-                            progress_callback(bps.min(size));
-                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        let mut remaining = size;
+                        while remaining > 0 {
+                            let chunk = remaining.min(bps);
+                            progress_callback(chunk);
+                            remaining -= chunk;
+                            if remaining > 0 {
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+                            }
                         }
                     }
                     TestMode::None => {
@@ -280,10 +284,14 @@ pub async fn remove_path(
             }
             TestMode::SpeedLimit(bps) => {
                 if size > 0 {
-                    let chunks = size / bps + 1;
-                    for _ in 0..chunks {
-                        progress_callback(bps.min(size));
-                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    let mut remaining = size;
+                    while remaining > 0 {
+                        let chunk = remaining.min(bps);
+                        progress_callback(chunk);
+                        remaining -= chunk;
+                        if remaining > 0 {
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        }
                     }
                 }
             }

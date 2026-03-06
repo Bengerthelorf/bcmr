@@ -235,6 +235,15 @@ async fn handle_remote_copy(
     let dest_str = dest.to_string_lossy();
     let remote_dest = parse_remote_path(&dest_str);
 
+    // Pre-validate SSH connectivity before starting any transfer
+    let check_target = if let Some(ref rd) = remote_dest {
+        rd.clone()
+    } else {
+        let src_str = sources[0].to_string_lossy();
+        parse_remote_path(&src_str).ok_or_else(|| anyhow::anyhow!("No remote path found"))?
+    };
+    remote::validate_ssh_connection(&check_target).await?;
+
     // Determine direction
     if let Some(ref rdest) = remote_dest {
         // Upload: local -> remote
