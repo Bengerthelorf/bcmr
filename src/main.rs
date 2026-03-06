@@ -61,10 +61,7 @@ async fn confirm_removal(files: &[commands::remove::FileToRemove]) -> Result<boo
     println!("  Files: {}", file_count);
     println!("  Directories: {}", dir_count);
     if total_size > 0 {
-        println!(
-            "  Total size: {:.2} MiB",
-            total_size as f64 / 1024.0 / 1024.0
-        );
+        println!("  Total size: {}", format_bytes(total_size as f64));
     }
 
     for file in files {
@@ -73,7 +70,7 @@ async fn confirm_removal(files: &[commands::remove::FileToRemove]) -> Result<boo
             if file.is_dir { "DIR:" } else { "FILE:" },
             file.path.display(),
             if !file.is_dir && file.size > 0 {
-                format!(" ({:.2} MiB)", file.size as f64 / 1024.0 / 1024.0)
+                format!(" ({})", format_bytes(file.size as f64))
             } else {
                 String::new()
             }
@@ -467,6 +464,7 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
             Arc::clone(runner.progress()),
             runner.inc_callback(),
             Box::new(runner.file_callback()),
+            files_to_remove.len(),
         ).await?;
 
         print!("\nSummary: {} files", file_count);
@@ -504,6 +502,7 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         Arc::clone(runner.progress()),
         runner.inc_callback(),
         Box::new(runner.file_callback()),
+        files_to_remove.len(),
     ).await?;
 
     runner.finish_ok()

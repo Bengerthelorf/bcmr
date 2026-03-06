@@ -167,25 +167,9 @@ pub async fn remove_path(
         
         on_new_file(&file_name, 0);
 
-        // First, collect all entries
-        // Use unified traversal with contents_first=true
-        let mut entries = Vec::new();
-        // min_depth=0 to include the dir itself? Original code used WalkDir::new(path).
-        // WalkDir includes root. So min_depth=0.
+        // Walk with contents_first=true: children are yielded before parents
         for entry in traversal::walk(path, true, true, 0, excludes) {
-            entries.push(entry?);
-        }
-
-        // Sort: children -> parents (depth desc)
-        entries.sort_by(|a, b| {
-            b.path()
-                .components()
-                .count()
-                .cmp(&a.path().components().count())
-        });
-
-        // Process all entries
-        for entry in entries {
+            let entry = entry?;
             let entry_path = entry.path();
 
             // Exclude check handled by traversal::walk!
@@ -317,21 +301,16 @@ pub async fn remove_path(
 }
 
 pub struct ProgressState {
-    processed_items: usize,
     progress: Arc<Mutex<Box<dyn ProgressRenderer>>>,
 }
 
 impl ProgressState {
     pub fn new(total_items: usize, progress: Arc<Mutex<Box<dyn ProgressRenderer>>>) -> Self {
         progress.lock().set_total_items(total_items);
-        Self {
-            processed_items: 0,
-            progress,
-        }
+        Self { progress }
     }
 
     pub fn inc_processed(&mut self) {
-        self.processed_items += 1;
         self.progress.lock().inc_items_processed();
     }
 }
@@ -347,13 +326,11 @@ pub async fn remove_paths(
     progress: Arc<Mutex<Box<dyn ProgressRenderer>>>,
     progress_callback: impl Fn(u64) + Send + Sync + Clone + 'static,
     on_new_file: FileCallback,
+    total_items: usize,
 ) -> std::result::Result<(), BcmrError> {
-    // First, calculate total number of items to process
-    let files_to_remove = check_removes(paths, cli.is_recursive(), cli, excludes).await?;
-
     // Set up progress state
     let progress_state = Arc::new(Mutex::new(ProgressState::new(
-        files_to_remove.len(),
+        total_items,
         Arc::clone(&progress),
     )));
 

@@ -483,9 +483,13 @@ where
             if dst_len == file_size {
                  let src_path = src.to_path_buf();
                  let dst_path = dst.to_path_buf();
-                 let src_hash = tokio::task::spawn_blocking(move || checksum::calculate_hash(&src_path)).await??;
-                 let dst_hash = tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)).await??;
-                 
+                 let (src_hash, dst_hash) = tokio::join!(
+                     tokio::task::spawn_blocking(move || checksum::calculate_hash(&src_path)),
+                     tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)),
+                 );
+                 let src_hash = src_hash??;
+                 let dst_hash = dst_hash??;
+
                  if src_hash == dst_hash {
                      (callback.callback)(file_size);
                      return Ok(());
@@ -495,10 +499,14 @@ where
                  let src_path = src.to_path_buf();
                  let dst_path = dst.to_path_buf();
                  let limit = dst_len;
-                 let dst_hash = tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)).await??;
-                 let src_partial_hash = tokio::task::spawn_blocking(move || checksum::calculate_partial_hash(&src_path, limit)).await??;
-                 
-                 dst_hash == src_partial_hash 
+                 let (dst_hash, src_partial_hash) = tokio::join!(
+                     tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)),
+                     tokio::task::spawn_blocking(move || checksum::calculate_partial_hash(&src_path, limit)),
+                 );
+                 let dst_hash = dst_hash??;
+                 let src_partial_hash = src_partial_hash??;
+
+                 dst_hash == src_partial_hash
             } else {
                  false
             }
@@ -599,10 +607,6 @@ where
 
                 match sparse_mode {
                     SparseMode::Never => {
-                        if pending_hole > 0 {
-                            dst_file.seek(SeekFrom::Current(pending_hole as i64)).await?;
-                            pending_hole = 0;
-                        }
                         dst_file.write_all(&buffer[..n]).await?;
                     }
                     SparseMode::Always | SparseMode::Auto => {
@@ -644,8 +648,12 @@ where
     if verify {
         let src_path = src.to_path_buf();
         let dst_path = dst.to_path_buf();
-        let src_hash = tokio::task::spawn_blocking(move || checksum::calculate_hash(&src_path)).await??;
-        let dst_hash = tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)).await??;
+        let (src_hash, dst_hash) = tokio::join!(
+            tokio::task::spawn_blocking(move || checksum::calculate_hash(&src_path)),
+            tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)),
+        );
+        let src_hash = src_hash??;
+        let dst_hash = dst_hash??;
 
         if src_hash != dst_hash {
             return Err(BcmrError::VerificationError(dst.to_path_buf()));

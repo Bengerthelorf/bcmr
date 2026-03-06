@@ -225,23 +225,10 @@ where
 }
 
 async fn remove_directory_contents(dir: &Path, excludes: &[regex::Regex]) -> std::result::Result<(), BcmrError> {
-    // Reverse order (files first)
-    let mut entries = Vec::new();
+    // Walk with contents_first=true: children are yielded before parents
     for entry in traversal::walk(dir, true, true, 0, excludes) {
-        entries.push(entry?);
-    }
-
-    // Sort: deep -> shallow
-    entries.sort_by(|a, b| {
-        b.path()
-            .components()
-            .count()
-            .cmp(&a.path().components().count())
-    });
-
-    for entry in entries {
+        let entry = entry?;
         let path = entry.path();
-        // Exclude check handled by traversal::walk!
         if path.is_file() {
             fs::remove_file(path).await?;
         } else if path.is_dir() {
