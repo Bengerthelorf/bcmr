@@ -89,6 +89,10 @@ pub enum Commands {
         #[arg(short = 'y', long = "yes")]
         yes: bool,
 
+        /// Explain what is being done
+        #[arg(short = 'v', long)]
+        verbose: bool,
+
         /// Exclude paths matching regex pattern
         #[arg(short = 'e', long)]
         exclude: Option<Vec<String>>,
@@ -154,6 +158,10 @@ pub enum Commands {
         /// Skip confirmation prompt when using force
         #[arg(short = 'y', long = "yes")]
         yes: bool,
+
+        /// Explain what is being done
+        #[arg(short = 'v', long)]
+        verbose: bool,
 
         /// Exclude paths matching regex pattern
         #[arg(short = 'e', long)]
@@ -396,7 +404,9 @@ impl Commands {
 
     pub fn is_verbose(&self) -> bool {
         match self {
-            Commands::Remove { verbose, .. } => *verbose,
+            Commands::Copy { verbose, .. }
+            | Commands::Move { verbose, .. }
+            | Commands::Remove { verbose, .. } => *verbose,
             _ => false,
         }
     }

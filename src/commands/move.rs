@@ -112,6 +112,9 @@ where
             // Rename succeeded instantly — report full progress
             on_new_file(&file_name, file_size);
             progress_callback(file_size);
+            if cli.is_verbose() {
+                eprintln!("renamed '{}' -> '{}'", src.display(), dst_path.display());
+            }
         }
     } else if recursive && src.is_dir() {
         let src_name = src
@@ -204,6 +207,9 @@ where
                 // Rename succeeded instantly — report full progress
                 on_new_file(&dir_name, dir_size);
                 progress_callback(dir_size);
+                if cli.is_verbose() {
+                    eprintln!("renamed '{}' -> '{}'", src.display(), new_dst.display());
+                }
             }
         }
     } else if src.is_dir() {

@@ -239,6 +239,10 @@ where
             reflink_arg: cli.get_reflink_mode(), sparse_arg: cli.get_sparse_mode(),
             test_mode,
         }, &callback).await?;
+
+        if cli.is_verbose() {
+            eprintln!("'{}' -> '{}'", src.display(), dst_path.display());
+        }
     } else if recursive && src.is_dir() {
         let src_dir_name = src
             .file_name()
@@ -330,6 +334,10 @@ where
                     &callback,
                 )
                 .await?;
+
+                if cli.is_verbose() {
+                    eprintln!("'{}' -> '{}'", src_path.display(), dst_path.display());
+                }
             }
         }
 
