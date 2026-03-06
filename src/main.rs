@@ -10,6 +10,7 @@ use anyhow::{bail, Result};
 use cli::Commands;
 use parking_lot::Mutex;
 use ui::progress::{self, ProgressRenderer};
+use ui::utils::format_bytes;
 use std::io::{self, Write};
 use std::sync::Arc;
 
@@ -195,12 +196,25 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         }
     }
 
+    let total_size = commands::copy::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
+
     if args.is_dry_run() {
-        println!("DRY RUN MODE: No changes will be made.");
+        println!("DRY RUN MODE: No changes will be made.\n");
+
+        for src in sources {
+            let _ = commands::copy::copy_path(
+                src, dest,
+                args.is_recursive(), args.is_preserve(),
+                test_mode.clone(), args, &excludes,
+                |_| {}, |_, _| {},
+            ).await;
+        }
+
+        println!("\nSummary: {} sources, {}", sources.len(), format_bytes(total_size as f64));
+        return Ok(());
     }
 
-    let total_size = commands::copy::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
-    let runner = ProgressRunner::new(total_size, is_plain_mode(args), args.is_dry_run())?;
+    let runner = ProgressRunner::new(total_size, is_plain_mode(args), false)?;
 
     {
         let mut p = runner.progress().lock();
@@ -388,12 +402,25 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
         }
     }
 
+    let total_size = commands::r#move::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
+
     if args.is_dry_run() {
-        println!("DRY RUN MODE: No changes will be made.");
+        println!("DRY RUN MODE: No changes will be made.\n");
+
+        for src in sources {
+            let _ = commands::r#move::move_path(
+                src, dest,
+                args.is_recursive(), args.is_preserve(),
+                test_mode.clone(), args, &excludes,
+                |_| {}, |_, _| {},
+            ).await;
+        }
+
+        println!("\nSummary: {} sources, {}", sources.len(), format_bytes(total_size as f64));
+        return Ok(());
     }
 
-    let total_size = commands::r#move::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
-    let runner = ProgressRunner::new(total_size, is_plain_mode(args), args.is_dry_run())?;
+    let runner = ProgressRunner::new(total_size, is_plain_mode(args), false)?;
 
     if let Some(first) = sources.first() {
         let display_name = first.file_name().unwrap_or_default().to_string_lossy();
@@ -428,11 +455,29 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         commands::remove::check_removes(paths, args.is_recursive(), args, &excludes).await?;
 
     if args.is_dry_run() {
-        println!("DRY RUN MODE: No changes will be made.");
+        println!("DRY RUN MODE: No changes will be made.\n");
+
+        let total_size: u64 = files_to_remove.iter().map(|f| f.size).sum();
+        let file_count = files_to_remove.iter().filter(|f| !f.is_dir).count();
+        let dir_count = files_to_remove.iter().filter(|f| f.is_dir).count();
+
+        let runner = ProgressRunner::new(total_size, is_plain_mode(args), true)?;
+        commands::remove::remove_paths(
+            paths, test_mode, args, &excludes,
+            Arc::clone(runner.progress()),
+            runner.inc_callback(),
+            Box::new(runner.file_callback()),
+        ).await?;
+
+        print!("\nSummary: {} files", file_count);
+        if dir_count > 0 {
+            print!(", {} directories", dir_count);
+        }
+        println!(", {}", format_bytes(total_size as f64));
+        return Ok(());
     }
 
-    if !args.is_dry_run()
-        && !files_to_remove.is_empty()
+    if !files_to_remove.is_empty()
         && !args.is_force()
         && !args.is_yes()
         && (!args.is_interactive() || files_to_remove.len() > 1)
