@@ -89,6 +89,8 @@ where
         }
 
         // Try rename -> EXDEV? Copy+Rm : Err
+        let file_size = src.metadata()?.len();
+        let file_name = src.file_name().unwrap_or_default().to_string_lossy().to_string();
         if let Err(e) = fs::rename(src, &dst_path).await {
             if is_cross_device_error(&e) {
                 copy::copy_path(
@@ -106,6 +108,10 @@ where
             } else {
                 return Err(BcmrError::Io(e));
             }
+        } else {
+            // Rename succeeded instantly — report full progress
+            on_new_file(&file_name, file_size);
+            progress_callback(file_size);
         }
     } else if recursive && src.is_dir() {
         let src_name = src
@@ -172,22 +178,32 @@ where
             remove_directory_contents(src, excludes).await?;
             let _ = fs::remove_dir(src).await; 
 
-        } else if let Err(e) = fs::rename(src, &new_dst).await {
-            if is_cross_device_error(&e) {
-                copy::copy_path(
-                    src,
-                    dst,
-                    recursive,
-                    preserve,
-                    test_mode,
-                    cli,
-                    excludes,
-                    progress_callback.clone(),
-                    on_new_file.clone()
-                ).await?;
-                fs::remove_dir_all(src).await?;
+        } else {
+            // Calculate size before rename (for progress reporting on success)
+            let dir_size = copy::get_total_size(&[src.to_path_buf()], true, cli, excludes).await.unwrap_or(0);
+            let dir_name = src.file_name().unwrap_or_default().to_string_lossy().to_string();
+
+            if let Err(e) = fs::rename(src, &new_dst).await {
+                if is_cross_device_error(&e) {
+                    copy::copy_path(
+                        src,
+                        dst,
+                        recursive,
+                        preserve,
+                        test_mode,
+                        cli,
+                        excludes,
+                        progress_callback.clone(),
+                        on_new_file.clone()
+                    ).await?;
+                    fs::remove_dir_all(src).await?;
+                } else {
+                    return Err(e.into());
+                }
             } else {
-                return Err(e.into());
+                // Rename succeeded instantly — report full progress
+                on_new_file(&dir_name, dir_size);
+                progress_callback(dir_size);
             }
         }
     } else if src.is_dir() {
