@@ -163,8 +163,6 @@ pub async fn remove_path(
         .to_string();
 
     if path.is_dir() && (cli.is_recursive() || cli.is_dir_only()) {
-        // REMOVED: Duplicate printing of "Would remove directory"
-        
         on_new_file(&file_name, 0);
 
         // Walk with contents_first=true: children are yielded before parents

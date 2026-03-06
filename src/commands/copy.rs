@@ -79,7 +79,7 @@ pub async fn check_overwrites(
     Ok(files_to_overwrite)
 }
 
-// Helper function to run running blocking directory traversal
+// Helper function to run blocking directory traversal
 fn get_total_size_sync(
     sources: Vec<PathBuf>,
     recursive: bool,

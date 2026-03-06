@@ -40,8 +40,6 @@ pub async fn get_total_size(
     copy::get_total_size(sources, recursive, cli, excludes).await
 }
 
-// use std::sync::Arc;
-
 #[allow(clippy::too_many_arguments)]
 pub async fn move_path<F>(
     src: &Path,
