@@ -309,6 +309,193 @@ fn determine_dry_run_action(
     Ok(ActionType::Overwrite)
 }
 
+// --- Single-pass copy planning ---
+
+#[allow(dead_code)]
+pub enum PlanEntry {
+    CreateDir { src: PathBuf, dst: PathBuf },
+    CopyFile { src: PathBuf, dst: PathBuf, size: u64 },
+}
+
+pub struct CopyPlan {
+    pub entries: Vec<PlanEntry>,
+    pub total_size: u64,
+    pub overwrites: Vec<FileToOverwrite>,
+}
+
+fn plan_copy_sync(
+    sources: Vec<PathBuf>,
+    dst: PathBuf,
+    recursive: bool,
+    excludes: Vec<regex::Regex>,
+) -> std::result::Result<CopyPlan, BcmrError> {
+    let mut entries = Vec::new();
+    let mut total_size = 0u64;
+    let mut overwrites = Vec::new();
+    let dst_is_dir = dst.exists() && dst.is_dir();
+
+    for src in &sources {
+        if traversal::is_excluded(src, &excludes) {
+            continue;
+        }
+
+        if src.is_file() {
+            let dst_path = if dst_is_dir {
+                dst.join(src.file_name().ok_or_else(||
+                    BcmrError::InvalidInput("Invalid source file name".into()))?)
+            } else {
+                dst.clone()
+            };
+
+            let size = src.metadata()?.len();
+            total_size += size;
+
+            if dst_path.exists() && !traversal::is_excluded(&dst_path, &excludes) {
+                overwrites.push(FileToOverwrite { path: dst_path.clone(), is_dir: false });
+            }
+
+            entries.push(PlanEntry::CopyFile { src: src.clone(), dst: dst_path, size });
+        } else if recursive && src.is_dir() {
+            let src_name = src.file_name().ok_or_else(||
+                BcmrError::InvalidInput("Invalid source directory name".into()))?;
+            let new_dst = if dst_is_dir { dst.join(src_name) } else { dst.clone() };
+
+            entries.push(PlanEntry::CreateDir { src: src.clone(), dst: new_dst.clone() });
+
+            for entry in traversal::walk(src, true, false, 1, &excludes) {
+                let entry = entry?;
+                let path = entry.path();
+                let relative = path.strip_prefix(src)?;
+                let target = new_dst.join(relative);
+
+                if path.is_dir() {
+                    if target.exists() && !traversal::is_excluded(&target, &excludes) {
+                        overwrites.push(FileToOverwrite { path: target.clone(), is_dir: true });
+                    }
+                    entries.push(PlanEntry::CreateDir { src: path.to_path_buf(), dst: target });
+                } else if path.is_file() {
+                    let size = entry.metadata()?.len();
+                    total_size += size;
+                    if target.exists() && !traversal::is_excluded(&target, &excludes) {
+                        overwrites.push(FileToOverwrite { path: target.clone(), is_dir: false });
+                    }
+                    entries.push(PlanEntry::CopyFile { src: path.to_path_buf(), dst: target, size });
+                }
+            }
+        } else if src.is_dir() {
+            return Err(BcmrError::InvalidInput(format!(
+                "Source '{}' is a directory. Use -r flag for recursive copy.", src.display()
+            )));
+        } else {
+            return Err(BcmrError::SourceNotFound(src.clone()));
+        }
+    }
+
+    Ok(CopyPlan { entries, total_size, overwrites })
+}
+
+pub async fn plan_copy(
+    sources: &[PathBuf],
+    dst: &Path,
+    recursive: bool,
+    excludes: &[regex::Regex],
+) -> std::result::Result<CopyPlan, BcmrError> {
+    let sources = sources.to_vec();
+    let dst = dst.to_path_buf();
+    let excludes = excludes.to_vec();
+    tokio::task::spawn_blocking(move || plan_copy_sync(sources, dst, recursive, excludes)).await?
+}
+
+pub fn dry_run_plan(plan: &CopyPlan, cli: &Commands) -> std::result::Result<(), BcmrError> {
+    for entry in &plan.entries {
+        match entry {
+            PlanEntry::CreateDir { src, dst } => {
+                if !dst.exists() {
+                    print_dry_run(
+                        ActionType::Add,
+                        &src.to_string_lossy(),
+                        Some(&format!("(DIR) -> {}", dst.display())),
+                    );
+                }
+            }
+            PlanEntry::CopyFile { src, dst, .. } => {
+                let action = determine_dry_run_action(src, dst, cli)?;
+                print_dry_run(
+                    action,
+                    &src.to_string_lossy(),
+                    Some(&dst.to_string_lossy()),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_plan<F>(
+    plan: &CopyPlan,
+    preserve: bool,
+    test_mode: TestMode,
+    cli: &Commands,
+    progress_callback: F,
+    on_new_file: impl Fn(&str, u64) + Send + Sync + 'static,
+) -> std::result::Result<(), BcmrError>
+where
+    F: Fn(u64) + Send + Sync,
+{
+    let callback = ProgressCallback {
+        callback: progress_callback,
+        on_new_file: Box::new(on_new_file),
+    };
+
+    for entry in &plan.entries {
+        match entry {
+            PlanEntry::CreateDir { dst, .. } => {
+                if !dst.exists() {
+                    fs::create_dir_all(dst).await?;
+                }
+            }
+            PlanEntry::CopyFile { src, dst, .. } => {
+                if dst.exists() && !cli.is_force() && is_normal_write(cli) {
+                    return Err(BcmrError::TargetExists(dst.clone()));
+                }
+
+                if dst.exists() && cli.is_force() && !is_normal_write(cli) {
+                    fs::remove_file(dst).await?;
+                }
+
+                copy_file(src, dst, CopyFileOptions {
+                    preserve,
+                    verify: cli.is_verify(),
+                    resume: cli.is_resume(),
+                    strict: cli.is_strict(),
+                    append: cli.is_append(),
+                    sync: cli.is_sync(),
+                    reflink_arg: cli.get_reflink_mode(),
+                    sparse_arg: cli.get_sparse_mode(),
+                    test_mode: test_mode.clone(),
+                }, &callback).await?;
+
+                if cli.is_verbose() {
+                    eprintln!("'{}' -> '{}'", src.display(), dst.display());
+                }
+            }
+        }
+    }
+
+    // Preserve directory attributes after all files are copied (deepest first)
+    // so that file copies don't alter directory mtimes
+    if preserve {
+        for entry in plan.entries.iter().rev() {
+            if let PlanEntry::CreateDir { src, dst } = entry {
+                preserve_attributes(src, dst).await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[allow(clippy::type_complexity)]
 pub struct ProgressCallback<F> {
     callback: F,

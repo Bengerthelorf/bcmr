@@ -173,7 +173,7 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         return handle_remote_copy(args, sources, dest, &excludes).await;
     }
 
-    // --- Local copy (original logic) ---
+    // --- Local copy ---
 
     if sources.len() > 1 && (!dest.exists() || !dest.is_dir()) {
         bail!(
@@ -182,59 +182,46 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         );
     }
 
-    if args.is_force() {
-        let files_to_overwrite =
-            commands::copy::check_overwrites(sources, dest, args.is_recursive(), args, &excludes).await?;
+    // Single-pass plan: one walk for overwrites + total size + file list
+    let plan = commands::copy::plan_copy(sources, dest, args.is_recursive(), &excludes).await?;
 
-        if !files_to_overwrite.is_empty()
-            && args.should_prompt_for_overwrite()
-            && !confirm_overwrite(&files_to_overwrite).await?
-        {
-            return Err(BcmrError::Cancelled.into());
-        }
+    if args.is_force()
+        && !plan.overwrites.is_empty()
+        && args.should_prompt_for_overwrite()
+        && !confirm_overwrite(&plan.overwrites).await?
+    {
+        return Err(BcmrError::Cancelled.into());
     }
-
-    let total_size = commands::copy::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
 
     if args.is_dry_run() {
         println!("DRY RUN MODE: No changes will be made.\n");
-
-        for src in sources {
-            let _ = commands::copy::copy_path(
-                src, dest,
-                args.is_recursive(), args.is_preserve(),
-                test_mode.clone(), args, &excludes,
-                |_| {}, |_, _| {},
-            ).await;
-        }
-
-        println!("\nSummary: {} sources, {}", sources.len(), format_bytes(total_size as f64));
+        commands::copy::dry_run_plan(&plan, args)?;
+        println!("\nSummary: {} sources, {}", sources.len(), format_bytes(plan.total_size as f64));
         return Ok(());
     }
 
-    let runner = ProgressRunner::new(total_size, is_plain_mode(args), false)?;
+    let runner = ProgressRunner::new(plan.total_size, is_plain_mode(args), false)?;
 
     {
         let mut p = runner.progress().lock();
         p.set_operation_type("Copying");
         if let Some(first) = sources.first() {
             let display_name = first.file_name().unwrap_or_default().to_string_lossy();
-            p.set_current_file(&display_name, total_size);
+            p.set_current_file(&display_name, plan.total_size);
         }
     }
 
-    for src in sources {
-        let result = commands::copy::copy_path(
-            src, dest,
-            args.is_recursive(), args.is_preserve(),
-            test_mode.clone(), args, &excludes,
-            runner.inc_callback(), runner.file_callback(),
-        ).await;
+    let result = commands::copy::execute_plan(
+        &plan,
+        args.is_preserve(),
+        test_mode,
+        args,
+        runner.inc_callback(),
+        runner.file_callback(),
+    ).await;
 
-        if let Err(e) = result {
-            eprintln!("Error copying '{}': {}", src.display(), e);
-            return runner.finish_err("Copy operation encountered errors.".into());
-        }
+    if let Err(e) = result {
+        return runner.finish_err(e.to_string());
     }
 
     runner.finish_ok()
