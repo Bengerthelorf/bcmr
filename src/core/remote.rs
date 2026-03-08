@@ -32,6 +32,12 @@ impl std::fmt::Display for RemotePath {
     }
 }
 
+/// Escape a string for safe use inside single quotes in a shell command.
+/// Replaces `'` with `'\''` (end quote, escaped quote, start quote).
+fn shell_escape(s: &str) -> String {
+    s.replace('\'', "'\\''")
+}
+
 /// Parse a path string as a remote path (`[user@]host:path`).
 /// Returns `None` if it's a local path.
 ///
@@ -148,7 +154,7 @@ pub async fn remote_stat(remote: &RemotePath) -> Result<RemoteFileInfo, BcmrErro
         .arg(remote.ssh_target())
         .arg(format!(
             "stat -c '%F %s' '{}' 2>/dev/null || stat -f '%HT %z' '{}'",
-            remote.path, remote.path
+            shell_escape(&remote.path), shell_escape(&remote.path)
         ))
         .output()
         .await?;
@@ -196,7 +202,7 @@ pub async fn remote_total_size(remote: &RemotePath, recursive: bool) -> Result<u
         .arg(remote.ssh_target())
         .arg(format!(
             "find '{}' -type f -exec stat -c '%s' {{}} + 2>/dev/null || find '{}' -type f -exec stat -f '%z' {{}} +",
-            remote.path, remote.path
+            shell_escape(&remote.path), shell_escape(&remote.path)
         ))
         .output()
         .await?;
@@ -225,7 +231,7 @@ pub async fn remote_list_files(
         .arg(remote.ssh_target())
         .arg(format!(
             "find '{}' -printf '%P\\0%s\\0%y\\0' 2>/dev/null || find '{}' ! -path '{}' -exec stat -f '%N\\0%z\\0%HT\\0' {{}} +",
-            remote.path, remote.path, remote.path
+            shell_escape(&remote.path), shell_escape(&remote.path), shell_escape(&remote.path)
         ))
         .output()
         .await?;
@@ -284,7 +290,7 @@ pub async fn download_file(
     let mut child = Command::new("ssh")
         .arg("-o").arg("BatchMode=yes")
         .arg(remote.ssh_target())
-        .arg(format!("cat '{}'", remote.path))
+        .arg(format!("cat '{}'", shell_escape(&remote.path)))
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
@@ -344,7 +350,7 @@ pub async fn upload_file(
             Command::new("ssh")
                 .arg("-o").arg("BatchMode=yes")
                 .arg(remote.ssh_target())
-                .arg(format!("mkdir -p '{}'", parent.0))
+                .arg(format!("mkdir -p '{}'", shell_escape(parent.0)))
                 .output()
                 .await?;
         }
@@ -353,7 +359,7 @@ pub async fn upload_file(
     let mut child = Command::new("ssh")
         .arg("-o").arg("BatchMode=yes")
         .arg(remote.ssh_target())
-        .arg(format!("cat > '{}'", remote.path))
+        .arg(format!("cat > '{}'", shell_escape(&remote.path)))
         .stdin(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
@@ -437,7 +443,7 @@ pub async fn upload_directory(
     let output = Command::new("ssh")
         .arg("-o").arg("BatchMode=yes")
         .arg(remote.ssh_target())
-        .arg(format!("mkdir -p '{}'", remote.path))
+        .arg(format!("mkdir -p '{}'", shell_escape(&remote.path)))
         .output()
         .await?;
 
@@ -469,7 +475,7 @@ pub async fn upload_directory(
     if !dirs.is_empty() {
         let mkdir_cmd = dirs
             .iter()
-            .map(|d| format!("'{}/{}'", remote.path, d.display()))
+            .map(|d| format!("'{}/{}'", shell_escape(&remote.path), shell_escape(&d.display().to_string())))
             .collect::<Vec<_>>()
             .join(" ");
 

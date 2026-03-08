@@ -25,7 +25,8 @@ fn unregister_cleanup(path: &Path) {
 
 /// Remove all registered partial/temp files. Called on Ctrl+C.
 pub fn cleanup_partial_files() {
-    for path in CLEANUP_PATHS.lock().drain(..) {
+    let paths: Vec<PathBuf> = CLEANUP_PATHS.lock().drain(..).collect();
+    for path in paths {
         let _ = std::fs::remove_file(&path);
     }
 }
@@ -96,32 +97,42 @@ async fn try_copy_file_range(
         let sfd = src_fd;
         let dfd = dst_fd;
 
-        let result = tokio::task::spawn_blocking(move || unsafe {
-            libc::copy_file_range(
-                sfd, std::ptr::null_mut(),
-                dfd, std::ptr::null_mut(),
-                to_copy, 0,
-            )
+        // Capture errno inside the blocking thread (errno is thread-local)
+        let result = tokio::task::spawn_blocking(move || {
+            let ret = unsafe {
+                libc::copy_file_range(
+                    sfd, std::ptr::null_mut(),
+                    dfd, std::ptr::null_mut(),
+                    to_copy, 0,
+                )
+            };
+            if ret < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(ret)
+            }
         }).await.ok()?;
 
-        if result < 0 {
-            let err = std::io::Error::last_os_error();
-            let errno = err.raw_os_error().unwrap_or(0);
-            // Not available or not supported — fall back to buffer copy
-            if errno == libc::ENOSYS || errno == libc::EXDEV
-                || errno == libc::EINVAL || errno == libc::EOPNOTSUPP
-            {
-                drop(dst_file);
-                let _ = std::fs::remove_file(dst);
-                return None;
+        match result {
+            Err(err) => {
+                let errno = err.raw_os_error().unwrap_or(0);
+                // Not available or not supported — fall back to buffer copy
+                if errno == libc::ENOSYS || errno == libc::EXDEV
+                    || errno == libc::EINVAL || errno == libc::EOPNOTSUPP
+                {
+                    drop(dst_file);
+                    let _ = std::fs::remove_file(dst);
+                    return None;
+                }
+                return Some(Err(BcmrError::Io(err)));
             }
-            return Some(Err(BcmrError::Io(err)));
+            Ok(0) => break,
+            Ok(n) => {
+                let n = n as u64;
+                remaining -= n;
+                callback(n);
+            }
         }
-        if result == 0 { break; }
-
-        let n = result as u64;
-        remaining -= n;
-        callback(n);
     }
 
     if sync {
@@ -615,6 +626,7 @@ where
                 }
                 (callback.callback)(file_size);
                 if preserve { preserve_attributes(src, dst).await?; }
+                if verify { verify_copy(src, dst).await?; }
                 return Ok(());
             }
             Err(e) => {
