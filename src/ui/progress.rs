@@ -8,6 +8,9 @@ pub trait ProgressRenderer: Send {
     fn set_current_file(&mut self, file_name: &str, file_size: u64);
     fn inc_current(&mut self, delta: u64);
     fn set_operation_type(&mut self, operation: &str);
+    fn set_total_bytes(&mut self, total: u64);
+    fn set_scanning(&mut self, scanning: bool);
+    fn set_files_found(&mut self, count: u64);
     fn tick(&mut self);
     fn finish(&mut self) -> io::Result<()>;
 }
@@ -20,6 +23,9 @@ impl ProgressRenderer for SilentProgress {
     fn set_current_file(&mut self, _file_name: &str, _file_size: u64) {}
     fn inc_current(&mut self, _delta: u64) {}
     fn set_operation_type(&mut self, _operation: &str) {}
+    fn set_total_bytes(&mut self, _total: u64) {}
+    fn set_scanning(&mut self, _scanning: bool) {}
+    fn set_files_found(&mut self, _count: u64) {}
     fn tick(&mut self) {}
     fn finish(&mut self) -> io::Result<()> {
         Ok(())

@@ -182,49 +182,101 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         );
     }
 
-    // Single-pass plan: one walk for overwrites + total size + file list
-    let plan = commands::copy::plan_copy(sources, dest, args.is_recursive(), &excludes).await?;
+    // Decide: pipeline (no prompt needed) vs plan-based (overwrite prompt needed)
+    let needs_overwrite_prompt = args.is_force() && args.should_prompt_for_overwrite();
 
-    if args.is_force()
-        && !plan.overwrites.is_empty()
-        && args.should_prompt_for_overwrite()
-        && !confirm_overwrite(&plan.overwrites).await?
-    {
-        return Err(BcmrError::Cancelled.into());
-    }
+    if needs_overwrite_prompt || args.is_dry_run() {
+        // Plan-based: need full scan first for overwrite prompt or dry-run
+        let plan = commands::copy::plan_copy(sources, dest, args.is_recursive(), &excludes).await?;
 
-    if args.is_dry_run() {
-        println!("DRY RUN MODE: No changes will be made.\n");
-        commands::copy::dry_run_plan(&plan, args)?;
-        println!("\nSummary: {} sources, {}", sources.len(), format_bytes(plan.total_size as f64));
-        return Ok(());
-    }
-
-    let runner = ProgressRunner::new(plan.total_size, is_plain_mode(args), false)?;
-
-    {
-        let mut p = runner.progress().lock();
-        p.set_operation_type("Copying");
-        if let Some(first) = sources.first() {
-            let display_name = first.file_name().unwrap_or_default().to_string_lossy();
-            p.set_current_file(&display_name, plan.total_size);
+        if args.is_force()
+            && !plan.overwrites.is_empty()
+            && args.should_prompt_for_overwrite()
+            && !confirm_overwrite(&plan.overwrites).await?
+        {
+            return Err(BcmrError::Cancelled.into());
         }
+
+        if args.is_dry_run() {
+            println!("DRY RUN MODE: No changes will be made.\n");
+            commands::copy::dry_run_plan(&plan, args)?;
+            println!("\nSummary: {} sources, {}", sources.len(), format_bytes(plan.total_size as f64));
+            return Ok(());
+        }
+
+        let runner = ProgressRunner::new(plan.total_size, is_plain_mode(args), false)?;
+
+        {
+            let mut p = runner.progress().lock();
+            p.set_operation_type("Copying");
+            if let Some(first) = sources.first() {
+                let display_name = first.file_name().unwrap_or_default().to_string_lossy();
+                p.set_current_file(&display_name, plan.total_size);
+            }
+        }
+
+        let result = commands::copy::execute_plan(
+            &plan,
+            args.is_preserve(),
+            test_mode,
+            args,
+            runner.inc_callback(),
+            runner.file_callback(),
+        ).await;
+
+        if let Err(e) = result {
+            return runner.finish_err(e.to_string());
+        }
+
+        runner.finish_ok()
+    } else {
+        // Pipeline: start copying immediately while scanning
+        let runner = ProgressRunner::new(0, is_plain_mode(args), false)?;
+
+        {
+            let mut p = runner.progress().lock();
+            p.set_operation_type("Copying");
+            p.set_scanning(true);
+            if let Some(first) = sources.first() {
+                let display_name = first.file_name().unwrap_or_default().to_string_lossy();
+                p.set_current_file(&display_name, 0);
+            }
+        }
+
+        let total_cb = {
+            let p = Arc::clone(runner.progress());
+            move |total: u64| p.lock().set_total_bytes(total)
+        };
+        let scan_done_cb = {
+            let p = Arc::clone(runner.progress());
+            move || p.lock().set_scanning(false)
+        };
+        let files_found_cb = {
+            let p = Arc::clone(runner.progress());
+            move |count: u64| p.lock().set_files_found(count)
+        };
+
+        let result = commands::copy::pipeline_copy(
+            sources,
+            dest,
+            args.is_recursive(),
+            &excludes,
+            args.is_preserve(),
+            test_mode,
+            args,
+            runner.inc_callback(),
+            runner.file_callback(),
+            total_cb,
+            scan_done_cb,
+            files_found_cb,
+        ).await;
+
+        if let Err(e) = result {
+            return runner.finish_err(e.to_string());
+        }
+
+        runner.finish_ok()
     }
-
-    let result = commands::copy::execute_plan(
-        &plan,
-        args.is_preserve(),
-        test_mode,
-        args,
-        runner.inc_callback(),
-        runner.file_callback(),
-    ).await;
-
-    if let Err(e) = result {
-        return runner.finish_err(e.to_string());
-    }
-
-    runner.finish_ok()
 }
 
 async fn handle_remote_copy(

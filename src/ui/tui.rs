@@ -287,13 +287,24 @@ impl TuiProgress {
         } else {
             "-- /s".to_string()
         };
-        let details = format!(
-            "Detail:  {} / {} | {} | ETA: {}",
-            format_bytes(self.data.current_bytes as f64),
-            format_bytes(self.data.total_bytes as f64),
-            speed_str,
-            eta_str
-        );
+        let details = if self.data.scanning {
+            let dots = ".".repeat((self.data.elapsed().as_millis() / 500 % 4) as usize);
+            format!(
+                "Detail:  {} (scanning{} {} files found) | {}",
+                format_bytes(self.data.current_bytes as f64),
+                dots,
+                self.data.files_found,
+                speed_str,
+            )
+        } else {
+            format!(
+                "Detail:  {} / {} | {} | ETA: {}",
+                format_bytes(self.data.current_bytes as f64),
+                format_bytes(self.data.total_bytes as f64),
+                speed_str,
+                eta_str
+            )
+        };
         draw_line_content(&mut stdout, 2, &details)?;
 
         // --- L3: Item count or spacer ---
@@ -408,6 +419,20 @@ impl ProgressRenderer for TuiProgress {
     fn set_operation_type(&mut self, operation: &str) {
         self.data.operation_type = operation.to_string();
         let _ = self.redraw();
+    }
+
+    fn set_total_bytes(&mut self, total: u64) {
+        self.data.total_bytes = total;
+        let _ = self.redraw();
+    }
+
+    fn set_scanning(&mut self, scanning: bool) {
+        self.data.scanning = scanning;
+        let _ = self.redraw();
+    }
+
+    fn set_files_found(&mut self, count: u64) {
+        self.data.files_found = count;
     }
 
     fn tick(&mut self) {

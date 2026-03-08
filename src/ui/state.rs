@@ -15,6 +15,8 @@ pub struct ProgressData {
     pub operation_type: String,
     pub items_total: Option<usize>, // Total number of items to process
     pub items_processed: usize,     // Number of items processed
+    pub scanning: bool,             // Whether we're still scanning (pipeline mode)
+    pub files_found: u64,           // Files discovered so far during scanning
 }
 
 impl ProgressData {
@@ -35,6 +37,8 @@ impl ProgressData {
             operation_type: String::new(),
             items_total: None,
             items_processed: 0,
+            scanning: false,
+            files_found: 0,
         }
     }
 

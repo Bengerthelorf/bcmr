@@ -1044,6 +1044,215 @@ where
     Ok(())
 }
 
+// --- Pipeline scan+copy: start copying while still scanning ---
+
+enum ScanMessage {
+    Entry(PlanEntry),
+    Done,
+}
+
+/// Pipeline copy: scan and copy concurrently via a channel.
+/// The scanner walks directories in a background thread and sends entries
+/// through a channel. The copier receives entries and copies immediately,
+/// without waiting for the full scan to complete.
+#[allow(clippy::too_many_arguments)]
+pub async fn pipeline_copy<F>(
+    sources: &[PathBuf],
+    dst: &Path,
+    recursive: bool,
+    excludes: &[regex::Regex],
+    preserve: bool,
+    test_mode: TestMode,
+    cli: &Commands,
+    progress_callback: F,
+    on_new_file: impl Fn(&str, u64) + Send + Sync + 'static,
+    on_total_update: impl Fn(u64) + Send + Sync + 'static,
+    on_scan_complete: impl Fn() + Send + Sync + 'static,
+    on_file_found: impl Fn(u64) + Send + Sync + 'static,
+) -> std::result::Result<(), BcmrError>
+where
+    F: Fn(u64) + Send + Sync,
+{
+    let callback = ProgressCallback {
+        callback: progress_callback,
+        on_new_file: Box::new(on_new_file),
+    };
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ScanMessage>(256);
+
+    // Background scanner
+    let sources = sources.to_vec();
+    let dst = dst.to_path_buf();
+    let excludes = excludes.to_vec();
+    let scanner = tokio::task::spawn_blocking(move || {
+        let dst_is_dir = dst.exists() && dst.is_dir();
+        let mut total_size = 0u64;
+        let mut files_found = 0u64;
+
+        for src in &sources {
+            if traversal::is_excluded(src, &excludes) {
+                continue;
+            }
+
+            if src.is_file() {
+                let dst_path = if dst_is_dir {
+                    dst.join(match src.file_name() {
+                        Some(n) => n,
+                        None => continue,
+                    })
+                } else {
+                    dst.clone()
+                };
+
+                let size = match src.metadata() {
+                    Ok(m) => m.len(),
+                    Err(e) => {
+                        let _ = tx.blocking_send(ScanMessage::Done);
+                        return Err(BcmrError::Io(e));
+                    }
+                };
+                total_size += size;
+                files_found += 1;
+                on_total_update(total_size);
+                on_file_found(files_found);
+
+                if tx.blocking_send(ScanMessage::Entry(
+                    PlanEntry::CopyFile { src: src.clone(), dst: dst_path, size }
+                )).is_err() {
+                    return Ok(()); // receiver dropped, abort
+                }
+            } else if recursive && src.is_dir() {
+                let src_name = match src.file_name() {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let new_dst = if dst_is_dir { dst.join(src_name) } else { dst.clone() };
+
+                if tx.blocking_send(ScanMessage::Entry(
+                    PlanEntry::CreateDir { src: src.clone(), dst: new_dst.clone() }
+                )).is_err() {
+                    return Ok(());
+                }
+
+                for entry in traversal::walk(src, true, false, 1, &excludes) {
+                    let entry = match entry {
+                        Ok(e) => e,
+                        Err(e) => {
+                            let _ = tx.blocking_send(ScanMessage::Done);
+                            return Err(BcmrError::WalkDir(e));
+                        }
+                    };
+                    let path = entry.path();
+                    let relative = match path.strip_prefix(src) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let _ = tx.blocking_send(ScanMessage::Done);
+                            return Err(BcmrError::StripPrefix(e));
+                        }
+                    };
+                    let target = new_dst.join(relative);
+
+                    if path.is_dir() {
+                        if tx.blocking_send(ScanMessage::Entry(
+                            PlanEntry::CreateDir { src: path.to_path_buf(), dst: target }
+                        )).is_err() {
+                            return Ok(());
+                        }
+                    } else if path.is_file() {
+                        let size = match entry.metadata() {
+                            Ok(m) => m.len(),
+                            Err(e) => {
+                                let _ = tx.blocking_send(ScanMessage::Done);
+                                return Err(BcmrError::WalkDir(e));
+                            }
+                        };
+                        total_size += size;
+                        files_found += 1;
+                        on_total_update(total_size);
+                        on_file_found(files_found);
+
+                        if tx.blocking_send(ScanMessage::Entry(
+                            PlanEntry::CopyFile { src: path.to_path_buf(), dst: target, size }
+                        )).is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+            } else if src.is_dir() {
+                let _ = tx.blocking_send(ScanMessage::Done);
+                return Err(BcmrError::InvalidInput(format!(
+                    "Source '{}' is a directory. Use -r flag for recursive copy.", src.display()
+                )));
+            } else {
+                let _ = tx.blocking_send(ScanMessage::Done);
+                return Err(BcmrError::SourceNotFound(src.clone()));
+            }
+        }
+
+        let _ = tx.blocking_send(ScanMessage::Done);
+        Ok(())
+    });
+
+    // Copier: consume entries as they arrive
+    let mut dir_entries: Vec<(PathBuf, PathBuf)> = Vec::new(); // (src, dst) for preserve
+
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            ScanMessage::Entry(entry) => {
+                match entry {
+                    PlanEntry::CreateDir { ref src, ref dst } => {
+                        if !dst.exists() {
+                            fs::create_dir_all(dst).await?;
+                        }
+                        dir_entries.push((src.clone(), dst.clone()));
+                    }
+                    PlanEntry::CopyFile { ref src, ref dst, .. } => {
+                        if dst.exists() && !cli.is_force() && is_normal_write(cli) {
+                            return Err(BcmrError::TargetExists(dst.clone()));
+                        }
+
+                        if dst.exists() && cli.is_force() && !is_normal_write(cli) {
+                            fs::remove_file(dst).await?;
+                        }
+
+                        copy_file(src, dst, CopyFileOptions {
+                            preserve,
+                            verify: cli.is_verify(),
+                            resume: cli.is_resume(),
+                            strict: cli.is_strict(),
+                            append: cli.is_append(),
+                            sync: cli.is_sync(),
+                            reflink_arg: cli.get_reflink_mode(),
+                            sparse_arg: cli.get_sparse_mode(),
+                            test_mode: test_mode.clone(),
+                        }, &callback).await?;
+
+                        if cli.is_verbose() {
+                            eprintln!("'{}' -> '{}'", src.display(), dst.display());
+                        }
+                    }
+                }
+            }
+            ScanMessage::Done => {
+                on_scan_complete();
+                break;
+            }
+        }
+    }
+
+    // Wait for scanner to finish and propagate errors
+    scanner.await??;
+
+    // Preserve directory attributes deepest-first
+    if preserve {
+        for (src, dst) in dir_entries.iter().rev() {
+            preserve_attributes(src, dst).await?;
+        }
+    }
+
+    Ok(())
+}
+
 async fn verify_copy(src: &Path, dst: &Path) -> std::result::Result<(), BcmrError> {
     let src_path = src.to_path_buf();
     let dst_path = dst.to_path_buf();

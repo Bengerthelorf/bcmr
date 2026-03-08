@@ -97,14 +97,26 @@ impl InlineProgress {
             "-- /s".to_string()
         };
         execute!(stdout, Clear(ClearType::CurrentLine))?;
-        writeln!(
-            stdout,
-            "{} / {} | {} | ETA: {}",
-            format_bytes(self.data.current_bytes as f64),
-            format_bytes(self.data.total_bytes as f64),
-            speed_str,
-            eta_str
-        )?;
+        if self.data.scanning {
+            let dots = ".".repeat((self.data.elapsed().as_millis() / 500 % 4) as usize);
+            writeln!(
+                stdout,
+                "{} (scanning{} {} files found) | {}",
+                format_bytes(self.data.current_bytes as f64),
+                dots,
+                self.data.files_found,
+                speed_str,
+            )?;
+        } else {
+            writeln!(
+                stdout,
+                "{} / {} | {} | ETA: {}",
+                format_bytes(self.data.current_bytes as f64),
+                format_bytes(self.data.total_bytes as f64),
+                speed_str,
+                eta_str
+            )?;
+        }
 
         // L3: File
         execute!(stdout, Clear(ClearType::CurrentLine))?;
@@ -175,6 +187,20 @@ impl ProgressRenderer for InlineProgress {
     fn set_operation_type(&mut self, operation: &str) {
         self.data.operation_type = operation.to_string();
         let _ = self.redraw();
+    }
+
+    fn set_total_bytes(&mut self, total: u64) {
+        self.data.total_bytes = total;
+        let _ = self.redraw();
+    }
+
+    fn set_scanning(&mut self, scanning: bool) {
+        self.data.scanning = scanning;
+        let _ = self.redraw();
+    }
+
+    fn set_files_found(&mut self, count: u64) {
+        self.data.files_found = count;
     }
 
     fn tick(&mut self) {
