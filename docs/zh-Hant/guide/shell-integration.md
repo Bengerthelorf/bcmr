@@ -82,7 +82,8 @@ bcmr completions fish > ~/.config/fish/completions/bcmr.fish
 ```
 
 ```powershell [PowerShell]
-# 加入 $PROFILE
+# 如果 profile 目錄不存在則先建立，再追加
+New-Item -Path (Split-Path $PROFILE) -ItemType Directory -Force | Out-Null
 bcmr completions powershell >> $PROFILE
 
 # 或僅在目前工作階段載入

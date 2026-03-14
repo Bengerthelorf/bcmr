@@ -85,7 +85,8 @@ bcmr completions fish > ~/.config/fish/completions/bcmr.fish
 ```
 
 ```powershell [PowerShell]
-# Add to $PROFILE
+# Create profile directory if it doesn't exist, then append
+New-Item -Path (Split-Path $PROFILE) -ItemType Directory -Force | Out-Null
 bcmr completions powershell >> $PROFILE
 
 # Or load for current session only
