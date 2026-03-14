@@ -20,6 +20,7 @@ include = [
 
 [dependencies]
 clap = { version = "4.5.54", features = ["derive"] }
+clap_complete = "4.5"
 tokio = { version = "1.49.0", features = ["full"] }
 
 walkdir = "2.5.0"

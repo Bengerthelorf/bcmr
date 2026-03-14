@@ -207,6 +207,12 @@ pub enum Commands {
     /// Check for updates and self-update
     Update,
 
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        shell: clap_complete::Shell,
+    },
+
     /// Remove files or directories
     Remove {
         /// Files or directories to remove
@@ -304,7 +310,7 @@ impl Commands {
             Commands::Remove {
                 force, interactive, ..
             } => !*force && *interactive,
-            Commands::Init { .. } | Commands::Update => false,
+            Commands::Init { .. } | Commands::Update | Commands::Completions { .. } => false,
         }
     }
 

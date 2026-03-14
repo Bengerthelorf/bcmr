@@ -561,7 +561,7 @@ fn validate_mode(mode: &str, name: &str) -> Result<()> {
 }
 
 fn background_update_check(command: &Commands) -> Option<mpsc::Receiver<Option<String>>> {
-    if matches!(command, Commands::Update) {
+    if matches!(command, Commands::Update | Commands::Completions { .. }) {
         return None;
     }
     if CONFIG.update_check != UpdateCheck::Notify {
@@ -587,6 +587,10 @@ async fn main() -> Result<()> {
         Commands::Remove { .. } => handle_remove_command(&cli.command).await?,
         Commands::Init { .. } => handle_init_command(&cli.command)?,
         Commands::Update => commands::update::run()?,
+        Commands::Completions { shell } => {
+            let mut cmd = <cli::Cli as clap::CommandFactory>::command();
+            clap_complete::generate(*shell, &mut cmd, "bcmr", &mut std::io::stdout());
+        }
     }
 
     if let Some(rx) = update_rx {

@@ -46,7 +46,6 @@ pub fn parse_remote_path(s: &str) -> Option<RemotePath> {
     }
 
     if s.len() >= 2 && s.as_bytes()[0].is_ascii_alphabetic() && s.as_bytes()[1] == b':' {
-        // Only skip if the part before `:` is exactly one character (drive letter)
         let colon_pos = s.find(':')?;
         if colon_pos == 1 {
             return None;
@@ -91,6 +90,51 @@ pub struct RemoteFileInfo {
     pub size: u64,
 }
 
+// ── SSH connection multiplexing ──
+// Uses ControlMaster to reuse a single TCP connection for all SSH commands
+// to the same host. The first connection may prompt for a password (if TTY
+// is available); subsequent connections piggyback on the master socket.
+
+fn control_path(target: &str) -> String {
+    let dir = std::env::temp_dir().join("bcmr-ssh");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join(format!("{}.sock", target.replace(['@', ':', '/'], "_")))
+        .to_string_lossy()
+        .to_string()
+}
+
+fn is_interactive() -> bool {
+    #[cfg(unix)]
+    { unsafe { libc::isatty(libc::STDIN_FILENO) != 0 } }
+    #[cfg(not(unix))]
+    { true }
+}
+
+fn ssh_base_args(target: &str) -> Vec<String> {
+    let cp = control_path(target);
+    let mut args = vec![
+        "-o".into(), format!("ControlPath={}", cp),
+        "-o".into(), "ControlMaster=auto".into(),
+        "-o".into(), "ControlPersist=300".into(),
+        "-o".into(), "ConnectTimeout=10".into(),
+    ];
+    // Only force BatchMode when there's no TTY (scripts, pipes)
+    if !is_interactive() {
+        args.extend(["-o".into(), "BatchMode=yes".into()]);
+    }
+    args
+}
+
+fn ssh_command(target: &str) -> Command {
+    let args = ssh_base_args(target);
+    let mut cmd = Command::new("ssh");
+    for arg in &args {
+        cmd.arg(arg);
+    }
+    cmd.arg(target);
+    cmd
+}
+
 fn ssh_error_message(stderr: &str, context: &str) -> String {
     let stderr_lower = stderr.to_lowercase();
     if stderr_lower.contains("connection refused") {
@@ -111,10 +155,9 @@ fn ssh_error_message(stderr: &str, context: &str) -> String {
 }
 
 pub async fn validate_ssh_connection(remote: &RemotePath) -> Result<(), BcmrError> {
-    let output = Command::new("ssh")
-        .arg("-o").arg("BatchMode=yes")
-        .arg("-o").arg("ConnectTimeout=10")
-        .arg(remote.ssh_target())
+    let target = remote.ssh_target();
+    // Establishes the ControlMaster connection; may prompt for password if TTY
+    let output = ssh_command(&target)
         .arg("echo ok")
         .output()
         .await?;
@@ -123,16 +166,14 @@ pub async fn validate_ssh_connection(remote: &RemotePath) -> Result<(), BcmrErro
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(BcmrError::InvalidInput(ssh_error_message(
             &stderr,
-            &format!("Cannot connect to '{}'", remote.ssh_target()),
+            &format!("Cannot connect to '{}'", target),
         )));
     }
     Ok(())
 }
 
 pub async fn remote_stat(remote: &RemotePath) -> Result<RemoteFileInfo, BcmrError> {
-    let output = Command::new("ssh")
-        .arg("-o").arg("BatchMode=yes")
-        .arg(remote.ssh_target())
+    let output = ssh_command(&remote.ssh_target())
         .arg(format!(
             "stat -c '%F %s' '{}' 2>/dev/null || stat -f '%HT %z' '{}'",
             shell_escape(&remote.path), shell_escape(&remote.path)
@@ -176,9 +217,7 @@ pub async fn remote_total_size(remote: &RemotePath, recursive: bool) -> Result<u
         )));
     }
 
-    let output = Command::new("ssh")
-        .arg("-o").arg("BatchMode=yes")
-        .arg(remote.ssh_target())
+    let output = ssh_command(&remote.ssh_target())
         .arg(format!(
             "find '{}' -type f -exec stat -c '%s' {{}} + 2>/dev/null || find '{}' -type f -exec stat -f '%z' {{}} +",
             shell_escape(&remote.path), shell_escape(&remote.path)
@@ -201,9 +240,7 @@ pub async fn remote_total_size(remote: &RemotePath, recursive: bool) -> Result<u
 pub async fn remote_list_files(
     remote: &RemotePath,
 ) -> Result<Vec<(String, u64, bool)>, BcmrError> {
-    let output = Command::new("ssh")
-        .arg("-o").arg("BatchMode=yes")
-        .arg(remote.ssh_target())
+    let output = ssh_command(&remote.ssh_target())
         .arg(format!(
             "find '{}' -printf '%P\\0%s\\0%y\\0' 2>/dev/null || find '{}' ! -path '{}' -exec stat -f '%N\\0%z\\0%HT\\0' {{}} +",
             shell_escape(&remote.path), shell_escape(&remote.path), shell_escape(&remote.path)
@@ -231,7 +268,7 @@ pub async fn remote_list_files(
         i += 3;
 
         if rel_path.is_empty() {
-            continue; // skip root dir itself
+            continue;
         }
         entries.push((rel_path, size, is_dir));
     }
@@ -259,9 +296,7 @@ pub async fn download_file(
         }
     }
 
-    let mut child = Command::new("ssh")
-        .arg("-o").arg("BatchMode=yes")
-        .arg(remote.ssh_target())
+    let mut child = ssh_command(&remote.ssh_target())
         .arg(format!("cat '{}'", shell_escape(&remote.path)))
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -317,18 +352,14 @@ pub async fn upload_file(
 
     if let Some(parent) = remote.path.rsplit_once('/') {
         if !parent.0.is_empty() {
-            Command::new("ssh")
-                .arg("-o").arg("BatchMode=yes")
-                .arg(remote.ssh_target())
+            ssh_command(&remote.ssh_target())
                 .arg(format!("mkdir -p '{}'", shell_escape(parent.0)))
                 .output()
                 .await?;
         }
     }
 
-    let mut child = Command::new("ssh")
-        .arg("-o").arg("BatchMode=yes")
-        .arg(remote.ssh_target())
+    let mut child = ssh_command(&remote.ssh_target())
         .arg(format!("cat > '{}'", shell_escape(&remote.path)))
         .stdin(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -369,7 +400,6 @@ pub async fn download_directory(
     progress_callback: &impl Fn(u64),
     on_new_file: &impl Fn(&str, u64),
 ) -> Result<(), BcmrError> {
-    // List all entries
     let entries = remote_list_files(remote).await?;
 
     for (rel_path, _, is_dir) in &entries {
@@ -405,9 +435,7 @@ pub async fn upload_directory(
 ) -> Result<(), BcmrError> {
     use crate::core::traversal;
 
-    let output = Command::new("ssh")
-        .arg("-o").arg("BatchMode=yes")
-        .arg(remote.ssh_target())
+    let output = ssh_command(&remote.ssh_target())
         .arg(format!("mkdir -p '{}'", shell_escape(&remote.path)))
         .output()
         .await?;
@@ -442,9 +470,7 @@ pub async fn upload_directory(
             .collect::<Vec<_>>()
             .join(" ");
 
-        Command::new("ssh")
-            .arg("-o").arg("BatchMode=yes")
-            .arg(remote.ssh_target())
+        ssh_command(&remote.ssh_target())
             .arg(format!("mkdir -p {}", mkdir_cmd))
             .output()
             .await?;
@@ -468,7 +494,6 @@ mod tests {
 
     #[test]
     fn test_parse_remote_path() {
-        // Valid remote paths
         let r = parse_remote_path("user@host:/path/to/file").unwrap();
         assert_eq!(r.user, Some("user".to_string()));
         assert_eq!(r.host, "host");
@@ -482,7 +507,6 @@ mod tests {
         let r = parse_remote_path("user@192.168.1.1:").unwrap();
         assert_eq!(r.path, ".");
 
-        // Local paths (should return None)
         assert!(parse_remote_path("/absolute/path").is_none());
         assert!(parse_remote_path("./relative/path").is_none());
         assert!(parse_remote_path("../parent/path").is_none());
@@ -490,11 +514,9 @@ mod tests {
         assert!(parse_remote_path(".").is_none());
         assert!(parse_remote_path("..").is_none());
 
-        // Windows drive letters
         assert!(parse_remote_path("C:\\Users\\file").is_none());
         assert!(parse_remote_path("D:file").is_none());
 
-        // Invalid
         assert!(parse_remote_path(":path").is_none());
         assert!(parse_remote_path("@host:path").is_none());
         assert!(parse_remote_path("user@:path").is_none());
