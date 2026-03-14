@@ -93,6 +93,44 @@ export default defineConfig({
   },
 
   themeConfig: {
+    nav: [
+      { text: 'Guide', link: '/guide/getting-started' },
+      { text: 'CLI', link: '/cli/' },
+      {
+        text: 'Download',
+        link: 'https://github.com/Bengerthelorf/bcmr/releases/latest',
+      },
+    ],
+
+    sidebar: {
+      '/guide/': [
+        {
+          text: 'Getting Started',
+          items: [
+            { text: 'Installation', link: '/guide/getting-started' },
+            { text: 'Shell Integration', link: '/guide/shell-integration' },
+          ],
+        },
+        {
+          text: 'Usage',
+          items: [
+            { text: 'Configuration', link: '/guide/configuration' },
+            { text: 'Progress Display', link: '/guide/progress-display' },
+            { text: 'Remote Copy (SSH)', link: '/guide/remote-copy' },
+          ],
+        },
+      ],
+      '/cli/': [
+        {
+          text: 'CLI Reference',
+          items: [
+            { text: 'Overview', link: '/cli/' },
+            { text: 'Command Reference', link: '/cli/commands' },
+          ],
+        },
+      ],
+    },
+
     socialLinks: [
       { icon: 'github', link: 'https://github.com/Bengerthelorf/bcmr' },
     ],
