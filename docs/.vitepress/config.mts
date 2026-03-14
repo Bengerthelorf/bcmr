@@ -90,6 +90,48 @@ export default defineConfig({
         },
       },
     },
+    'zh-Hant': {
+      label: '正體中文',
+      lang: 'zh-Hant',
+      themeConfig: {
+        nav: [
+          { text: '指南', link: '/zh-Hant/guide/getting-started' },
+          { text: 'CLI', link: '/zh-Hant/cli/' },
+          {
+            text: '下載',
+            link: 'https://github.com/Bengerthelorf/bcmr/releases/latest',
+          },
+        ],
+        sidebar: {
+          '/zh-Hant/guide/': [
+            {
+              text: '入門',
+              items: [
+                { text: '安裝', link: '/zh-Hant/guide/getting-started' },
+                { text: 'Shell 整合', link: '/zh-Hant/guide/shell-integration' },
+              ],
+            },
+            {
+              text: '使用',
+              items: [
+                { text: '設定', link: '/zh-Hant/guide/configuration' },
+                { text: '進度顯示', link: '/zh-Hant/guide/progress-display' },
+                { text: '遠端複製 (SSH)', link: '/zh-Hant/guide/remote-copy' },
+              ],
+            },
+          ],
+          '/zh-Hant/cli/': [
+            {
+              text: 'CLI 參考',
+              items: [
+                { text: '概覽', link: '/zh-Hant/cli/' },
+                { text: '命令參考', link: '/zh-Hant/cli/commands' },
+              ],
+            },
+          ],
+        },
+      },
+    },
   },
 
   themeConfig: {
