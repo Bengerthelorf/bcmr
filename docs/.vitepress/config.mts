@@ -5,6 +5,10 @@ export default defineConfig({
   description: 'Better Copy Move Remove — A modern CLI tool for file operations',
   base: '/bcmr/',
 
+  head: [
+    ['link', { rel: 'icon', type: 'image/svg+xml', href: '/bcmr/images/icon.svg' }],
+  ],
+
   locales: {
     root: {
       label: 'English',
@@ -135,6 +139,8 @@ export default defineConfig({
   },
 
   themeConfig: {
+    logo: '/images/icon.svg',
+
     nav: [
       { text: 'Guide', link: '/guide/getting-started' },
       { text: 'CLI', link: '/cli/' },

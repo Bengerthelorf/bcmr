@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#CABBE9"/>
+      <stop offset="100%" stop-color="#6B5B95"/>
+    </linearGradient>
+    <linearGradient id="arrow" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#E8E0F0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded square background -->
+  <rect x="16" y="16" width="480" height="480" rx="96" ry="96" fill="url(#bg)"/>
+
+  <!-- Abstract flow symbol: two offset paths suggesting copy/move -->
+  <!-- Back layer (shadow/duplicate feel) -->
+  <path d="M 168 310
+           L 168 202
+           C 168 185 182 172 198 172
+           L 282 172
+           L 282 140
+           L 344 188
+           L 282 236
+           L 282 204
+           L 200 204
+           L 200 310
+           Z"
+        fill="url(#arrow)" opacity="0.45"/>
+
+  <!-- Front layer (primary arrow) -->
+  <path d="M 344 202
+           L 344 310
+           C 344 327 330 340 314 340
+           L 230 340
+           L 230 372
+           L 168 324
+           L 230 276
+           L 230 308
+           L 312 308
+           L 312 202
+           Z"
+        fill="url(#arrow)" opacity="0.95"/>
+</svg>
