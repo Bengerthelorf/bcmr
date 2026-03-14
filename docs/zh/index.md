@@ -4,6 +4,9 @@ hero:
   name: BCMR
   text: 更好的复制、移动、删除
   tagline: 现代化、安全的文件操作 CLI 工具 — 支持进度显示、断点续传、完整性校验和 SSH 远程复制。
+  image:
+    src: /images/demo.gif
+    alt: BCMR 演示
   actions:
     - theme: brand
       text: 快速开始
