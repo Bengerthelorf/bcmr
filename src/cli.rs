@@ -207,6 +207,11 @@ pub enum Commands {
     /// Check for updates and self-update
     Update,
 
+    #[command(name = "__complete-remote", hide = true)]
+    CompleteRemote {
+        partial: String,
+    },
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -310,7 +315,7 @@ impl Commands {
             Commands::Remove {
                 force, interactive, ..
             } => !*force && *interactive,
-            Commands::Init { .. } | Commands::Update | Commands::Completions { .. } => false,
+            Commands::Init { .. } | Commands::Update | Commands::Completions { .. } | Commands::CompleteRemote { .. } => false,
         }
     }
 

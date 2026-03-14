@@ -560,8 +560,85 @@ fn validate_mode(mode: &str, name: &str) -> Result<()> {
     }
 }
 
+fn build_completion_command() -> clap::Command {
+    let full = <cli::Cli as clap::CommandFactory>::command();
+    let visible: Vec<clap::Command> = full
+        .get_subcommands()
+        .filter(|s| !s.is_hide_set())
+        .cloned()
+        .collect();
+    let mut cmd = clap::Command::new("bcmr");
+    for sub in visible {
+        cmd = cmd.subcommand(sub);
+    }
+    cmd
+}
+
+fn remote_completion_script(shell: &clap_complete::Shell) -> &'static str {
+    use clap_complete::Shell;
+    match shell {
+        Shell::Zsh => r#"
+
+_bcmr_with_remote() {
+    local cur="${words[CURRENT]}"
+    if [[ "$cur" == *:* ]] && [[ "${words[2]}" == "copy" || "${words[2]}" == "move" ]]; then
+        local -a results
+        results=("${(@f)$(bcmr __complete-remote "$cur" 2>/dev/null)}")
+        if [[ ${#results[@]} -gt 0 && -n "${results[1]}" ]]; then
+            compadd -U -S '' -- "${results[@]}"
+            return
+        fi
+    fi
+    _bcmr "$@"
+}
+compdef _bcmr_with_remote bcmr
+"#,
+        Shell::Bash => r#"
+
+_bcmr_with_remote() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local cmd="${COMP_WORDS[1]}"
+    if [[ "$cur" == *:* ]] && [[ "$cmd" == "copy" || "$cmd" == "move" ]]; then
+        local IFS=$'\n'
+        COMPREPLY=($(bcmr __complete-remote "$cur" 2>/dev/null))
+        if [[ ${#COMPREPLY[@]} -gt 0 ]]; then
+            compopt -o nospace
+            return
+        fi
+    fi
+    _bcmr "$@"
+}
+complete -F _bcmr_with_remote bcmr
+"#,
+        Shell::Fish => r#"
+
+complete -c bcmr -n '__fish_seen_subcommand_from copy move; and string match -q "*:*" -- (commandline -ct)' -f -a '(bcmr __complete-remote (commandline -ct) 2>/dev/null)'
+"#,
+        Shell::PowerShell => r#"
+
+$_bcmr_base_completer = (Get-PSReadLineOption).ErrorAction
+Register-ArgumentCompleter -CommandName bcmr -Native -ScriptBlock {
+    param($wordToComplete, $commandAst, $cursorPosition)
+    $tokens = $commandAst.ToString() -split '\s+'
+    if ($wordToComplete -match '.+:.+' -and $tokens.Count -ge 2 -and ($tokens[1] -eq 'copy' -or $tokens[1] -eq 'move')) {
+        $results = bcmr __complete-remote $wordToComplete 2>$null
+        if ($results) {
+            $results | ForEach-Object {
+                [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+            }
+            return
+        }
+    }
+    bcmr completions powershell | Out-String | Invoke-Expression
+    $function:_bcmr_completer = $null
+}
+"#,
+        _ => "",
+    }
+}
+
 fn background_update_check(command: &Commands) -> Option<mpsc::Receiver<Option<String>>> {
-    if matches!(command, Commands::Update | Commands::Completions { .. }) {
+    if matches!(command, Commands::Update | Commands::Completions { .. } | Commands::CompleteRemote { .. }) {
         return None;
     }
     if CONFIG.update_check != UpdateCheck::Notify {
@@ -587,9 +664,17 @@ async fn main() -> Result<()> {
         Commands::Remove { .. } => handle_remove_command(&cli.command).await?,
         Commands::Init { .. } => handle_init_command(&cli.command)?,
         Commands::Update => commands::update::run()?,
+        Commands::CompleteRemote { partial } => {
+            for entry in crate::core::remote::complete_remote_path(partial).await {
+                println!("{}", entry);
+            }
+        }
         Commands::Completions { shell } => {
-            let mut cmd = <cli::Cli as clap::CommandFactory>::command();
-            clap_complete::generate(*shell, &mut cmd, "bcmr", &mut std::io::stdout());
+            let mut cmd = build_completion_command();
+            let mut buf = Vec::new();
+            clap_complete::generate(*shell, &mut cmd, "bcmr", &mut buf);
+            print!("{}", String::from_utf8(buf).unwrap());
+            print!("{}", remote_completion_script(shell));
         }
     }
 

@@ -487,6 +487,40 @@ pub async fn upload_directory(
     Ok(())
 }
 
+pub async fn complete_remote_path(partial: &str) -> Vec<String> {
+    let remote = match parse_remote_path(partial) {
+        Some(r) => r,
+        None => return Vec::new(),
+    };
+
+    let (dir, prefix) = if remote.path.ends_with('/') || remote.path == "." {
+        (remote.path.clone(), String::new())
+    } else if let Some(pos) = remote.path.rfind('/') {
+        (remote.path[..=pos].to_string(), remote.path[pos + 1..].to_string())
+    } else {
+        (".".to_string(), remote.path.clone())
+    };
+
+    let target = remote.ssh_target();
+    let output = match ssh_command(&target)
+        .arg(format!("ls -1ap '{}' 2>/dev/null", shell_escape(&dir)))
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+
+    let base = if dir == "." { String::new() } else { dir };
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| *l != "./" && *l != "../")
+        .filter(|l| prefix.is_empty() || l.starts_with(&prefix))
+        .map(|l| format!("{}:{}{}", target, base, l))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
