@@ -16,7 +16,6 @@ pub struct FileToRemove {
     pub size: u64,
 }
 
-// Helper: sync check logic
 fn check_removes_sync(
     paths: Vec<PathBuf>,
     recursive: bool,
@@ -46,7 +45,6 @@ fn check_removes_sync(
                 )));
             }
 
-            // For directories, check if they're empty when -d is used
             if dir_only {
                 // Use read_dir (blocking syscall, acceptable in spawn_blocking)
                 let mut read_dir = std::fs::read_dir(&path)?;
@@ -61,12 +59,10 @@ fn check_removes_sync(
                 continue;
             }
 
-            // Recursive
             if recursive {
                 for entry in traversal::walk(&path, true, true, 0, &excludes) {
                     let entry = entry?;
                     let path = entry.path();
-                    // Exclude check handled by traversal::walk
 
                     let metadata = entry.metadata()?;
                     files_to_remove.push(FileToRemove {
@@ -165,12 +161,9 @@ pub async fn remove_path(
     if path.is_dir() && (cli.is_recursive() || cli.is_dir_only()) {
         on_new_file(&file_name, 0);
 
-        // Walk with contents_first=true: children are yielded before parents
         for entry in traversal::walk(path, true, true, 0, excludes) {
             let entry = entry?;
             let entry_path = entry.path();
-
-            // Exclude check handled by traversal::walk!
 
             let size = if entry.file_type().is_file() {
                 let metadata = entry.metadata()?;
@@ -194,7 +187,6 @@ pub async fn remove_path(
 
             on_new_file(&entry_name, size);
 
-            // Handle test mode for files
             if entry.file_type().is_file() {
                 match test_mode {
                     TestMode::Delay(ms) => {
@@ -218,7 +210,6 @@ pub async fn remove_path(
                 }
             }
 
-            // Remove the entry
             if !cli.is_dry_run() {
                 if entry.file_type().is_file() {
                     fs::remove_file(entry_path).await?;
@@ -226,7 +217,6 @@ pub async fn remove_path(
                     fs::remove_dir(entry_path).await?;
                 }
             } else {
-                // Use new display logic
                 print_dry_run(
                     ActionType::Remove, 
                     &entry_path.to_string_lossy(),
@@ -234,7 +224,7 @@ pub async fn remove_path(
                 );
             }
 
-            // Update progress (skip root item itself)
+            // Skip root item itself
             if entry_path != path {
                 progress_state.lock().inc_processed();
             }
@@ -256,7 +246,6 @@ pub async fn remove_path(
         let size = path.metadata()?.len();
         on_new_file(&file_name, size);
 
-        // Simulate progress for test mode
         match test_mode {
             TestMode::Delay(ms) => {
                 if size > 0 {
@@ -284,7 +273,6 @@ pub async fn remove_path(
             }
         }
 
-        // Remove the file
         fs::remove_file(path).await?;
         progress_state.lock().inc_processed();
 
@@ -326,13 +314,11 @@ pub async fn remove_paths(
     on_new_file: FileCallback,
     total_items: usize,
 ) -> std::result::Result<(), BcmrError> {
-    // Set up progress state
     let progress_state = Arc::new(Mutex::new(ProgressState::new(
         total_items,
         Arc::clone(&progress),
     )));
 
-    // Process each path
     for path in paths {
         remove_path(
             path,

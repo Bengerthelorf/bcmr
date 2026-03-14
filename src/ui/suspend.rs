@@ -8,10 +8,6 @@ use std::sync::Arc;
 #[cfg(unix)]
 use std::thread;
 
-/// Suspend the process: disable raw mode, show cursor, raise SIGSTOP.
-///
-/// Called from the TUI event loop when Ctrl+Z is pressed in raw mode
-/// (where Ctrl+Z doesn't generate SIGTSTP automatically).
 #[cfg(unix)]
 pub fn suspend_now(suspended: &AtomicBool) {
     use crossterm::cursor::Show;
@@ -31,10 +27,6 @@ pub fn suspend_now(suspended: &AtomicBool) {
 #[cfg(not(unix))]
 pub fn suspend_now(_suspended: &AtomicBool) {}
 
-/// Install a handler for SIGTSTP/SIGCONT signals.
-///
-/// Returns an `AtomicBool` that tracks whether the TUI is suspended.
-/// The signal thread handles terminal cleanup on suspend and restore on resume.
 pub fn install_suspend_handler() -> io::Result<Arc<AtomicBool>> {
     let suspended = Arc::new(AtomicBool::new(false));
 
@@ -51,7 +43,6 @@ pub fn install_suspend_handler() -> io::Result<Arc<AtomicBool>> {
             for sig in signals.forever() {
                 match sig {
                     SIGTSTP => {
-                        // Immediately clean up the terminal so the shell prompt looks normal.
                         let _ = execute!(std::io::stdout(), Show);
                         let _ = disable_raw_mode();
                         suspended_clone.store(true, Ordering::SeqCst);
@@ -63,7 +54,6 @@ pub fn install_suspend_handler() -> io::Result<Arc<AtomicBool>> {
                         // Execution resumes here after SIGCONT.
                     }
                     SIGCONT => {
-                        // Check if we're back in the foreground.
                         let in_foreground = unsafe {
                             let fg = libc::tcgetpgrp(libc::STDIN_FILENO);
                             fg >= 0 && fg == libc::getpgrp()

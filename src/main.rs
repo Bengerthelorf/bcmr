@@ -21,8 +21,6 @@ fn is_plain_mode(args: &Commands) -> bool {
     args.is_tui_mode() || CONFIG.progress.style.eq_ignore_ascii_case("plain")
 }
 
-// --- Confirmation dialogs ---
-
 fn prompt_yes_no(message: &str) -> Result<bool> {
     print!("{} [y/N] ", message);
     io::stdout().flush()?;
@@ -79,8 +77,6 @@ async fn confirm_removal(files: &[commands::remove::FileToRemove]) -> Result<boo
 
     prompt_yes_no("\nDo you want to proceed?")
 }
-
-// --- Progress runner: shared boilerplate for all commands ---
 
 struct ProgressRunner {
     progress: Arc<Mutex<Box<dyn ProgressRenderer>>>,
@@ -143,8 +139,6 @@ impl ProgressRunner {
     }
 }
 
-// --- Command handlers ---
-
 async fn handle_copy_command(args: &Commands) -> Result<()> {
     use crate::core::remote::parse_remote_path;
 
@@ -161,19 +155,15 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         validate_mode(&mode, "sparse")?;
     }
 
-    // Detect remote paths (SCP-like syntax: [user@]host:path)
     let dest_str = dest.to_string_lossy();
     let remote_dest = parse_remote_path(&dest_str);
     let any_remote_source = sources
         .iter()
         .any(|s| parse_remote_path(&s.to_string_lossy()).is_some());
 
-    // Remote copy mode
     if remote_dest.is_some() || any_remote_source {
         return handle_remote_copy(args, sources, dest, &excludes).await;
     }
-
-    // --- Local copy ---
 
     if sources.len() > 1 && (!dest.exists() || !dest.is_dir()) {
         bail!(
@@ -182,11 +172,9 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         );
     }
 
-    // Decide: pipeline (no prompt needed) vs plan-based (overwrite prompt needed)
     let needs_overwrite_prompt = args.is_force() && args.should_prompt_for_overwrite();
 
     if needs_overwrite_prompt || args.is_dry_run() {
-        // Plan-based: need full scan first for overwrite prompt or dry-run
         let plan = commands::copy::plan_copy(sources, dest, args.is_recursive(), &excludes).await?;
 
         if args.is_force()
@@ -230,7 +218,6 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
 
         runner.finish_ok()
     } else {
-        // Pipeline: start copying immediately while scanning
         let runner = ProgressRunner::new(0, is_plain_mode(args), false)?;
 
         {
@@ -290,7 +277,6 @@ async fn handle_remote_copy(
     let dest_str = dest.to_string_lossy();
     let remote_dest = parse_remote_path(&dest_str);
 
-    // Pre-validate SSH connectivity before starting any transfer
     let check_target = if let Some(ref rd) = remote_dest {
         rd.clone()
     } else {
@@ -301,8 +287,6 @@ async fn handle_remote_copy(
 
     // Determine direction
     if let Some(ref rdest) = remote_dest {
-        // Upload: local -> remote
-        // Calculate total size from local sources
         let mut total_size = 0u64;
         for src in sources {
             if parse_remote_path(&src.to_string_lossy()).is_some() {
@@ -358,10 +342,8 @@ async fn handle_remote_copy(
 
         runner.finish_ok()
     } else {
-        // Download: remote -> local
         let dest_local = dest;
 
-        // Collect remote sources
         let mut remote_sources: Vec<(RemotePath, u64)> = Vec::new();
         for src in sources {
             let src_str = src.to_string_lossy();

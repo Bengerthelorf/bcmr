@@ -14,8 +14,6 @@ use std::io::{self, stdout, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-
-// TUI progress
 pub struct TuiProgress {
     data: ProgressData,
     start_row: u16,
@@ -48,21 +46,18 @@ impl TuiProgress {
         // Install suspend handler for Ctrl+Z / fg/bg support.
         self.suspended = install_suspend_handler()?;
 
-        // Calc height
         let required_height = if self.data.items_total.is_some() {
             10
         } else {
             8
         };
 
-        // Ensure space
         let (_, term_height) = terminal_size::terminal_size()
             .map(|(w, h)| (w.0, h.0))
             .unwrap_or((80, 24));
 
         let (_col, mut row) = position().unwrap_or((0, 0));
 
-        // Scroll if needed
         if row + required_height > term_height {
             let lines_to_scroll = (row + required_height).saturating_sub(term_height);
             for _ in 0..lines_to_scroll {
@@ -75,10 +70,9 @@ impl TuiProgress {
             }
         }
 
-        self.start_col = 0; // Always start at column 0 for clean look
+        self.start_col = 0;
         self.start_row = row;
 
-        // Try to enable raw mode
         let _ = enable_raw_mode();
         let _ = execute!(stdout(), Hide);
 
@@ -102,12 +96,10 @@ impl TuiProgress {
             self.initialize()?;
         }
 
-        // Ensure we have some minimum data to display
         if self.data.current_file.is_empty() {
             self.data.current_file = "File".to_string();
         }
 
-        // Poll keyboard events (Ctrl+C to quit, Ctrl+Z to suspend)
         if event::poll(Duration::from_millis(0))? {
             if let Event::Key(key) = event::read()? {
                 if key.modifiers.contains(event::KeyModifiers::CONTROL) {
@@ -144,17 +136,14 @@ impl TuiProgress {
 
         let mut stdout = stdout();
 
-        // Use full width
         use terminal_size::{terminal_size, Height, Width};
         let (term_width, _) = terminal_size().unwrap_or((Width(80), Height(24)));
         let box_width = term_width.0 as usize;
         let right_border_col = (term_width.0).saturating_sub(2);
 
-        // Load configuration
         let theme = &CONFIG.progress.theme;
         let layout = &CONFIG.progress.layout;
 
-        // Box chars
         let (top_left, top_right, bottom_left, bottom_right, horizontal, vertical) =
             match layout.box_style.as_str() {
                 "double" => ('╔', '╗', '╚', '╝', '═', '║'),
@@ -167,12 +156,10 @@ impl TuiProgress {
         let title_color = parse_hex_color(&theme.title_color);
         let text_color = parse_hex_color(&theme.text_color);
 
-        // Draw fancy box
         let current_row = self.start_row;
 
         let title_len = operation.len();
 
-        // --- Top Border ---
         execute!(
             stdout,
             MoveTo(0, current_row),
@@ -203,10 +190,8 @@ impl TuiProgress {
         write!(stdout, "{}", top_right)?;
         execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
-        // Variables for content rendering
         let bar_width = (box_width.saturating_sub(20)).max(20);
 
-        // Helper to draw line content
         let draw_line_content =
             |out: &mut io::Stdout, row_offset: u16, content: &str| -> io::Result<()> {
                 execute!(
@@ -243,7 +228,6 @@ impl TuiProgress {
                 Ok(())
             };
 
-        // --- L1: Main Bar ---
         execute!(
             stdout,
             MoveTo(0, current_row + 1),
@@ -251,7 +235,6 @@ impl TuiProgress {
         )?;
         write!(stdout, "{} Total:   [", vertical)?;
 
-        // Render Gradient Bar
         let filled_len = (bar_width * total_progress as usize / 100).min(bar_width);
         let empty_len = bar_width - filled_len;
 
@@ -262,7 +245,7 @@ impl TuiProgress {
             write!(stdout, "{}", theme.bar_complete_char)?;
         }
 
-        execute!(stdout, SetForegroundColor(parse_hex_color("#444444")))?; // Dim color for empty
+        execute!(stdout, SetForegroundColor(parse_hex_color("#444444")))?;
         write!(stdout, "{}", theme.bar_incomplete_char.repeat(empty_len))?;
 
         execute!(stdout, SetForegroundColor(text_color))?;
@@ -276,7 +259,6 @@ impl TuiProgress {
         write!(stdout, "{}", vertical)?;
         execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
-        // --- L2: Details ---
         let eta_str = match eta_opt {
             Some(d) => format_eta(d.as_secs()),
             None => "--".to_string(),
@@ -307,7 +289,6 @@ impl TuiProgress {
         };
         draw_line_content(&mut stdout, 2, &details)?;
 
-        // --- L3: Item count or spacer ---
         let items_line = if let Some(total) = self.data.items_total {
             format!("Items:   {} / {}", self.data.items_processed, total)
         } else {
@@ -315,9 +296,7 @@ impl TuiProgress {
         };
         draw_line_content(&mut stdout, 3, &items_line)?;
 
-        // --- L4: Current File ---
         let file_info = format!("Current: {}", self.data.current_file);
-        // Truncate if too long (account for borders and padding)
         let max_text_width = box_width.saturating_sub(4);
         let display_file_info = if file_info.len() > max_text_width {
             let mut end_index = max_text_width.saturating_sub(3);
@@ -331,15 +310,12 @@ impl TuiProgress {
         };
         draw_line_content(&mut stdout, 4, &display_file_info)?;
 
-        // --- L5: File Bar ---
         execute!(
             stdout,
             MoveTo(0, current_row + 5),
             SetForegroundColor(border_color)
         )?;
-        write!(stdout, "{}          [", vertical)?; // Indent to match "Current: " roughly? No, let's align with main bar "Total:   " is 9 chars
-
-        // For file bar, use a simpler single color or same gradient? Let's use same gradient logic for consistency
+        write!(stdout, "{}          [", vertical)?;
         let filled_len = (bar_width * current_progress as usize / 100).min(bar_width);
         let empty_len = bar_width - filled_len;
 
@@ -363,7 +339,6 @@ impl TuiProgress {
         write!(stdout, "{}", vertical)?;
         execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
-        // --- Bottom Border ---
         execute!(
             stdout,
             MoveTo(0, current_row + 6),
@@ -401,7 +376,6 @@ impl ProgressRenderer for TuiProgress {
         self.data.current_file = file_name.to_string();
         self.data.current_file_size = file_size;
         self.data.current_file_progress = 0;
-        // Always redraw to show the initial progress display
         let _ = self.redraw();
     }
 

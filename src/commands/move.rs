@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 pub use copy::FileToOverwrite;
 
-/// Check if a rename error indicates a cross-device move.
 fn is_cross_device_error(err: &std::io::Error) -> bool {
     #[cfg(unix)]
     { err.raw_os_error() == Some(libc::EXDEV) }
@@ -30,7 +29,6 @@ pub async fn check_overwrites(
     copy::check_overwrites(sources, dst, recursive, cli, excludes).await
 }
 
-// Reuse the total size calculation from copy
 pub async fn get_total_size(
     sources: &[PathBuf],
     recursive: bool,
@@ -86,7 +84,6 @@ where
             fs::remove_file(&dst_path).await?;
         }
 
-        // Try rename -> EXDEV? Copy+Rm : Err
         let file_size = src.metadata()?.len();
         let file_name = src.file_name().unwrap_or_default().to_string_lossy().to_string();
         if let Err(e) = fs::rename(src, &dst_path).await {
@@ -107,7 +104,6 @@ where
                 return Err(BcmrError::Io(e));
             }
         } else {
-            // Rename succeeded instantly — report full progress
             on_new_file(&file_name, file_size);
             progress_callback(file_size);
             if cli.is_verbose() {
@@ -124,7 +120,6 @@ where
             dst.to_path_buf()
         };
 
-        // Excludes OR dry-run -> inspect contents
         if !excludes.is_empty() || cli.is_dry_run() {
             if cli.is_dry_run() {
                  if !new_dst.exists() {
@@ -223,7 +218,6 @@ where
 }
 
 async fn remove_directory_contents(dir: &Path, excludes: &[regex::Regex]) -> std::result::Result<(), BcmrError> {
-    // Walk with contents_first=true: children are yielded before parents
     for entry in traversal::walk(dir, true, true, 0, excludes) {
         let entry = entry?;
         let path = entry.path();

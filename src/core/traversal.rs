@@ -28,8 +28,7 @@ pub fn walk(
     }
 
     let excludes = excludes.to_vec();
-    
-    // Optimize: filter_entry
+
     walker.into_iter().filter_entry(move |e| {
         !is_excluded(e.path(), &excludes)
     })

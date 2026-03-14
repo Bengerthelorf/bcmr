@@ -323,7 +323,6 @@ impl Commands {
         }
     }
 
-    // Split -> (sources, dest)
     pub fn get_sources_and_dest(&self) -> std::result::Result<(&[PathBuf], &PathBuf), String> {
         match self {
             Commands::Copy { paths, .. } | Commands::Move { paths, .. } => {

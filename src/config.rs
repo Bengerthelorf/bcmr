@@ -76,10 +76,8 @@ impl Config {
     pub fn new() -> Result<Self, ConfigError> {
         let mut s = ConfigLoader::builder();
 
-        // Defaults
         let defaults = Config::default();
 
-        // Set defaults manually (for overrides)
         s = s
             .set_default("progress.style", defaults.progress.style)
             .unwrap()
@@ -129,8 +127,6 @@ impl Config {
             )
             .unwrap();
 
-        // Check config file
-        // 1. XDG (~/.config/bcmr)
         if let Some(user_dirs) = directories::UserDirs::new() {
             let config_dir = user_dirs.home_dir().join(".config").join("bcmr");
             let config_path = config_dir.join("config.toml");
@@ -143,7 +139,6 @@ impl Config {
             }
         }
 
-        // 2. Platform fallback
         if let Some(proj_dirs) = ProjectDirs::from("com", "bcmr", "bcmr") {
             let config_dir = proj_dirs.config_dir();
             // Avoid duplicate source

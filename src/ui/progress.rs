@@ -32,11 +32,6 @@ impl ProgressRenderer for SilentProgress {
     }
 }
 
-/// Creates the appropriate progress renderer based on display mode.
-///
-/// - `silent`: no output (dry-run mode)
-/// - `plain`: inline 3-line text progress (--tui flag or config)
-/// - default: fancy TUI box with gradient progress bar
 pub fn create_renderer(
     total_bytes: u64,
     plain: bool,

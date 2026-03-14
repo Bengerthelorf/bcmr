@@ -8,7 +8,6 @@ use crossterm::{
 };
 use std::io::{self, stdout, Write};
 
-// Inline progress
 pub struct InlineProgress {
     data: ProgressData,
     initialized: bool,
@@ -40,7 +39,6 @@ impl InlineProgress {
 
         let mut stdout = stdout();
 
-        // Cursor move
         if self.lines_printed > 0 {
             execute!(
                 stdout,
@@ -73,7 +71,6 @@ impl InlineProgress {
             .unwrap_or((80, 24));
         let term_width = term_width as usize;
 
-        // L1: Op + Total
         execute!(stdout, Clear(ClearType::CurrentLine))?;
         let op_label = format!("{}: ", operation);
         write!(stdout, "{}", op_label)?;
@@ -90,7 +87,6 @@ impl InlineProgress {
         write!(stdout, "{}", "-".repeat(empty))?;
         writeln!(stdout, "]{}", suffix)?;
 
-        // L2: Stats
         let speed_str = if speed > 0.0 {
             format!("{}/s", format_bytes(speed * 1024.0 * 1024.0))
         } else {
@@ -118,7 +114,6 @@ impl InlineProgress {
             )?;
         }
 
-        // L3: File
         execute!(stdout, Clear(ClearType::CurrentLine))?;
         let file_label = "File: ";
         write!(stdout, "{}", file_label)?;

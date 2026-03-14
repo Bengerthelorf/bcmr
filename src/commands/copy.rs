@@ -11,8 +11,6 @@ use std::time::{Duration, Instant};
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncSeekExt, SeekFrom};
 
-// --- Global cleanup registry for partial/temp files ---
-
 static CLEANUP_PATHS: Lazy<ParkingMutex<Vec<PathBuf>>> = Lazy::new(|| ParkingMutex::new(Vec::new()));
 
 fn register_cleanup(path: &Path) {
@@ -58,13 +56,10 @@ impl Drop for TempFileGuard {
     }
 }
 
-/// Generate a temp file path in the same directory as dst.
 fn temp_path_for(dst: &Path) -> PathBuf {
     let name = dst.file_name().unwrap_or_default().to_string_lossy();
     dst.with_file_name(format!(".{}.bcmr.tmp", name))
 }
-
-// --- Platform-native fast copy (Linux) ---
 
 #[cfg(target_os = "linux")]
 async fn try_copy_file_range(
@@ -144,8 +139,6 @@ async fn try_copy_file_range(
     Some(Ok(()))
 }
 
-// --- Public API ---
-
 pub struct FileToOverwrite {
     pub path: PathBuf,
     pub is_dir: bool,
@@ -215,7 +208,6 @@ pub async fn check_overwrites(
     Ok(files_to_overwrite)
 }
 
-// Helper function to run blocking directory traversal
 fn get_total_size_sync(
     sources: Vec<PathBuf>,
     recursive: bool,
@@ -265,7 +257,6 @@ pub async fn get_total_size(
     tokio::task::spawn_blocking(move || get_total_size_sync(sources, recursive, excludes)).await?
 }
 
-/// Check if the destination should be treated as a normal write (no resume/append/strict).
 fn is_normal_write(cli: &Commands) -> bool {
     !cli.is_resume() && !cli.is_append() && !cli.is_strict()
 }
@@ -308,8 +299,6 @@ fn determine_dry_run_action(
 
     Ok(ActionType::Overwrite)
 }
-
-// --- Single-pass copy planning ---
 
 #[allow(dead_code)]
 pub enum PlanEntry {
@@ -522,7 +511,6 @@ where
         on_new_file: Box::new(on_new_file),
     };
 
-    // Main exclusion check for the root item
     if traversal::is_excluded(src, excludes) {
         return Ok(());
     }
@@ -537,7 +525,6 @@ where
             dst.to_path_buf()
         };
 
-        // For files, only check when the target file exists
         if dst_path.exists() && !cli.is_force() && is_normal_write(cli) {
             return Err(BcmrError::TargetExists(dst_path));
         }
@@ -552,7 +539,6 @@ where
             return Ok(());
         }
 
-        // For resume/append modes with force, remove existing file before overwrite
         if dst_path.exists() && cli.is_force() && !is_normal_write(cli) {
             fs::remove_file(&dst_path).await?;
         }
@@ -587,7 +573,6 @@ where
             );
         }
 
-        // Create the target directory (if it does not exist)
         if !new_dst.exists() && !cli.is_dry_run() {
             fs::create_dir_all(&new_dst).await?;
         }
@@ -620,7 +605,6 @@ where
             }
         }
 
-        // Copy files
         for (src_path, dst_path) in files_to_copy {
             if let Some(parent) = dst_path.parent() {
                 if !parent.exists() && !cli.is_dry_run() {
@@ -628,7 +612,6 @@ where
                 }
             }
 
-            // Check each file to see if it needs to be overwritten
             if dst_path.exists() && !cli.is_force() && is_normal_write(cli) {
                 return Err(BcmrError::TargetExists(dst_path));
             }
@@ -641,7 +624,6 @@ where
                     Some(&dst_path.to_string_lossy())
                 );
             } else {
-                // For resume/append modes with force, remove existing file
                 if dst_path.exists() && cli.is_force() && !is_normal_write(cli) {
                     fs::remove_file(&dst_path).await?;
                 }
@@ -670,7 +652,6 @@ where
             }
         }
 
-        // Set the attributes of the target directory (if needed)
         if preserve && !cli.is_dry_run() {
             preserve_attributes(src, &new_dst).await?;
         }
@@ -743,7 +724,6 @@ where
 
     (callback.on_new_file)(&file_name, file_size);
 
-    // Determine reflink mode
     let config_reflink = &crate::config::CONFIG.copy.reflink;
     let (try_reflink, fail_on_error) = if let Some(mode) = reflink_arg {
          match mode.to_lowercase().as_str() {
@@ -758,7 +738,6 @@ where
         }
     };
 
-    // Determine sparse mode
     let config_sparse = &crate::config::CONFIG.copy.sparse;
     let sparse_mode = if let Some(mode) = sparse_arg {
          match mode.to_lowercase().as_str() {
@@ -773,14 +752,12 @@ where
          }
     };
 
-    // Ensure parent directory exists (needed for both temp file and direct write)
     if let Some(parent) = dst.parent() {
         if !parent.exists() {
             fs::create_dir_all(parent).await?;
         }
     }
 
-    // Determine if we can use atomic writes (temp file + rename)
     let use_atomic = !resume && !append && !strict;
     let write_target;
     let mut guard: Option<TempFileGuard> = None;
@@ -797,7 +774,6 @@ where
         write_target = dst.to_path_buf();
     }
 
-    // Try reflink (writes to write_target)
     if try_reflink && !matches!(sparse_mode, SparseMode::Always) {
         let src_path = src.to_path_buf();
         let target_path = write_target.clone();
@@ -806,7 +782,6 @@ where
 
         match result {
             Ok(_) => {
-                // Reflink successful — atomic rename if needed
                 if use_atomic {
                     fs::rename(&write_target, dst).await?;
                     if let Some(ref mut g) = guard { g.disarm(); }
@@ -824,7 +799,6 @@ where
         }
     }
 
-    // Try copy_file_range on Linux (only for fresh writes, no sparse, no test mode)
     #[cfg(target_os = "linux")]
     if use_atomic && matches!(test_mode, TestMode::None) && matches!(sparse_mode, SparseMode::Never) {
         match try_copy_file_range(src, &write_target, file_size, &callback.callback, sync).await {
@@ -838,13 +812,9 @@ where
             Some(Err(e)) => {
                 return Err(e);
             }
-            None => {
-                // copy_file_range not available, fall through to buffer copy
-            }
+            None => {}
         }
     }
-
-    // --- Buffer copy path ---
 
     let mut start_offset = 0;
     let mut file_flags = fs::OpenOptions::new();
@@ -927,7 +897,6 @@ where
         src_file.seek(SeekFrom::Start(start_offset)).await?;
     }
 
-    // Pre-allocate on Linux (best-effort)
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::io::AsRawFd;
@@ -1019,7 +988,6 @@ where
         },
     }
 
-    // Sync data to disk if requested
     if sync {
         dst_file.sync_data().await?;
     }
@@ -1027,7 +995,6 @@ where
     // Close file before rename
     drop(dst_file);
 
-    // Atomic rename: temp → final destination
     if use_atomic {
         fs::rename(&write_target, dst).await?;
         if let Some(ref mut g) = guard { g.disarm(); }
@@ -1044,17 +1011,11 @@ where
     Ok(())
 }
 
-// --- Pipeline scan+copy: start copying while still scanning ---
-
 enum ScanMessage {
     Entry(PlanEntry),
     Done,
 }
 
-/// Pipeline copy: scan and copy concurrently via a channel.
-/// The scanner walks directories in a background thread and sends entries
-/// through a channel. The copier receives entries and copies immediately,
-/// without waiting for the full scan to complete.
 #[allow(clippy::too_many_arguments)]
 pub async fn pipeline_copy<F>(
     sources: &[PathBuf],
@@ -1080,7 +1041,6 @@ where
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<ScanMessage>(256);
 
-    // Background scanner
     let sources = sources.to_vec();
     let dst = dst.to_path_buf();
     let excludes = excludes.to_vec();
@@ -1193,7 +1153,6 @@ where
         Ok(())
     });
 
-    // Copier: consume entries as they arrive
     let mut dir_entries: Vec<(PathBuf, PathBuf)> = Vec::new(); // (src, dst) for preserve
 
     while let Some(msg) = rx.recv().await {
@@ -1240,10 +1199,8 @@ where
         }
     }
 
-    // Wait for scanner to finish and propagate errors
     scanner.await??;
 
-    // Preserve directory attributes deepest-first
     if preserve {
         for (src, dst) in dir_entries.iter().rev() {
             preserve_attributes(src, dst).await?;

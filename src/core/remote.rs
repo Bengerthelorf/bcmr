@@ -12,7 +12,6 @@ pub struct RemotePath {
 }
 
 impl RemotePath {
-    /// Format as `[user@]host` for SSH command target.
     pub fn ssh_target(&self) -> String {
         match &self.user {
             Some(user) => format!("{}@{}", user, self.host),
@@ -20,7 +19,6 @@ impl RemotePath {
         }
     }
 
-    /// Format as display string `[user@]host:path`.
     pub fn display(&self) -> String {
         format!("{}:{}", self.ssh_target(), self.path)
     }
@@ -32,20 +30,11 @@ impl std::fmt::Display for RemotePath {
     }
 }
 
-/// Escape a string for safe use inside single quotes in a shell command.
-/// Replaces `'` with `'\''` (end quote, escaped quote, start quote).
 fn shell_escape(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
-/// Parse a path string as a remote path (`[user@]host:path`).
-/// Returns `None` if it's a local path.
-///
-/// Avoids false positives with:
-/// - Windows drive letters (e.g., `C:\...`)
-/// - Paths starting with `/`, `./`, `..`, or `~`
 pub fn parse_remote_path(s: &str) -> Option<RemotePath> {
-    // Local path indicators
     if s.starts_with('/')
         || s.starts_with("./")
         || s.starts_with("../")
@@ -56,7 +45,6 @@ pub fn parse_remote_path(s: &str) -> Option<RemotePath> {
         return None;
     }
 
-    // Windows drive letter: single letter followed by `:`
     if s.len() >= 2 && s.as_bytes()[0].is_ascii_alphabetic() && s.as_bytes()[1] == b':' {
         // Only skip if the part before `:` is exactly one character (drive letter)
         let colon_pos = s.find(':')?;
@@ -73,8 +61,6 @@ pub fn parse_remote_path(s: &str) -> Option<RemotePath> {
     let host_part = &s[..colon_pos];
     let path_part = &s[colon_pos + 1..];
 
-    // host_part must look like a hostname or user@hostname
-    // It should not contain `/` or spaces
     if host_part.contains('/') || host_part.contains(' ') {
         return None;
     }
@@ -90,7 +76,6 @@ pub fn parse_remote_path(s: &str) -> Option<RemotePath> {
         (None, host_part.to_string())
     };
 
-    // Default remote path to home directory if empty
     let path = if path_part.is_empty() {
         ".".to_string()
     } else {
@@ -100,14 +85,12 @@ pub fn parse_remote_path(s: &str) -> Option<RemotePath> {
     Some(RemotePath { user, host, path })
 }
 
-/// Represents file info from the remote side.
 #[derive(Debug)]
 pub struct RemoteFileInfo {
     pub is_dir: bool,
     pub size: u64,
 }
 
-/// Classify SSH stderr into a user-friendly error message.
 fn ssh_error_message(stderr: &str, context: &str) -> String {
     let stderr_lower = stderr.to_lowercase();
     if stderr_lower.contains("connection refused") {
@@ -127,7 +110,6 @@ fn ssh_error_message(stderr: &str, context: &str) -> String {
     }
 }
 
-/// Validate SSH connectivity to a remote host before starting transfers.
 pub async fn validate_ssh_connection(remote: &RemotePath) -> Result<(), BcmrError> {
     let output = Command::new("ssh")
         .arg("-o").arg("BatchMode=yes")
@@ -147,7 +129,6 @@ pub async fn validate_ssh_connection(remote: &RemotePath) -> Result<(), BcmrErro
     Ok(())
 }
 
-/// Query remote file info via SSH + stat.
 pub async fn remote_stat(remote: &RemotePath) -> Result<RemoteFileInfo, BcmrError> {
     let output = Command::new("ssh")
         .arg("-o").arg("BatchMode=yes")
@@ -181,7 +162,6 @@ pub async fn remote_stat(remote: &RemotePath) -> Result<RemoteFileInfo, BcmrErro
     Ok(RemoteFileInfo { is_dir, size })
 }
 
-/// Get total size of remote path (file or directory recursively).
 pub async fn remote_total_size(remote: &RemotePath, recursive: bool) -> Result<u64, BcmrError> {
     let info = remote_stat(remote).await?;
 
@@ -196,7 +176,6 @@ pub async fn remote_total_size(remote: &RemotePath, recursive: bool) -> Result<u
         )));
     }
 
-    // Use find + stat to sum file sizes
     let output = Command::new("ssh")
         .arg("-o").arg("BatchMode=yes")
         .arg(remote.ssh_target())
@@ -219,13 +198,9 @@ pub async fn remote_total_size(remote: &RemotePath, recursive: bool) -> Result<u
     Ok(total)
 }
 
-/// List files in a remote directory (returns relative paths with sizes).
-/// Uses null-separated output to safely handle filenames with special characters.
 pub async fn remote_list_files(
     remote: &RemotePath,
 ) -> Result<Vec<(String, u64, bool)>, BcmrError> {
-    // Use null bytes as record separators and field separators for safety
-    // Format: relative_path\0size\0type\0  (type is 'd' for dir, 'f' for file, etc.)
     let output = Command::new("ssh")
         .arg("-o").arg("BatchMode=yes")
         .arg(remote.ssh_target())
@@ -248,7 +223,6 @@ pub async fn remote_list_files(
     let fields: Vec<&str> = raw.split('\0').collect();
     let mut entries = Vec::new();
 
-    // Process in groups of 3 (path, size, type) + trailing empty from last \0
     let mut i = 0;
     while i + 2 < fields.len() {
         let rel_path = fields[i].to_string();
@@ -265,7 +239,6 @@ pub async fn remote_list_files(
     Ok(entries)
 }
 
-/// Download a single file from remote to local with progress callback.
 pub async fn download_file(
     remote: &RemotePath,
     local_dst: &Path,
@@ -280,7 +253,6 @@ pub async fn download_file(
         .unwrap_or(&remote.path);
     on_new_file(file_name, file_size);
 
-    // Create parent directory if needed
     if let Some(parent) = local_dst.parent() {
         if !parent.exists() {
             tokio::fs::create_dir_all(parent).await?;
@@ -329,7 +301,6 @@ pub async fn download_file(
     Ok(())
 }
 
-/// Upload a single file from local to remote with progress callback.
 pub async fn upload_file(
     local_src: &Path,
     remote: &RemotePath,
@@ -344,7 +315,6 @@ pub async fn upload_file(
         .to_string();
     on_new_file(&file_name, file_size);
 
-    // Ensure remote parent directory exists
     if let Some(parent) = remote.path.rsplit_once('/') {
         if !parent.0.is_empty() {
             Command::new("ssh")
@@ -393,7 +363,6 @@ pub async fn upload_file(
     Ok(())
 }
 
-/// Download a directory recursively from remote.
 pub async fn download_directory(
     remote: &RemotePath,
     local_dst: &Path,
@@ -403,7 +372,6 @@ pub async fn download_directory(
     // List all entries
     let entries = remote_list_files(remote).await?;
 
-    // Create directories first
     for (rel_path, _, is_dir) in &entries {
         if *is_dir {
             let dir_path = local_dst.join(rel_path);
@@ -413,7 +381,6 @@ pub async fn download_directory(
         }
     }
 
-    // Download files
     for (rel_path, size, is_dir) in &entries {
         if *is_dir {
             continue;
@@ -430,7 +397,6 @@ pub async fn download_directory(
     Ok(())
 }
 
-/// Upload a directory recursively to remote.
 pub async fn upload_directory(
     local_src: &Path,
     remote: &RemotePath,
@@ -439,7 +405,6 @@ pub async fn upload_directory(
 ) -> Result<(), BcmrError> {
     use crate::core::traversal;
 
-    // Ensure remote base directory exists
     let output = Command::new("ssh")
         .arg("-o").arg("BatchMode=yes")
         .arg(remote.ssh_target())
@@ -454,7 +419,6 @@ pub async fn upload_directory(
         )));
     }
 
-    // Walk local directory
     let excludes: Vec<regex::Regex> = Vec::new();
     let mut dirs = Vec::new();
     let mut files = Vec::new();
@@ -471,7 +435,6 @@ pub async fn upload_directory(
         }
     }
 
-    // Create remote directories
     if !dirs.is_empty() {
         let mkdir_cmd = dirs
             .iter()
@@ -487,7 +450,6 @@ pub async fn upload_directory(
             .await?;
     }
 
-    // Upload files
     for (local_path, rel_path) in &files {
         let file_remote = RemotePath {
             user: remote.user.clone(),
