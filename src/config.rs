@@ -8,6 +8,17 @@ pub struct Config {
     pub progress: ProgressConfig,
     #[serde(default)]
     pub copy: CopyConfig,
+    #[serde(default)]
+    pub update_check: UpdateCheck,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum UpdateCheck {
+    #[default]
+    Notify,
+    Quiet,
+    Off,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -66,6 +77,7 @@ impl Default for Config {
                 },
             },
             copy: CopyConfig::default(),
+            update_check: UpdateCheck::default(),
         }
     }
 }
@@ -125,6 +137,8 @@ impl Config {
                 "copy.sparse",
                 defaults.copy.sparse,
             )
+            .unwrap()
+            .set_default("update_check", "notify")
             .unwrap();
 
         if let Some(user_dirs) = directories::UserDirs::new() {

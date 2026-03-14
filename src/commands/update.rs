@@ -17,6 +17,35 @@ fn platform_target() -> &'static str {
     }
 }
 
+fn version_newer(latest: &str, current: &str) -> bool {
+    let parse = |v: &str| -> Vec<u32> {
+        v.trim_start_matches('v')
+            .split('.')
+            .filter_map(|s| s.parse().ok())
+            .collect()
+    };
+    parse(latest) > parse(current)
+}
+
+pub fn check_for_update() -> Option<String> {
+    let releases = self_update::backends::github::ReleaseList::configure()
+        .repo_owner("Bengerthelorf")
+        .repo_name("bcmr")
+        .build()
+        .ok()?
+        .fetch()
+        .ok()?;
+
+    let latest = releases.first()?;
+    let current = cargo_crate_version!();
+
+    if version_newer(&latest.version, current) {
+        Some(latest.version.clone())
+    } else {
+        None
+    }
+}
+
 pub fn run() -> Result<()> {
     let current = cargo_crate_version!();
     println!("Current version: {}", current);

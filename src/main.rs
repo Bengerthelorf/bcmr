@@ -4,7 +4,7 @@ mod core;
 mod commands;
 mod ui;
 
-use crate::config::CONFIG;
+use crate::config::{CONFIG, UpdateCheck};
 use crate::core::error::BcmrError;
 use anyhow::{bail, Result};
 use cli::Commands;
@@ -13,6 +13,7 @@ use ui::progress::{self, ProgressRenderer};
 use ui::utils::format_bytes;
 use std::io::{self, Write};
 use std::sync::Arc;
+use std::sync::mpsc;
 
 use tokio::signal::ctrl_c;
 use tokio::time::Duration;
@@ -559,9 +560,26 @@ fn validate_mode(mode: &str, name: &str) -> Result<()> {
     }
 }
 
+fn background_update_check(command: &Commands) -> Option<mpsc::Receiver<Option<String>>> {
+    if matches!(command, Commands::Update) {
+        return None;
+    }
+    if CONFIG.update_check != UpdateCheck::Notify {
+        return None;
+    }
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(commands::update::check_for_update());
+    });
+    Some(rx)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = cli::parse_args();
+
+    let update_rx = background_update_check(&cli.command);
 
     match &cli.command {
         Commands::Copy { .. } => handle_copy_command(&cli.command).await?,
@@ -569,6 +587,16 @@ async fn main() -> Result<()> {
         Commands::Remove { .. } => handle_remove_command(&cli.command).await?,
         Commands::Init { .. } => handle_init_command(&cli.command)?,
         Commands::Update => commands::update::run()?,
+    }
+
+    if let Some(rx) = update_rx {
+        if let Ok(Some(version)) = rx.try_recv() {
+            eprintln!(
+                "\x1b[33m↑ Update available: v{} → v{} (run `bcmr update`)\x1b[0m",
+                env!("CARGO_PKG_VERSION"),
+                version
+            );
+        }
     }
 
     Ok(())
