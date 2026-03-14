@@ -5,8 +5,8 @@ hero:
   text: 更好的複製、移動、刪除
   tagline: 現代化、安全的檔案操作 CLI 工具 — 支援進度顯示、斷點續傳、完整性校驗和 SSH 遠端複製。
   image:
-    src: /images/icon.svg
-    alt: BCMR
+    src: /images/demo.gif
+    alt: BCMR 示範
   actions:
     - theme: brand
       text: 快速開始
