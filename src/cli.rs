@@ -204,6 +204,9 @@ pub enum Commands {
         sync: bool,
     },
 
+    /// Check for updates and self-update
+    Update,
+
     /// Remove files or directories
     Remove {
         /// Files or directories to remove
@@ -301,7 +304,7 @@ impl Commands {
             Commands::Remove {
                 force, interactive, ..
             } => !*force && *interactive,
-            Commands::Init { .. } => false,
+            Commands::Init { .. } | Commands::Update => false,
         }
     }
 

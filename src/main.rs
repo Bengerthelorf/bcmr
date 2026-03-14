@@ -568,6 +568,7 @@ async fn main() -> Result<()> {
         Commands::Move { .. } => handle_move_command(&cli.command).await?,
         Commands::Remove { .. } => handle_remove_command(&cli.command).await?,
         Commands::Init { .. } => handle_init_command(&cli.command)?,
+        Commands::Update => commands::update::run()?,
     }
 
     Ok(())
