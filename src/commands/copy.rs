@@ -21,7 +21,6 @@ fn unregister_cleanup(path: &Path) {
     CLEANUP_PATHS.lock().retain(|p| p != path);
 }
 
-/// Remove all registered partial/temp files. Called on Ctrl+C.
 pub fn cleanup_partial_files() {
     let paths: Vec<PathBuf> = CLEANUP_PATHS.lock().drain(..).collect();
     for path in paths {
@@ -29,7 +28,6 @@ pub fn cleanup_partial_files() {
     }
 }
 
-/// RAII guard that removes a temp file on drop unless disarmed.
 struct TempFileGuard {
     path: PathBuf,
     active: bool,
@@ -79,7 +77,6 @@ async fn try_copy_file_range(
     let src_fd = src_file.as_raw_fd();
     let dst_fd = dst_file.as_raw_fd();
 
-    // Pre-allocate (best-effort, ignore errors)
     if file_size > 0 {
         unsafe { libc::fallocate(dst_fd, 0, 0, file_size as libc::off_t); }
     }

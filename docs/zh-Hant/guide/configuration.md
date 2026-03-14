@@ -1,6 +1,6 @@
 # 設定
 
-BCMR 從 `~/.config/bcmr/config.toml` 讀取設定。所有設定均為可選 — 缺省時使用預設值。
+BCMR 從 `~/.config/bcmr/config.toml`（或 `config.yaml`）讀取設定。所有設定均為可選 — 缺省時使用預設值。
 
 ## 完整範例
 
@@ -20,8 +20,8 @@ title_color = "#9E8BCA"
 box_style = "rounded"    # "rounded"（預設）、"double"、"heavy"、"single"
 
 [copy]
-reflink = "auto"         # "auto"（預設）或 "never"
-sparse = "auto"          # "auto"（預設）或 "never"
+reflink = "auto"         # "auto"（預設）、"force" 或 "disable"
+sparse = "auto"          # "auto"（預設）、"force" 或 "disable"
 
 update_check = "notify"  # "notify"（預設）、"quiet" 或 "off"
 ```
@@ -60,7 +60,10 @@ update_check = "notify"  # "notify"（預設）、"quiet" 或 "off"
 | 值 | 說明 |
 |----|------|
 | `"auto"` | 嘗試 reflink，失敗則回退到常規複製（預設） |
-| `"never"` | 從不嘗試 reflink |
+| `"force"` | 要求使用 reflink；不支援時報錯 |
+| `"disable"` | 從不嘗試 reflink |
+
+> **注意：** 設定檔中也接受 `"never"` 作為 `"disable"` 的別名。
 
 ### `copy.sparse`
 
@@ -69,7 +72,10 @@ update_check = "notify"  # "notify"（預設）、"quiet" 或 "off"
 | 值 | 說明 |
 |----|------|
 | `"auto"` | 偵測 ≥ 4KB 的零區塊並建立空洞（預設） |
-| `"never"` | 寫入所有資料，不偵測空洞 |
+| `"force"` | 始終寫入稀疏輸出，即使來源檔案非稀疏 |
+| `"disable"` | 寫入所有資料，不偵測空洞 |
+
+> **注意：** 設定檔中也接受 `"never"` 作為 `"disable"` 的別名。
 
 ## 更新檢查
 
@@ -80,3 +86,13 @@ update_check = "notify"  # "notify"（預設）、"quiet" 或 "off"
 | `"notify"` | 檢查並在 stderr 輸出更新提示（預設） |
 | `"quiet"` | 不輸出提示 |
 | `"off"` | 完全跳過更新檢查 |
+
+## 設定檔位置
+
+BCMR 按以下順序查找設定檔：
+
+1. `~/.config/bcmr/config.toml`
+2. `~/.config/bcmr/config.yaml`
+3. 平台特定的設定目錄（透過 `directories` crate）：
+   - **macOS：** `~/Library/Application Support/com.bcmr.bcmr/`
+   - **Windows：** `%APPDATA%\bcmr\bcmr\`

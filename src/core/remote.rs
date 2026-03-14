@@ -3,7 +3,6 @@ use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
-/// Parsed remote path: `[user@]host:path`
 #[derive(Debug, Clone)]
 pub struct RemotePath {
     pub user: Option<String>,

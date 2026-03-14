@@ -43,7 +43,6 @@ impl TuiProgress {
             return Ok(());
         }
 
-        // Install suspend handler for Ctrl+Z / fg/bg support.
         self.suspended = install_suspend_handler()?;
 
         let required_height = if self.data.items_total.is_some() {
@@ -87,7 +86,6 @@ impl TuiProgress {
             return Ok(());
         }
 
-        // If suspended (Ctrl+Z / background), skip rendering.
         if self.suspended.load(Ordering::SeqCst) {
             return Ok(());
         }
@@ -202,8 +200,7 @@ impl TuiProgress {
                 write!(out, "{} ", vertical)?;
                 execute!(out, SetForegroundColor(text_color))?;
 
-                // box_width - 2 (borders) - 1 (left space) -> max content width
-                let available_width = box_width.saturating_sub(3); // -2 borders, -1 left space
+                let available_width = box_width.saturating_sub(3);
                 let content_len = content.chars().count();
                 let display_content = if content_len > available_width {
                     &content[..available_width]

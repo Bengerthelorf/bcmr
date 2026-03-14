@@ -1,6 +1,6 @@
 # Configuration
 
-BCMR reads configuration from `~/.config/bcmr/config.toml`. All settings are optional — defaults are used when a key is absent.
+BCMR reads configuration from `~/.config/bcmr/config.toml` (or `config.yaml`). All settings are optional — defaults are used when a key is absent.
 
 ## Full Example
 
@@ -20,8 +20,8 @@ title_color = "#9E8BCA"
 box_style = "rounded"    # "rounded" (default), "double", "heavy", "single"
 
 [copy]
-reflink = "auto"         # "auto" (default) or "never"
-sparse = "auto"          # "auto" (default) or "never"
+reflink = "auto"         # "auto" (default), "force", or "disable"
+sparse = "auto"          # "auto" (default), "force", or "disable"
 
 update_check = "notify"  # "notify" (default), "quiet", or "off"
 ```
@@ -60,7 +60,10 @@ Controls copy-on-write (reflink) behavior. Can be overridden per-command with `-
 | Value | Description |
 |-------|-------------|
 | `"auto"` | Try reflink, fall back to regular copy (default) |
-| `"never"` | Never attempt reflink |
+| `"force"` | Require reflink; fail if unsupported |
+| `"disable"` | Never attempt reflink |
+
+> **Note:** The config file also accepts `"never"` as an alias for `"disable"`.
 
 ### `copy.sparse`
 
@@ -69,7 +72,10 @@ Controls sparse file detection. Can be overridden per-command with `--sparse`.
 | Value | Description |
 |-------|-------------|
 | `"auto"` | Detect zero blocks ≥ 4KB and create holes (default) |
-| `"never"` | Write all data, no hole detection |
+| `"force"` | Always write sparse output, even for non-sparse sources |
+| `"disable"` | Write all data, no hole detection |
+
+> **Note:** The config file also accepts `"never"` as an alias for `"disable"`.
 
 ## Update Check
 
@@ -87,4 +93,6 @@ BCMR checks these paths in order:
 
 1. `~/.config/bcmr/config.toml`
 2. `~/.config/bcmr/config.yaml`
-3. Platform-specific config directory (via `directories` crate)
+3. Platform-specific config directory (via `directories` crate):
+   - **macOS:** `~/Library/Application Support/com.bcmr.bcmr/`
+   - **Windows:** `%APPDATA%\bcmr\bcmr\`

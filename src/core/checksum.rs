@@ -5,7 +5,6 @@ use std::path::Path;
 
 const BUFFER_SIZE: usize = 4 * 1024 * 1024; // 4MB — matches copy buffer, better for BLAKE3 SIMD
 
-/// BLAKE3 hash
 pub fn calculate_hash(path: &Path) -> io::Result<String> {
     let file = File::open(path)?;
     let mut reader = BufReader::with_capacity(BUFFER_SIZE, file);
@@ -23,7 +22,6 @@ pub fn calculate_hash(path: &Path) -> io::Result<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-/// Partial BLAKE3 hash (limit)
 pub fn calculate_partial_hash(path: &Path, limit: u64) -> io::Result<String> {
     let file = File::open(path)?;
     let mut reader = BufReader::with_capacity(BUFFER_SIZE, file).take(limit);

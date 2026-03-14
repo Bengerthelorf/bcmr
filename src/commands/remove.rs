@@ -110,7 +110,6 @@ async fn confirm_remove(path: &Path, is_dir: bool) -> std::result::Result<bool, 
     };
     use std::io::{self, Write};
 
-    // Temporarily restore terminal to normal mode for input
     let mut stdout = io::stdout();
     disable_raw_mode()?;
     execute!(stdout, Show)?; // Show cursor
@@ -125,7 +124,6 @@ async fn confirm_remove(path: &Path, is_dir: bool) -> std::result::Result<bool, 
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
 
-    // Restore raw mode and hide cursor for progress display
     enable_raw_mode()?;
     execute!(stdout, Hide)?;
 

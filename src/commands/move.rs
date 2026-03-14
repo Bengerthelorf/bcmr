@@ -124,13 +124,12 @@ where
             if cli.is_dry_run() {
                  if !new_dst.exists() {
                      print_dry_run(
-                        ActionType::Add, // Moves involving dir creation
+                        ActionType::Add,
                         &src.to_string_lossy(),
                         Some(&format!("(DIR) -> {}", new_dst.display()))
                      );
                  }
                  
-                 // Simulate walking to show all moves
                  for entry in traversal::walk(src, true, false, 1, excludes) {
                      let entry = entry?;
                      let path = entry.path();
@@ -140,7 +139,7 @@ where
                      if path.is_dir() {
                          if !target_path.exists() {
                              print_dry_run(
-                                ActionType::Add, // Creating dir
+                                ActionType::Add,
                                 &path.to_string_lossy(),
                                 Some(&format!("(DIR) -> {}", target_path.display()))
                             );
@@ -158,7 +157,6 @@ where
 
             // Excludes: rename ignores excludes -> Copy + Remove source(files) + Remove source(dir, if empty)
             
-            // 1. Copy
             copy::copy_path(
                 src,
                 dst, 
