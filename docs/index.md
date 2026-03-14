@@ -5,8 +5,8 @@ hero:
   text: Better Copy Move Remove
   tagline: A modern, safe CLI tool for file operations — with progress display, resume, verification, and remote copy via SSH.
   image:
-    src: /images/demo.gif
-    alt: BCMR Demo
+    src: /images/icon.svg
+    alt: BCMR
   actions:
     - theme: brand
       text: Get Started

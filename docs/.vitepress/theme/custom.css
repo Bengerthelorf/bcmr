@@ -1,11 +1,10 @@
 :root {
-  --vp-home-hero-image-filter: drop-shadow(0 8px 24px rgba(0, 0, 0, 0.15));
+  --vp-home-hero-image-filter: drop-shadow(0 12px 32px rgba(107, 91, 149, 0.35));
 }
 
 .VPHero .VPImage {
-  max-width: min(520px, 100%) !important;
-  max-height: 520px !important;
-  border-radius: 12px;
+  max-width: min(320px, 100%) !important;
+  max-height: 320px !important;
 }
 
 .VPHero .text,
@@ -13,11 +12,10 @@
   text-wrap: balance;
 }
 
-/* Mobile: stack image below text, prevent overlap */
 @media (max-width: 959px) {
   .VPHero .VPImage {
-    max-width: min(360px, 90vw) !important;
-    max-height: 360px !important;
+    max-width: min(200px, 60vw) !important;
+    max-height: 200px !important;
   }
 
   .VPHero .image-container {
@@ -25,7 +23,6 @@
   }
 }
 
-/* Desktop: flex layout to prevent text/image collision */
 @media (min-width: 960px) {
   .VPHero .main {
     display: flex;

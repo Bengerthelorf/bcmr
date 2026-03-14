@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="img/icon.svg" width="128" height="128" alt="BCMR">
+
 # BCMR
 
 **Better Copy Move Remove — A modern, safe CLI tool for file operations with progress display, resume, and remote copy.**

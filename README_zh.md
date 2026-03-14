@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="img/icon.svg" width="128" height="128" alt="BCMR">
+
 # BCMR
 
 **更好的复制、移动、删除 — 现代化、安全的文件操作 CLI 工具，支持进度显示、断点续传和远程复制。**
