@@ -858,10 +858,8 @@ where
             if dst_len == file_size {
                 (callback.callback)(file_size);
                 return Ok(());
-            } else if dst_len < file_size {
-                true
             } else {
-                false
+                dst_len < file_size
             }
         } else {
             let src_mtime = src.metadata()?.modified()?;

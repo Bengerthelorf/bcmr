@@ -296,7 +296,7 @@ async fn handle_remote_copy(
                 total_size += src.metadata()?.len();
             } else if src.is_dir() && args.is_recursive() {
                 total_size += commands::copy::get_total_size(
-                    &[src.clone()], true, args, &[],
+                    std::slice::from_ref(src), true, args, &[],
                 ).await?;
             } else if src.is_dir() {
                 bail!(
