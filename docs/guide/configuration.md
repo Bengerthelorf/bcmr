@@ -22,6 +22,8 @@ box_style = "rounded"    # "rounded" (default), "double", "heavy", "single"
 [copy]
 reflink = "auto"         # "auto" (default) or "never"
 sparse = "auto"          # "auto" (default) or "never"
+
+update_check = "notify"  # "notify" (default), "quiet", or "off"
 ```
 
 ## Progress Settings
@@ -68,6 +70,16 @@ Controls sparse file detection. Can be overridden per-command with `--sparse`.
 |-------|-------------|
 | `"auto"` | Detect zero blocks ≥ 4KB and create holes (default) |
 | `"never"` | Write all data, no hole detection |
+
+## Update Check
+
+Controls whether BCMR checks for new versions in the background when running any command.
+
+| Value | Description |
+|-------|-------------|
+| `"notify"` | Check and print update notification to stderr (default) |
+| `"quiet"` | No notification |
+| `"off"` | Skip update check entirely |
 
 ## Config File Locations
 

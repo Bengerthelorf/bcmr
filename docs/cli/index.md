@@ -1,6 +1,6 @@
 # CLI Overview
 
-BCMR provides three main commands for file operations, plus a shell integration initializer.
+BCMR provides three main commands for file operations, plus shell integration and self-update.
 
 ## Commands
 
@@ -10,6 +10,7 @@ BCMR provides three main commands for file operations, plus a shell integration 
 | [`move`](/cli/commands#move) | Move files and directories |
 | [`remove`](/cli/commands#remove) | Remove files and directories |
 | [`init`](/cli/commands#init) | Generate shell integration script |
+| [`update`](/cli/commands#update) | Check for updates and self-update |
 
 ## Common Flags
 

@@ -33,6 +33,7 @@ Installation, shell integration, CLI reference, configuration, and more.
 - 🌐 **Remote Copy (SSH)** — Upload and download via SSH with SCP-like syntax
 - ⚡ **Fast by Default** — Reflink (CoW), `copy_file_range` on Linux, sparse file detection, pipeline scan+copy
 - 🛡️ **Safe Operations** — Dry-run preview, overwrite prompts, regex exclusions, atomic writes
+- 🔄 **Self-Update** — `bcmr update` to update in place; background update check on every run
 - 🎨 **Configurable** — Custom color gradients, bar characters, border styles via TOML config
 
 ## Install
@@ -125,6 +126,8 @@ box_style = "rounded"    # "rounded", "double", "heavy", "single"
 [copy]
 reflink = "auto"         # "auto" or "never"
 sparse = "auto"          # "auto" or "never"
+
+update_check = "notify"  # "notify", "quiet", or "off"
 ```
 
 ## Contributing

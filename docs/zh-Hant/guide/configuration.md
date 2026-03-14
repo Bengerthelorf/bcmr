@@ -22,6 +22,8 @@ box_style = "rounded"    # "rounded"（預設）、"double"、"heavy"、"single"
 [copy]
 reflink = "auto"         # "auto"（預設）或 "never"
 sparse = "auto"          # "auto"（預設）或 "never"
+
+update_check = "notify"  # "notify"（預設）、"quiet" 或 "off"
 ```
 
 ## 進度設定
@@ -68,3 +70,13 @@ sparse = "auto"          # "auto"（預設）或 "never"
 |----|------|
 | `"auto"` | 偵測 ≥ 4KB 的零區塊並建立空洞（預設） |
 | `"never"` | 寫入所有資料，不偵測空洞 |
+
+## 更新檢查
+
+控制 BCMR 是否在每次執行命令時於背景檢查新版本。
+
+| 值 | 說明 |
+|----|------|
+| `"notify"` | 檢查並在 stderr 輸出更新提示（預設） |
+| `"quiet"` | 不輸出提示 |
+| `"off"` | 完全跳過更新檢查 |

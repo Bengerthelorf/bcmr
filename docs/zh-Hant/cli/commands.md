@@ -183,3 +183,17 @@ eval "$(bcmr init zsh --cmd b)"          # bcp, bmv, brm
 eval "$(bcmr init bash --cmd '')"         # cp, mv, rm
 eval "$(bcmr init zsh --cmd --prefix p --suffix +)"  # pcp+, pmv+, prm+
 ```
+
+---
+
+## update
+
+檢查更新並從 GitHub Releases 自我更新二進位檔案。
+
+```
+bcmr update
+```
+
+下載當前平台的最新版本並原地替換二進位檔案。
+
+BCMR 也會在每次命令執行時在背景檢查更新（可透過 [設定](/zh-Hant/guide/configuration) 中的 `update_check` 控制）。

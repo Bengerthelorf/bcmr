@@ -33,6 +33,7 @@
 - 🌐 **远程复制 (SSH)** — 使用 SCP 风格语法通过 SSH 上传和下载
 - ⚡ **默认高性能** — Reflink (写时复制)、Linux `copy_file_range`、稀疏文件检测、流水线扫描+复制
 - 🛡️ **安全操作** — 干运行预览、覆盖提示、正则排除、原子写入
+- 🔄 **自更新** — `bcmr update` 原地更新；每次运行自动后台检查新版本
 - 🎨 **可配置** — 通过 TOML 自定义颜色渐变、进度条字符、边框样式
 
 ## 安装
@@ -125,6 +126,8 @@ box_style = "rounded"    # "rounded", "double", "heavy", "single"
 [copy]
 reflink = "auto"         # "auto" 或 "never"
 sparse = "auto"          # "auto" 或 "never"
+
+update_check = "notify"  # "notify"、"quiet" 或 "off"
 ```
 
 ## 贡献

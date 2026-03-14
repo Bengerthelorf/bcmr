@@ -190,3 +190,17 @@ eval "$(bcmr init zsh --cmd b)"          # bcp, bmv, brm
 eval "$(bcmr init bash --cmd '')"         # cp, mv, rm
 eval "$(bcmr init zsh --cmd --prefix p --suffix +)"  # pcp+, pmv+, prm+
 ```
+
+---
+
+## update
+
+Check for updates and self-update the binary from GitHub Releases.
+
+```
+bcmr update
+```
+
+Downloads the latest release for your platform and replaces the current binary in place.
+
+BCMR also checks for updates in the background on every command run (configurable via `update_check` in [Configuration](/guide/configuration)).
