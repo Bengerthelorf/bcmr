@@ -56,3 +56,47 @@ eval "$(bcmr init zsh --no-cmd --path /usr/local/bin)"
 - Bash
 - Zsh
 - Fish
+
+## Shell Completions
+
+BCMR provides tab completion for all commands and flags via `bcmr completions`.
+
+::: code-group
+
+```bash [Zsh]
+# Add to ~/.zshrc
+eval "$(bcmr completions zsh)"
+
+# Or generate to fpath (faster startup)
+bcmr completions zsh > ~/.zfunc/_bcmr
+# Then ensure ~/.zshrc has: fpath=(~/.zfunc $fpath)
+```
+
+```bash [Bash]
+# Add to ~/.bashrc
+eval "$(bcmr completions bash)"
+
+# Or generate to system completions dir
+bcmr completions bash > /etc/bash_completion.d/bcmr
+```
+
+```fish [Fish]
+bcmr completions fish > ~/.config/fish/completions/bcmr.fish
+```
+
+```powershell [PowerShell]
+# Add to $PROFILE
+bcmr completions powershell >> $PROFILE
+
+# Or load for current session only
+bcmr completions powershell | Out-String | Invoke-Expression
+```
+
+:::
+
+After setup, you can tab-complete commands and flags:
+
+```
+bcmr co<TAB>       → bcmr copy
+bcmr copy -<TAB>   → --recursive --preserve --force --verify ...
+```

@@ -11,6 +11,7 @@ BCMR provides three main commands for file operations, plus shell integration an
 | [`remove`](/cli/commands#remove) | Remove files and directories |
 | [`init`](/cli/commands#init) | Generate shell integration script |
 | [`update`](/cli/commands#update) | Check for updates and self-update |
+| [`completions`](/cli/commands#completions) | Generate shell completion scripts |
 
 ## Common Flags
 

@@ -186,6 +186,27 @@ eval "$(bcmr init zsh --cmd --prefix p --suffix +)"  # pcp+, pmv+, prm+
 
 ---
 
+## completions
+
+生成 shell 补全脚本。设置方法详见 [Shell 集成](/zh/guide/shell-integration#shell-补全)。
+
+```
+bcmr completions <SHELL>
+```
+
+支持的 shell：`bash`、`zsh`、`fish`、`powershell`、`elvish`。
+
+**示例：**
+
+```bash
+bcmr completions zsh > ~/.zfunc/_bcmr
+bcmr completions bash > /etc/bash_completion.d/bcmr
+bcmr completions fish > ~/.config/fish/completions/bcmr.fish
+bcmr completions powershell >> $PROFILE
+```
+
+---
+
 ## update
 
 检查更新并从 GitHub Releases 自更新二进制文件。

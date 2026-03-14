@@ -53,3 +53,47 @@ eval "$(bcmr init zsh --cmd --prefix p --suffix +)"
 - Bash
 - Zsh
 - Fish
+
+## Shell 補全
+
+BCMR 透過 `bcmr completions` 提供所有命令和參數的 tab 補全。
+
+::: code-group
+
+```bash [Zsh]
+# 加入 ~/.zshrc
+eval "$(bcmr completions zsh)"
+
+# 或產生到 fpath（啟動更快）
+bcmr completions zsh > ~/.zfunc/_bcmr
+# 確保 ~/.zshrc 中有: fpath=(~/.zfunc $fpath)
+```
+
+```bash [Bash]
+# 加入 ~/.bashrc
+eval "$(bcmr completions bash)"
+
+# 或產生到系統補全目錄
+bcmr completions bash > /etc/bash_completion.d/bcmr
+```
+
+```fish [Fish]
+bcmr completions fish > ~/.config/fish/completions/bcmr.fish
+```
+
+```powershell [PowerShell]
+# 加入 $PROFILE
+bcmr completions powershell >> $PROFILE
+
+# 或僅在目前工作階段載入
+bcmr completions powershell | Out-String | Invoke-Expression
+```
+
+:::
+
+設定後即可 tab 補全命令和參數：
+
+```
+bcmr co<TAB>       → bcmr copy
+bcmr copy -<TAB>   → --recursive --preserve --force --verify ...
+```

@@ -193,6 +193,27 @@ eval "$(bcmr init zsh --cmd --prefix p --suffix +)"  # pcp+, pmv+, prm+
 
 ---
 
+## completions
+
+Generate shell completion scripts. See [Shell Integration](/guide/shell-integration#shell-completions) for setup instructions.
+
+```
+bcmr completions <SHELL>
+```
+
+Supported shells: `bash`, `zsh`, `fish`, `powershell`, `elvish`.
+
+**Examples:**
+
+```bash
+bcmr completions zsh > ~/.zfunc/_bcmr
+bcmr completions bash > /etc/bash_completion.d/bcmr
+bcmr completions fish > ~/.config/fish/completions/bcmr.fish
+bcmr completions powershell >> $PROFILE
+```
+
+---
+
 ## update
 
 Check for updates and self-update the binary from GitHub Releases.
