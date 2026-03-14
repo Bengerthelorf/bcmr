@@ -9,6 +9,14 @@ license = "GPL-3.0"
 keywords = ["cli", "copy", "move", "remove", "filesystem"]
 categories = ["command-line-utilities", "filesystem"]
 readme = "README.md"
+include = [
+    "/src/**/*",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/LICENSE",
+    "/README.md",
+    "/README_zh.md",
+]
 
 [dependencies]
 clap = { version = "4.5.54", features = ["derive"] }
