@@ -5,3 +5,8 @@
 # Test files and logs
 tests/
 *.log
+
+# Docs
+docs/node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/

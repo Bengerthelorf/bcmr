@@ -1,0 +1,4 @@
+.VPHero .text,
+.VPHero .tagline {
+  text-wrap: balance;
+}
