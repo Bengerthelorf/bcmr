@@ -151,7 +151,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "bcmr"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "anyhow",
  "blake3",
