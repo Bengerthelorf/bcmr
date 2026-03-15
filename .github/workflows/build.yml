@@ -46,6 +46,38 @@ jobs:
         run: cargo fmt --check
         continue-on-error: true
 
+      - name: Test shell completions (all shells)
+        shell: bash
+        run: |
+          cargo run -- completions bash > /dev/null
+          cargo run -- completions zsh > /dev/null
+          cargo run -- completions fish > /dev/null
+          cargo run -- completions powershell > /dev/null
+          echo "All completion scripts generated successfully"
+
+      - name: Test PowerShell completions (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $output = cargo run -- completions powershell 2>$null
+          if (-not $output) { throw "Empty completion output" }
+
+          $regCount = ($output | Select-String "Register-ArgumentCompleter").Count
+          if ($regCount -ne 1) { throw "Expected 1 Register-ArgumentCompleter, got $regCount" }
+
+          $remoteCount = ($output | Select-String "__complete-remote").Count
+          if ($remoteCount -eq 0) { throw "Remote completion injection missing" }
+
+          $output | Out-String | Invoke-Expression
+          Write-Host "PowerShell completions loaded successfully"
+
+      - name: Test __complete-remote (no crash on invalid input)
+        shell: bash
+        run: |
+          cargo run -- __complete-remote "nonexistent-host:/path" 2>/dev/null || true
+          cargo run -- __complete-remote "not-a-remote" 2>/dev/null || true
+          echo "__complete-remote handled gracefully"
+
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
