@@ -3,7 +3,9 @@ use signal_hook::consts::signal::{SIGCONT, SIGTSTP};
 #[cfg(unix)]
 use signal_hook::iterator::Signals;
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(unix)]
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 #[cfg(unix)]
 use std::thread;

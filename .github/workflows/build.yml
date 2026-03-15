@@ -104,8 +104,10 @@ jobs:
           diff /tmp/bcmr-test-src/file1.txt /tmp/bcmr-test-dst/file1.txt
 
           # Multiple file copy
-          cargo run -- copy /tmp/bcmr-test-src/file1.txt /tmp/bcmr-test-src/file2.txt /tmp/bcmr-test-dst/
-          diff /tmp/bcmr-test-src/file2.txt /tmp/bcmr-test-dst/file2.txt
+          mkdir -p /tmp/bcmr-test-multi
+          cargo run -- copy /tmp/bcmr-test-src/file1.txt /tmp/bcmr-test-src/file2.txt /tmp/bcmr-test-multi/
+          diff /tmp/bcmr-test-src/file1.txt /tmp/bcmr-test-multi/file1.txt
+          diff /tmp/bcmr-test-src/file2.txt /tmp/bcmr-test-multi/file2.txt
 
           # Recursive directory copy
           cargo run -- copy -r /tmp/bcmr-test-src/ /tmp/bcmr-test-dst/recursive-test/
