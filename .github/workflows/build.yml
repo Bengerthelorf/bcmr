@@ -109,7 +109,8 @@ jobs:
           diff /tmp/bcmr-test-src/file1.txt /tmp/bcmr-test-multi/file1.txt
           diff /tmp/bcmr-test-src/file2.txt /tmp/bcmr-test-multi/file2.txt
 
-          # Recursive directory copy
+          # Recursive directory copy (dst exists → src dir nested inside)
+          mkdir -p /tmp/bcmr-test-dst/recursive-test
           cargo run -- copy -r /tmp/bcmr-test-src/ /tmp/bcmr-test-dst/recursive-test/
           diff /tmp/bcmr-test-src/subdir/file3.txt /tmp/bcmr-test-dst/recursive-test/bcmr-test-src/subdir/file3.txt
 
