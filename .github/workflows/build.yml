@@ -46,6 +46,17 @@ jobs:
         run: cargo fmt --check
         continue-on-error: true
 
+      - name: Test shell init scripts
+        shell: bash
+        run: |
+          cargo run -- init bash --cmd b > /dev/null
+          cargo run -- init zsh --cmd b > /dev/null
+          cargo run -- init fish --cmd b > /dev/null
+          cargo run -- init bash --cmd '' > /dev/null
+          cargo run -- init zsh --no-cmd --path /tmp > /dev/null
+          cargo run -- init bash --cmd --prefix p --suffix + > /dev/null
+          echo "All init scripts generated successfully"
+
       - name: Test shell completions (all shells)
         shell: bash
         run: |
@@ -77,6 +88,109 @@ jobs:
           cargo run -- __complete-remote "nonexistent-host:/path" 2>/dev/null || true
           cargo run -- __complete-remote "not-a-remote" 2>/dev/null || true
           echo "__complete-remote handled gracefully"
+
+      - name: Test copy operations
+        shell: bash
+        run: |
+          mkdir -p /tmp/bcmr-test-src /tmp/bcmr-test-dst
+          echo "hello" > /tmp/bcmr-test-src/file1.txt
+          echo "world" > /tmp/bcmr-test-src/file2.txt
+          mkdir -p /tmp/bcmr-test-src/subdir
+          echo "nested" > /tmp/bcmr-test-src/subdir/file3.txt
+
+          # Single file copy
+          cargo run -- copy /tmp/bcmr-test-src/file1.txt /tmp/bcmr-test-dst/
+          test -f /tmp/bcmr-test-dst/file1.txt
+          diff /tmp/bcmr-test-src/file1.txt /tmp/bcmr-test-dst/file1.txt
+
+          # Multiple file copy
+          cargo run -- copy /tmp/bcmr-test-src/file1.txt /tmp/bcmr-test-src/file2.txt /tmp/bcmr-test-dst/
+          diff /tmp/bcmr-test-src/file2.txt /tmp/bcmr-test-dst/file2.txt
+
+          # Recursive directory copy
+          cargo run -- copy -r /tmp/bcmr-test-src/ /tmp/bcmr-test-dst/recursive-test/
+          diff /tmp/bcmr-test-src/subdir/file3.txt /tmp/bcmr-test-dst/recursive-test/bcmr-test-src/subdir/file3.txt
+
+          # Force overwrite
+          echo "modified" > /tmp/bcmr-test-src/file1.txt
+          cargo run -- copy -fy /tmp/bcmr-test-src/file1.txt /tmp/bcmr-test-dst/
+          diff /tmp/bcmr-test-src/file1.txt /tmp/bcmr-test-dst/file1.txt
+
+          echo "Copy tests passed"
+
+      - name: Test copy with verify
+        shell: bash
+        run: |
+          echo "verify-test-content" > /tmp/bcmr-test-src/verify.txt
+          cargo run -- copy --verify /tmp/bcmr-test-src/verify.txt /tmp/bcmr-test-dst/
+          diff /tmp/bcmr-test-src/verify.txt /tmp/bcmr-test-dst/verify.txt
+          echo "Copy with verify passed"
+
+      - name: Test copy with preserve
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          touch -t 202001011200 /tmp/bcmr-test-src/file1.txt
+          cargo run -- copy -p /tmp/bcmr-test-src/file1.txt /tmp/bcmr-test-dst/preserved.txt
+          test -f /tmp/bcmr-test-dst/preserved.txt
+          echo "Copy with preserve passed"
+
+      - name: Test dry-run mode
+        shell: bash
+        run: |
+          cargo run -- copy -r -n /tmp/bcmr-test-src/ /tmp/bcmr-test-dst/dryrun-target/
+          # Directory should NOT exist after dry run
+          test ! -d /tmp/bcmr-test-dst/dryrun-target/
+          echo "Dry-run test passed"
+
+      - name: Test exclude patterns
+        shell: bash
+        run: |
+          mkdir -p /tmp/bcmr-exclude-src /tmp/bcmr-exclude-dst
+          echo "keep" > /tmp/bcmr-exclude-src/keep.txt
+          echo "skip" > /tmp/bcmr-exclude-src/skip.log
+          echo "keep2" > /tmp/bcmr-exclude-src/keep2.md
+          cargo run -- copy -r --exclude='\.log$' /tmp/bcmr-exclude-src/ /tmp/bcmr-exclude-dst/
+          test -f /tmp/bcmr-exclude-dst/bcmr-exclude-src/keep.txt
+          test ! -f /tmp/bcmr-exclude-dst/bcmr-exclude-src/skip.log
+          echo "Exclude pattern test passed"
+
+      - name: Test move operations
+        shell: bash
+        run: |
+          mkdir -p /tmp/bcmr-move-dst
+          echo "moveme" > /tmp/bcmr-move-src.txt
+          cargo run -- move /tmp/bcmr-move-src.txt /tmp/bcmr-move-dst/
+          test -f /tmp/bcmr-move-dst/bcmr-move-src.txt
+          test ! -f /tmp/bcmr-move-src.txt
+          echo "Move test passed"
+
+      - name: Test remove operations
+        shell: bash
+        run: |
+          mkdir -p /tmp/bcmr-rm-test
+          echo "deleteme" > /tmp/bcmr-rm-test/file.txt
+          cargo run -- remove -f /tmp/bcmr-rm-test/file.txt
+          test ! -f /tmp/bcmr-rm-test/file.txt
+
+          echo "a" > /tmp/bcmr-rm-test/a.txt
+          echo "b" > /tmp/bcmr-rm-test/b.txt
+          cargo run -- remove -rf /tmp/bcmr-rm-test/
+          test ! -d /tmp/bcmr-rm-test/
+          echo "Remove tests passed"
+
+      - name: Test version and help
+        shell: bash
+        run: |
+          cargo run -- --version
+          cargo run -- --help
+          cargo run -- copy --help
+          cargo run -- move --help
+          cargo run -- remove --help
+          cargo run -- init --help
+          cargo run -- update --help
+          cargo run -- completions --help
+          echo "Help/version tests passed"
 
   build:
     name: Build ${{ matrix.target }}
