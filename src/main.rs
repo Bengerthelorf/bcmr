@@ -560,6 +560,17 @@ fn validate_mode(mode: &str, name: &str) -> Result<()> {
     }
 }
 
+const POWERSHELL_REMOTE_INJECT: &str = r#"    $tokens = $commandAst.ToString() -split '\s+'
+    if ($wordToComplete -match '.+:.+' -and $tokens.Count -ge 2 -and ($tokens[1] -eq 'copy' -or $tokens[1] -eq 'move')) {
+        $results = bcmr __complete-remote $wordToComplete 2>$null
+        if ($results) {
+            $results | ForEach-Object {
+                [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+            }
+            return
+        }
+    }"#;
+
 fn build_completion_command() -> clap::Command {
     let full = <cli::Cli as clap::CommandFactory>::command();
     let visible: Vec<clap::Command> = full
@@ -614,25 +625,7 @@ complete -F _bcmr_with_remote bcmr
 
 complete -c bcmr -n '__fish_seen_subcommand_from copy move; and string match -q "*:*" -- (commandline -ct)' -f -a '(bcmr __complete-remote (commandline -ct) 2>/dev/null)'
 "#,
-        Shell::PowerShell => r#"
-
-$_bcmr_base_completer = (Get-PSReadLineOption).ErrorAction
-Register-ArgumentCompleter -CommandName bcmr -Native -ScriptBlock {
-    param($wordToComplete, $commandAst, $cursorPosition)
-    $tokens = $commandAst.ToString() -split '\s+'
-    if ($wordToComplete -match '.+:.+' -and $tokens.Count -ge 2 -and ($tokens[1] -eq 'copy' -or $tokens[1] -eq 'move')) {
-        $results = bcmr __complete-remote $wordToComplete 2>$null
-        if ($results) {
-            $results | ForEach-Object {
-                [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
-            }
-            return
-        }
-    }
-    bcmr completions powershell | Out-String | Invoke-Expression
-    $function:_bcmr_completer = $null
-}
-"#,
+        Shell::PowerShell => "", // handled via injection into clap-generated script
         _ => "",
     }
 }
@@ -673,8 +666,21 @@ async fn main() -> Result<()> {
             let mut cmd = build_completion_command();
             let mut buf = Vec::new();
             clap_complete::generate(*shell, &mut cmd, "bcmr", &mut buf);
-            print!("{}", String::from_utf8(buf).unwrap());
-            print!("{}", remote_completion_script(shell));
+            let base = String::from_utf8(buf).unwrap();
+
+            if *shell == clap_complete::Shell::PowerShell {
+                // Inject remote path check into the clap-generated script block
+                // so there's only ONE Register-ArgumentCompleter
+                let injected = base.replacen(
+                    "param($wordToComplete, $commandAst, $cursorPosition)\n",
+                    &format!("param($wordToComplete, $commandAst, $cursorPosition)\n{}\n", POWERSHELL_REMOTE_INJECT),
+                    1,
+                );
+                print!("{}", injected);
+            } else {
+                print!("{}", base);
+                print!("{}", remote_completion_script(shell));
+            }
         }
     }
 
