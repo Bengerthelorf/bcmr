@@ -328,7 +328,7 @@ async fn run_parallel_transfers(
             let slot = pool.lock().pop().unwrap();
 
             let file_name = if item.is_upload {
-                item.local_path.file_name().unwrap_or_default().to_string_lossy().to_string()
+                item.local_path.file_name().unwrap().to_string_lossy().to_string()
             } else {
                 item.remote.path.rsplit('/').next().unwrap_or(&item.remote.path).to_string()
             };
@@ -395,7 +395,7 @@ fn collect_upload_files(
             items.push(TransferItem {
                 local_path: path.to_path_buf(),
                 remote: remote_base.join(&rel.to_string_lossy()),
-                size: entry.metadata().map(|m| m.len()).unwrap_or(0),
+                size: entry.metadata().unwrap().len(),
                 is_upload: true,
             });
         }
@@ -436,7 +436,7 @@ async fn handle_remote_copy(
             if is_upload {
                 let probe: Vec<TransferItem> = sources.iter().filter_map(|s| {
                     if parse_remote_path(&s.to_string_lossy()).is_some() { return None; }
-                    let size = s.metadata().map(|m| m.len()).unwrap_or(0);
+                    let size = s.metadata().unwrap().len();
                     Some(TransferItem {
                         local_path: s.clone(),
                         remote: crate::core::remote::RemotePath {
