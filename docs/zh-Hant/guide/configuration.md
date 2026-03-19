@@ -24,6 +24,10 @@ reflink = "auto"         # "auto"（預設）、"force" 或 "disable"
 sparse = "auto"          # "auto"（預設）、"force" 或 "disable"
 
 update_check = "notify"  # "notify"（預設）、"quiet" 或 "off"
+
+[scp]
+parallel_transfers = 4   # 並行 SSH 傳輸數（預設：4）
+compression = "auto"     # "auto"（預設）、"force" 或 "off"
 ```
 
 ## 進度設定
@@ -76,6 +80,30 @@ update_check = "notify"  # "notify"（預設）、"quiet" 或 "off"
 | `"disable"` | 寫入所有資料，不偵測空洞 |
 
 > **注意：** 設定檔中也接受 `"never"` 作為 `"disable"` 的別名。
+
+## SCP 設定
+
+### `scp.parallel_transfers`
+
+遠端複製時的並行 SSH 傳輸數。可透過 `-P` 參數覆寫。
+
+| 值 | 說明 |
+|----|------|
+| `4` | 預設 — 4 個並行 SSH 串流 |
+| `1` | 順序傳輸（無並行） |
+| `N` | 任意正整數 |
+
+### `scp.compression`
+
+控制遠端傳輸時的 SSH 傳輸層壓縮。
+
+| 值 | 說明 |
+|----|------|
+| `"auto"` | 智慧模式：可壓縮位元組 >30% 時啟用（預設） |
+| `"force"` | 始終啟用 SSH 壓縮（`-o Compression=yes`） |
+| `"off"` | 不壓縮 |
+
+`auto` 模式下，已知壓縮格式（`.gz`、`.zip`、`.mp4`、`.jpg` 等）被視為不可壓縮。僅當大部分資料可受益於壓縮時才啟用。
 
 ## 更新檢查
 

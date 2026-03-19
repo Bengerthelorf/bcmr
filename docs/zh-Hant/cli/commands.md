@@ -27,6 +27,7 @@ bcmr copy [選項] <來源路徑>... <目標路徑>
 | `--sync` | 複製後同步到磁碟 (fsync) |
 | `--reflink <MODE>` | 寫時複製：`auto`（預設）、`force`、`disable` |
 | `--sparse <MODE>` | 稀疏檔案：`auto`（預設）、`force`、`disable` |
+| `-P`, `--parallel <N>` | 遠端複製的並行傳輸數（預設：設定值） |
 
 **範例：**
 
@@ -57,6 +58,9 @@ bcmr copy -C large_file.iso /backup/
 
 # SSH 遠端複製
 bcmr copy local_file.txt user@host:/remote/path/
+
+# 並行遠端上傳（4 worker）
+bcmr copy -P 4 file1.bin file2.bin user@host:/remote/
 ```
 
 ### 續傳模式
