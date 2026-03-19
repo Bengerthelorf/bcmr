@@ -47,6 +47,12 @@ fn default_parallel_transfers() -> usize {
 pub struct ScpConfig {
     #[serde(default = "default_parallel_transfers")]
     pub parallel_transfers: usize,
+    #[serde(default = "default_compression")]
+    pub compression: String,
+}
+
+fn default_compression() -> String {
+    "auto".to_string()
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -154,6 +160,11 @@ impl Config {
             .set_default(
                 "scp.parallel_transfers",
                 defaults.scp.parallel_transfers as i64,
+            )
+            .unwrap()
+            .set_default(
+                "scp.compression",
+                defaults.scp.compression,
             )
             .unwrap()
             .set_default("update_check", "notify")

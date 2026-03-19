@@ -135,6 +135,7 @@ sparse = "auto"          # "auto" 或 "never"
 
 [scp]
 parallel_transfers = 4   # 默认并行 SCP 工作线程数
+compression = "auto"     # "auto"、"force" 或 "off"
 
 update_check = "notify"  # "notify"、"quiet" 或 "off"
 ```

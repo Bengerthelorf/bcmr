@@ -1,7 +1,14 @@
 use crate::core::error::BcmrError;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
+
+static SSH_COMPRESS: AtomicBool = AtomicBool::new(false);
+
+pub fn set_ssh_compression(enabled: bool) {
+    SSH_COMPRESS.store(enabled, Ordering::Relaxed);
+}
 
 #[derive(Debug, Clone)]
 pub struct RemotePath {
@@ -125,9 +132,11 @@ fn ssh_base_args(target: &str) -> Vec<String> {
         "-o".into(), "ControlPersist=300".into(),
         "-o".into(), "ConnectTimeout=10".into(),
     ];
-    // Only force BatchMode when there's no TTY (scripts, pipes)
     if !is_interactive() {
         args.extend(["-o".into(), "BatchMode=yes".into()]);
+    }
+    if SSH_COMPRESS.load(Ordering::Relaxed) {
+        args.extend(["-o".into(), "Compression=yes".into()]);
     }
     args
 }

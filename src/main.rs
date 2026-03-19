@@ -273,6 +273,31 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
     }
 }
 
+const COMPRESSED_EXTENSIONS: &[&str] = &[
+    "gz", "bz2", "xz", "zst", "lz4", "zip", "rar", "7z",
+    "jpg", "jpeg", "png", "gif", "webp", "avif", "heic",
+    "mp4", "mkv", "avi", "mov", "webm",
+    "mp3", "aac", "ogg", "flac", "opus",
+    "pdf", "docx", "xlsx", "pptx",
+    "dmg", "iso", "whl", "egg",
+];
+
+fn should_compress(items: &[TransferItem]) -> bool {
+    let (mut compressible, mut total) = (0u64, 0u64);
+    for item in items {
+        total += item.size;
+        let ext = std::path::Path::new(if item.is_upload {
+            item.local_path.to_str().unwrap_or("")
+        } else {
+            &item.remote.path
+        }).extension().unwrap_or_default().to_string_lossy().to_lowercase();
+        if !COMPRESSED_EXTENSIONS.contains(&ext.as_str()) {
+            compressible += item.size;
+        }
+    }
+    total > 0 && compressible * 100 / total > 30
+}
+
 struct TransferItem {
     local_path: PathBuf,
     remote: crate::core::remote::RemotePath,
@@ -401,6 +426,42 @@ async fn handle_remote_copy(
 
     let dest_str = dest.to_string_lossy();
     let remote_dest = parse_remote_path(&dest_str);
+    let is_upload = remote_dest.is_some();
+
+    let compression_mode = CONFIG.scp.compression.to_lowercase();
+    let compress = match compression_mode.as_str() {
+        "force" => true,
+        "off" | "never" => false,
+        _ => {
+            if is_upload {
+                let probe: Vec<TransferItem> = sources.iter().filter_map(|s| {
+                    if parse_remote_path(&s.to_string_lossy()).is_some() { return None; }
+                    let size = s.metadata().map(|m| m.len()).unwrap_or(0);
+                    Some(TransferItem {
+                        local_path: s.clone(),
+                        remote: crate::core::remote::RemotePath {
+                            user: None, host: String::new(), path: String::new(),
+                        },
+                        size,
+                        is_upload: true,
+                    })
+                }).collect();
+                should_compress(&probe)
+            } else {
+                let probe: Vec<TransferItem> = sources.iter().filter_map(|s| {
+                    let rp = parse_remote_path(&s.to_string_lossy())?;
+                    Some(TransferItem {
+                        local_path: PathBuf::new(),
+                        remote: rp,
+                        size: 1,
+                        is_upload: false,
+                    })
+                }).collect();
+                should_compress(&probe)
+            }
+        }
+    };
+    remote::set_ssh_compression(compress);
 
     let check_target = if let Some(ref rd) = remote_dest {
         rd.clone()

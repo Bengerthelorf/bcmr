@@ -135,6 +135,7 @@ sparse = "auto"          # "auto" or "never"
 
 [scp]
 parallel_transfers = 4   # default number of parallel SCP workers
+compression = "auto"     # "auto", "force", or "off"
 
 update_check = "notify"  # "notify", "quiet", or "off"
 ```
