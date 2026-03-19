@@ -98,6 +98,11 @@ impl ProgressData {
 
     pub fn update_worker(&mut self, slot: usize, file_name: &str, file_size: u64, progress: u64) {
         if let Some(w) = self.workers.get_mut(slot) {
+            if !w.active || w.file_name != file_name {
+                w.last_bytes = 0;
+                w.last_update = Instant::now();
+                w.speed = 0.0;
+            }
             w.file_name = file_name.to_string();
             w.file_size = file_size;
             w.progress = progress;
@@ -112,6 +117,7 @@ impl ProgressData {
             w.progress = 0;
             w.file_size = 0;
             w.speed = 0.0;
+            w.last_bytes = 0;
         }
     }
 
