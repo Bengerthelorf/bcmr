@@ -11,6 +11,9 @@ pub trait ProgressRenderer: Send {
     fn set_total_bytes(&mut self, total: u64);
     fn set_scanning(&mut self, scanning: bool);
     fn set_files_found(&mut self, count: u64);
+    fn set_parallel_mode(&mut self, worker_count: usize);
+    fn update_worker(&mut self, slot: usize, file_name: &str, file_size: u64, progress: u64);
+    fn finish_worker(&mut self, slot: usize);
     fn tick(&mut self);
     fn finish(&mut self) -> io::Result<()>;
 }
@@ -26,6 +29,9 @@ impl ProgressRenderer for SilentProgress {
     fn set_total_bytes(&mut self, _total: u64) {}
     fn set_scanning(&mut self, _scanning: bool) {}
     fn set_files_found(&mut self, _count: u64) {}
+    fn set_parallel_mode(&mut self, _worker_count: usize) {}
+    fn update_worker(&mut self, _slot: usize, _file_name: &str, _file_size: u64, _progress: u64) {}
+    fn finish_worker(&mut self, _slot: usize) {}
     fn tick(&mut self) {}
     fn finish(&mut self) -> io::Result<()> {
         Ok(())

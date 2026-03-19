@@ -9,6 +9,8 @@ pub struct Config {
     #[serde(default)]
     pub copy: CopyConfig,
     #[serde(default)]
+    pub scp: ScpConfig,
+    #[serde(default)]
     pub update_check: UpdateCheck,
 }
 
@@ -35,6 +37,16 @@ fn default_reflink() -> String {
 
 fn default_sparse() -> String {
     "auto".to_string()
+}
+
+fn default_parallel_transfers() -> usize {
+    4
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ScpConfig {
+    #[serde(default = "default_parallel_transfers")]
+    pub parallel_transfers: usize,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -77,6 +89,7 @@ impl Default for Config {
                 },
             },
             copy: CopyConfig::default(),
+            scp: ScpConfig::default(),
             update_check: UpdateCheck::default(),
         }
     }
@@ -136,6 +149,11 @@ impl Config {
             .set_default(
                 "copy.sparse",
                 defaults.copy.sparse,
+            )
+            .unwrap()
+            .set_default(
+                "scp.parallel_transfers",
+                defaults.scp.parallel_transfers as i64,
             )
             .unwrap()
             .set_default("update_check", "notify")

@@ -12,7 +12,9 @@ use parking_lot::Mutex;
 use ui::progress::{self, ProgressRenderer};
 use ui::utils::format_bytes;
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::mpsc;
 
 use tokio::signal::ctrl_c;
@@ -125,6 +127,10 @@ impl ProgressRunner {
     fn file_callback(&self) -> impl Fn(&str, u64) + Send + Sync + Clone + 'static {
         let p = Arc::clone(&self.progress);
         move |name, size| p.lock().set_current_file(name, size)
+    }
+
+    fn set_parallel_mode(&self, worker_count: usize) {
+        self.progress.lock().set_parallel_mode(worker_count);
     }
 
     fn finish_ok(self) -> Result<()> {
@@ -267,6 +273,25 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
     }
 }
 
+async fn upload_file_owned(
+    local_src: PathBuf,
+    remote: crate::core::remote::RemotePath,
+    progress_callback: impl Fn(u64) + Send + Sync,
+    on_new_file: impl Fn(&str, u64) + Send + Sync,
+) -> Result<(), BcmrError> {
+    crate::core::remote::upload_file(&local_src, &remote, &progress_callback, &on_new_file).await
+}
+
+async fn download_file_owned(
+    remote: crate::core::remote::RemotePath,
+    local_dst: PathBuf,
+    progress_callback: impl Fn(u64) + Send + Sync,
+    on_new_file: impl Fn(&str, u64) + Send + Sync,
+    file_size: u64,
+) -> Result<(), BcmrError> {
+    crate::core::remote::download_file(&remote, &local_dst, &progress_callback, &on_new_file, file_size).await
+}
+
 async fn handle_remote_copy(
     args: &Commands,
     sources: &[std::path::PathBuf],
@@ -286,7 +311,8 @@ async fn handle_remote_copy(
     };
     remote::validate_ssh_connection(&check_target).await?;
 
-    // Determine direction
+    let parallel = args.get_parallel().unwrap_or(CONFIG.scp.parallel_transfers);
+
     if let Some(ref rdest) = remote_dest {
         let mut total_size = 0u64;
         for src in sources {
@@ -312,32 +338,118 @@ async fn handle_remote_copy(
         let runner = ProgressRunner::new(total_size, is_plain_mode(args), false)?;
         runner.progress().lock().set_operation_type("Uploading");
 
-        for src in sources {
-            if src.is_file() {
-                let file_remote = if sources.len() > 1 || rdest.path == "." {
-                    // Multiple sources -> dest is dir, append filename
-                    let fname = src.file_name().unwrap_or_default().to_string_lossy();
-                    RemotePath {
+        if parallel > 1 {
+            runner.set_parallel_mode(parallel);
+
+            let mut all_files: Vec<(PathBuf, RemotePath)> = Vec::new();
+            for src in sources {
+                if src.is_file() {
+                    let file_remote = if sources.len() > 1 || rdest.path == "." {
+                        let fname = src.file_name().unwrap_or_default().to_string_lossy();
+                        RemotePath {
+                            user: rdest.user.clone(),
+                            host: rdest.host.clone(),
+                            path: format!("{}/{}", rdest.path, fname),
+                        }
+                    } else {
+                        rdest.clone()
+                    };
+                    all_files.push((src.clone(), file_remote));
+                } else if src.is_dir() && args.is_recursive() {
+                    let dir_name = src.file_name().unwrap_or_default().to_string_lossy();
+                    let dir_remote = RemotePath {
                         user: rdest.user.clone(),
                         host: rdest.host.clone(),
-                        path: format!("{}/{}", rdest.path, fname),
+                        path: format!("{}/{}", rdest.path, dir_name),
+                    };
+                    let entries = collect_upload_files(src, &dir_remote)?;
+                    all_files.extend(entries);
+                }
+            }
+
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(parallel));
+            let slot_pool: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new((0..parallel).rev().collect()));
+            let progress = Arc::clone(runner.progress());
+            let errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+            let mut handles = Vec::new();
+
+            for (local_src, file_remote) in all_files {
+                let sem = Arc::clone(&semaphore);
+                let pool = Arc::clone(&slot_pool);
+                let prog = Arc::clone(&progress);
+                let errs = Arc::clone(&errors);
+
+                let handle = tokio::spawn(async move {
+                    let _permit = sem.acquire().await.unwrap();
+                    let slot = pool.lock().pop().unwrap();
+
+                    let file_size = local_src.metadata().map(|m| m.len()).unwrap_or(0);
+                    let file_name = local_src.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    let worker_bytes = Arc::new(AtomicU64::new(0));
+
+                    let wb = Arc::clone(&worker_bytes);
+                    let p1 = Arc::clone(&prog);
+                    let fname = file_name.clone();
+                    let fsize = file_size;
+                    let s = slot;
+                    let progress_cb = move |n: u64| {
+                        p1.lock().inc_current(n);
+                        let total = wb.fetch_add(n, AtomicOrdering::Relaxed) + n;
+                        p1.lock().update_worker(s, &fname, fsize, total);
+                    };
+
+                    let p2 = Arc::clone(&prog);
+                    let new_file_cb = move |name: &str, size: u64| {
+                        p2.lock().update_worker(s, name, size, 0);
+                    };
+
+                    let result = upload_file_owned(local_src, file_remote, progress_cb, new_file_cb).await;
+
+                    if let Err(e) = result {
+                        errs.lock().push(e.to_string());
                     }
-                } else {
-                    rdest.clone()
-                };
-                let inc = runner.inc_callback();
-                let file_cb = runner.file_callback();
-                remote::upload_file(src, &file_remote, &inc, &file_cb).await?;
-            } else if src.is_dir() && args.is_recursive() {
-                let dir_name = src.file_name().unwrap_or_default().to_string_lossy();
-                let dir_remote = RemotePath {
-                    user: rdest.user.clone(),
-                    host: rdest.host.clone(),
-                    path: format!("{}/{}", rdest.path, dir_name),
-                };
-                let inc = runner.inc_callback();
-                let file_cb = runner.file_callback();
-                remote::upload_directory(src, &dir_remote, &inc, &file_cb).await?;
+
+                    prog.lock().finish_worker(slot);
+                    pool.lock().push(slot);
+                });
+                handles.push(handle);
+            }
+
+            for handle in handles {
+                handle.await?;
+            }
+
+            let errs = errors.lock();
+            if !errs.is_empty() {
+                return runner.finish_err(errs.join("; "));
+            }
+        } else {
+            for src in sources {
+                if src.is_file() {
+                    let file_remote = if sources.len() > 1 || rdest.path == "." {
+                        let fname = src.file_name().unwrap_or_default().to_string_lossy();
+                        RemotePath {
+                            user: rdest.user.clone(),
+                            host: rdest.host.clone(),
+                            path: format!("{}/{}", rdest.path, fname),
+                        }
+                    } else {
+                        rdest.clone()
+                    };
+                    let inc = runner.inc_callback();
+                    let file_cb = runner.file_callback();
+                    remote::upload_file(src, &file_remote, &inc, &file_cb).await?;
+                } else if src.is_dir() && args.is_recursive() {
+                    let dir_name = src.file_name().unwrap_or_default().to_string_lossy();
+                    let dir_remote = RemotePath {
+                        user: rdest.user.clone(),
+                        host: rdest.host.clone(),
+                        path: format!("{}/{}", rdest.path, dir_name),
+                    };
+                    let inc = runner.inc_callback();
+                    let file_cb = runner.file_callback();
+                    remote::upload_directory(src, &dir_remote, &inc, &file_cb).await?;
+                }
             }
         }
 
@@ -359,41 +471,180 @@ async fn handle_remote_copy(
         let runner = ProgressRunner::new(total_size, is_plain_mode(args), false)?;
         runner.progress().lock().set_operation_type("Downloading");
 
-        for (rsrc, _size) in &remote_sources {
-            let info = remote::remote_stat(rsrc).await?;
-            let inc = runner.inc_callback();
-            let file_cb = runner.file_callback();
+        if parallel > 1 {
+            runner.set_parallel_mode(parallel);
 
-            if info.is_dir {
-                if !args.is_recursive() {
-                    bail!(
-                        "Remote source '{}' is a directory. Use -r flag for recursive copy.",
-                        rsrc
-                    );
-                }
-                let dir_name = rsrc.path.rsplit('/').next().unwrap_or(&rsrc.path);
-                let local_dir = if dest_local.is_dir() {
-                    dest_local.join(dir_name)
+            let mut all_files: Vec<(RemotePath, PathBuf, u64)> = Vec::new();
+            for (rsrc, _size) in &remote_sources {
+                let info = remote::remote_stat(rsrc).await?;
+                if info.is_dir {
+                    if !args.is_recursive() {
+                        bail!(
+                            "Remote source '{}' is a directory. Use -r flag for recursive copy.",
+                            rsrc
+                        );
+                    }
+                    let dir_name = rsrc.path.rsplit('/').next().unwrap_or(&rsrc.path);
+                    let local_dir = if dest_local.is_dir() {
+                        dest_local.join(dir_name)
+                    } else {
+                        dest_local.to_path_buf()
+                    };
+                    if !local_dir.exists() {
+                        tokio::fs::create_dir_all(&local_dir).await?;
+                    }
+                    let entries = remote::remote_list_files(rsrc).await?;
+                    for (rel_path, _, is_dir_entry) in &entries {
+                        if *is_dir_entry {
+                            let dir_path = local_dir.join(rel_path);
+                            if !dir_path.exists() {
+                                tokio::fs::create_dir_all(&dir_path).await?;
+                            }
+                        }
+                    }
+                    for (rel_path, size, is_dir_entry) in &entries {
+                        if *is_dir_entry {
+                            continue;
+                        }
+                        let file_remote = RemotePath {
+                            user: rsrc.user.clone(),
+                            host: rsrc.host.clone(),
+                            path: format!("{}/{}", rsrc.path, rel_path),
+                        };
+                        let local_file = local_dir.join(rel_path);
+                        all_files.push((file_remote, local_file, *size));
+                    }
                 } else {
-                    dest_local.to_path_buf()
-                };
-                if !local_dir.exists() {
-                    tokio::fs::create_dir_all(&local_dir).await?;
+                    let local_path = if dest_local.is_dir() {
+                        let fname = rsrc.path.rsplit('/').next().unwrap_or(&rsrc.path);
+                        dest_local.join(fname)
+                    } else {
+                        dest_local.to_path_buf()
+                    };
+                    all_files.push((rsrc.clone(), local_path, info.size));
                 }
-                remote::download_directory(rsrc, &local_dir, &inc, &file_cb).await?;
-            } else {
-                let local_path = if dest_local.is_dir() {
-                    let fname = rsrc.path.rsplit('/').next().unwrap_or(&rsrc.path);
-                    dest_local.join(fname)
+            }
+
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(parallel));
+            let slot_pool: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new((0..parallel).rev().collect()));
+            let progress = Arc::clone(runner.progress());
+            let errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+            let mut handles = Vec::new();
+
+            for (file_remote, local_path, file_size) in all_files {
+                let sem = Arc::clone(&semaphore);
+                let pool = Arc::clone(&slot_pool);
+                let prog = Arc::clone(&progress);
+                let errs = Arc::clone(&errors);
+
+                let handle = tokio::spawn(async move {
+                    let _permit = sem.acquire().await.unwrap();
+                    let slot = pool.lock().pop().unwrap();
+
+                    let file_name = file_remote.path.rsplit('/').next().unwrap_or(&file_remote.path).to_string();
+                    let worker_bytes = Arc::new(AtomicU64::new(0));
+
+                    let wb = Arc::clone(&worker_bytes);
+                    let p1 = Arc::clone(&prog);
+                    let fname = file_name.clone();
+                    let fsize = file_size;
+                    let s = slot;
+                    let progress_cb = move |n: u64| {
+                        p1.lock().inc_current(n);
+                        let total = wb.fetch_add(n, AtomicOrdering::Relaxed) + n;
+                        p1.lock().update_worker(s, &fname, fsize, total);
+                    };
+
+                    let p2 = Arc::clone(&prog);
+                    let new_file_cb = move |name: &str, size: u64| {
+                        p2.lock().update_worker(s, name, size, 0);
+                    };
+
+                    let result = download_file_owned(file_remote, local_path, progress_cb, new_file_cb, file_size).await;
+
+                    if let Err(e) = result {
+                        errs.lock().push(e.to_string());
+                    }
+
+                    prog.lock().finish_worker(slot);
+                    pool.lock().push(slot);
+                });
+                handles.push(handle);
+            }
+
+            for handle in handles {
+                handle.await?;
+            }
+
+            let errs = errors.lock();
+            if !errs.is_empty() {
+                return runner.finish_err(errs.join("; "));
+            }
+        } else {
+            for (rsrc, _size) in &remote_sources {
+                let info = remote::remote_stat(rsrc).await?;
+                let inc = runner.inc_callback();
+                let file_cb = runner.file_callback();
+
+                if info.is_dir {
+                    if !args.is_recursive() {
+                        bail!(
+                            "Remote source '{}' is a directory. Use -r flag for recursive copy.",
+                            rsrc
+                        );
+                    }
+                    let dir_name = rsrc.path.rsplit('/').next().unwrap_or(&rsrc.path);
+                    let local_dir = if dest_local.is_dir() {
+                        dest_local.join(dir_name)
+                    } else {
+                        dest_local.to_path_buf()
+                    };
+                    if !local_dir.exists() {
+                        tokio::fs::create_dir_all(&local_dir).await?;
+                    }
+                    remote::download_directory(rsrc, &local_dir, &inc, &file_cb).await?;
                 } else {
-                    dest_local.to_path_buf()
-                };
-                remote::download_file(rsrc, &local_path, &inc, &file_cb, info.size).await?;
+                    let local_path = if dest_local.is_dir() {
+                        let fname = rsrc.path.rsplit('/').next().unwrap_or(&rsrc.path);
+                        dest_local.join(fname)
+                    } else {
+                        dest_local.to_path_buf()
+                    };
+                    remote::download_file(rsrc, &local_path, &inc, &file_cb, info.size).await?;
+                }
             }
         }
 
         runner.finish_ok()
     }
+}
+
+fn collect_upload_files(
+    local_src: &std::path::Path,
+    remote_base: &crate::core::remote::RemotePath,
+) -> Result<Vec<(PathBuf, crate::core::remote::RemotePath)>> {
+    use crate::core::remote::RemotePath;
+    use crate::core::traversal;
+
+    let excludes: Vec<regex::Regex> = Vec::new();
+    let mut files = Vec::new();
+
+    for entry in traversal::walk(local_src, true, false, 1, &excludes) {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = path.strip_prefix(local_src)?;
+
+        if path.is_file() {
+            let file_remote = RemotePath {
+                user: remote_base.user.clone(),
+                host: remote_base.host.clone(),
+                path: format!("{}/{}", remote_base.path, rel.display()),
+            };
+            files.push((path.to_path_buf(), file_remote));
+        }
+    }
+
+    Ok(files)
 }
 
 async fn handle_move_command(args: &Commands) -> Result<()> {

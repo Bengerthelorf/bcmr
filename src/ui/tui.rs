@@ -38,6 +38,16 @@ impl TuiProgress {
         })
     }
 
+    fn total_lines(&self) -> u16 {
+        if self.data.parallel_total > 0 {
+            5 + self.data.parallel_total as u16
+        } else if self.data.items_total.is_some() {
+            8
+        } else {
+            8
+        }
+    }
+
     fn initialize(&mut self) -> io::Result<()> {
         if self.initialized {
             return Ok(());
@@ -45,11 +55,7 @@ impl TuiProgress {
 
         self.suspended = install_suspend_handler()?;
 
-        let required_height = if self.data.items_total.is_some() {
-            10
-        } else {
-            8
-        };
+        let required_height = self.total_lines();
 
         let (_, term_height) = terminal_size::terminal_size()
             .map(|(w, h)| (w.0, h.0))
@@ -286,72 +292,139 @@ impl TuiProgress {
         };
         draw_line_content(&mut stdout, 2, &details)?;
 
-        let items_line = if let Some(total) = self.data.items_total {
-            format!("Items:   {} / {}", self.data.items_processed, total)
-        } else {
-            String::new()
-        };
-        draw_line_content(&mut stdout, 3, &items_line)?;
+        if self.data.parallel_total > 0 {
+            let workers_header = format!(
+                "Workers: {}/{}",
+                self.data.active_worker_count(),
+                self.data.parallel_total
+            );
+            draw_line_content(&mut stdout, 3, &workers_header)?;
 
-        let file_info = format!("Current: {}", self.data.current_file);
-        let max_text_width = box_width.saturating_sub(4);
-        let display_file_info = if file_info.len() > max_text_width {
-            let mut end_index = max_text_width.saturating_sub(3);
-            if !file_info.is_char_boundary(end_index) {
-                end_index = file_info.floor_char_boundary(end_index)
+            for (i, worker) in self.data.workers.iter_mut().enumerate() {
+                let row_offset = 4 + i as u16;
+                let line = if worker.active {
+                    let pct = if worker.file_size > 0 {
+                        (worker.progress as f64 / worker.file_size as f64 * 100.0).min(100.0) as u16
+                    } else {
+                        0
+                    };
+                    let spd = worker.calculate_speed();
+                    let spd_str = if spd > 0.0 {
+                        format!("{}/s", format_bytes(spd * 1024.0 * 1024.0))
+                    } else {
+                        "-- /s".to_string()
+                    };
+                    let name_max = 20usize;
+                    let display_name = if worker.file_name.len() > name_max {
+                        let end = worker.file_name.floor_char_boundary(name_max.saturating_sub(3));
+                        format!("{}...", &worker.file_name[..end])
+                    } else {
+                        worker.file_name.clone()
+                    };
+                    let worker_bar_width = (box_width.saturating_sub(40)).max(10);
+                    let filled = (worker_bar_width * pct as usize / 100).min(worker_bar_width);
+                    let empty = worker_bar_width - filled;
+                    format!(
+                        "[{}] {:width$} [{}{}] {:>3}% {}",
+                        i + 1,
+                        display_name,
+                        theme.bar_complete_char.repeat(filled),
+                        theme.bar_incomplete_char.repeat(empty),
+                        pct,
+                        spd_str,
+                        width = name_max,
+                    )
+                } else {
+                    format!("[{}] idle", i + 1)
+                };
+                draw_line_content(&mut stdout, row_offset, &line)?;
             }
 
-            format!("{}...", &file_info[..end_index])
+            let bottom_row = 4 + self.data.parallel_total as u16;
+            execute!(
+                stdout,
+                MoveTo(0, current_row + bottom_row),
+                SetForegroundColor(border_color)
+            )?;
+            write!(
+                stdout,
+                "{}{}{}",
+                bottom_left,
+                horizontal
+                    .to_string()
+                    .repeat(right_border_col.saturating_sub(1) as usize),
+                bottom_right
+            )?;
+            execute!(stdout, SetAttribute(Attribute::Reset))?;
+            execute!(stdout, Clear(ClearType::UntilNewLine))?;
         } else {
-            file_info
-        };
-        draw_line_content(&mut stdout, 4, &display_file_info)?;
+            let items_line = if let Some(total) = self.data.items_total {
+                format!("Items:   {} / {}", self.data.items_processed, total)
+            } else {
+                String::new()
+            };
+            draw_line_content(&mut stdout, 3, &items_line)?;
 
-        execute!(
-            stdout,
-            MoveTo(0, current_row + 5),
-            SetForegroundColor(border_color)
-        )?;
-        write!(stdout, "{}          [", vertical)?;
-        let filled_len = (bar_width * current_progress as usize / 100).min(bar_width);
-        let empty_len = bar_width - filled_len;
+            let file_info = format!("Current: {}", self.data.current_file);
+            let max_text_width = box_width.saturating_sub(4);
+            let display_file_info = if file_info.len() > max_text_width {
+                let mut end_index = max_text_width.saturating_sub(3);
+                if !file_info.is_char_boundary(end_index) {
+                    end_index = file_info.floor_char_boundary(end_index)
+                }
 
-        for i in 0..filled_len {
-            let progress_fraction = i as f32 / bar_width as f32;
-            let color = get_gradient_color(&theme.bar_gradient, progress_fraction);
-            execute!(stdout, SetForegroundColor(color))?;
-            write!(stdout, "{}", theme.bar_complete_char)?;
+                format!("{}...", &file_info[..end_index])
+            } else {
+                file_info
+            };
+            draw_line_content(&mut stdout, 4, &display_file_info)?;
+
+            execute!(
+                stdout,
+                MoveTo(0, current_row + 5),
+                SetForegroundColor(border_color)
+            )?;
+            write!(stdout, "{}          [", vertical)?;
+            let filled_len = (bar_width * current_progress as usize / 100).min(bar_width);
+            let empty_len = bar_width - filled_len;
+
+            for i in 0..filled_len {
+                let progress_fraction = i as f32 / bar_width as f32;
+                let color = get_gradient_color(&theme.bar_gradient, progress_fraction);
+                execute!(stdout, SetForegroundColor(color))?;
+                write!(stdout, "{}", theme.bar_complete_char)?;
+            }
+            execute!(stdout, SetForegroundColor(parse_hex_color("#444444")))?;
+            write!(stdout, "{}", theme.bar_incomplete_char.repeat(empty_len))?;
+
+            execute!(stdout, SetForegroundColor(text_color))?;
+            write!(stdout, "] {:>3}%", current_progress)?;
+
+            execute!(
+                stdout,
+                MoveTo(right_border_col, current_row + 5),
+                SetForegroundColor(border_color)
+            )?;
+            write!(stdout, "{}", vertical)?;
+            execute!(stdout, Clear(ClearType::UntilNewLine))?;
+
+            execute!(
+                stdout,
+                MoveTo(0, current_row + 6),
+                SetForegroundColor(border_color)
+            )?;
+            write!(
+                stdout,
+                "{}{}{}",
+                bottom_left,
+                horizontal
+                    .to_string()
+                    .repeat(right_border_col.saturating_sub(1) as usize),
+                bottom_right
+            )?;
+            execute!(stdout, SetAttribute(Attribute::Reset))?;
+            execute!(stdout, Clear(ClearType::UntilNewLine))?;
         }
-        execute!(stdout, SetForegroundColor(parse_hex_color("#444444")))?;
-        write!(stdout, "{}", theme.bar_incomplete_char.repeat(empty_len))?;
-
-        execute!(stdout, SetForegroundColor(text_color))?;
-        write!(stdout, "] {:>3}%", current_progress)?;
-
-        execute!(
-            stdout,
-            MoveTo(right_border_col, current_row + 5),
-            SetForegroundColor(border_color)
-        )?;
-        write!(stdout, "{}", vertical)?;
-        execute!(stdout, Clear(ClearType::UntilNewLine))?;
-
-        execute!(
-            stdout,
-            MoveTo(0, current_row + 6),
-            SetForegroundColor(border_color)
-        )?;
-        write!(
-            stdout,
-            "{}{}{}",
-            bottom_left,
-            horizontal
-                .to_string()
-                .repeat(right_border_col.saturating_sub(1) as usize),
-            bottom_right
-        )?;
-        execute!(stdout, SetAttribute(Attribute::Reset))?;
-        execute!(stdout, Clear(ClearType::UntilNewLine))?;
 
         stdout.flush()?;
         Ok(())
@@ -406,6 +479,34 @@ impl ProgressRenderer for TuiProgress {
         self.data.files_found = count;
     }
 
+    fn set_parallel_mode(&mut self, worker_count: usize) {
+        self.data.init_workers(worker_count);
+        let _ = self.redraw();
+    }
+
+    fn update_worker(&mut self, slot: usize, file_name: &str, file_size: u64, progress: u64) {
+        if slot < self.data.workers.len() {
+            let w = &mut self.data.workers[slot];
+            w.file_name = file_name.to_string();
+            w.file_size = file_size;
+            w.progress = progress;
+            w.active = true;
+            w.calculate_speed();
+        }
+    }
+
+    fn finish_worker(&mut self, slot: usize) {
+        if slot < self.data.workers.len() {
+            let w = &mut self.data.workers[slot];
+            w.active = false;
+            w.file_name.clear();
+            w.progress = 0;
+            w.file_size = 0;
+            w.speed = 0.0;
+        }
+        let _ = self.redraw();
+    }
+
     fn tick(&mut self) {
         let _ = self.redraw();
     }
@@ -422,11 +523,7 @@ impl ProgressRenderer for TuiProgress {
         let _ = self.redraw();
 
         if self.raw_mode_enabled && !was_suspended {
-            let lines_used = if self.data.items_total.is_some() {
-                10
-            } else {
-                8
-            };
+            let lines_used = self.total_lines();
             execute!(stdout(), Show, MoveTo(0, self.start_row + lines_used))?;
             disable_raw_mode()?;
             self.raw_mode_enabled = false;

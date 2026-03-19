@@ -75,7 +75,16 @@ impl InlineProgress {
         let op_label = format!("{}: ", operation);
         write!(stdout, "{}", op_label)?;
 
-        let suffix = format!(" {}%", total_progress);
+        let suffix = if self.data.parallel_total > 0 {
+            format!(
+                " {}% [{}/{}w]",
+                total_progress,
+                self.data.active_worker_count(),
+                self.data.parallel_total
+            )
+        } else {
+            format!(" {}%", total_progress)
+        };
         let bar_width = term_width
             .saturating_sub(op_label.len() + suffix.len() + 2)
             .max(10);
@@ -115,33 +124,57 @@ impl InlineProgress {
         }
 
         execute!(stdout, Clear(ClearType::CurrentLine))?;
-        let file_label = "File: ";
-        write!(stdout, "{}", file_label)?;
-
-        let file_suffix = format!(" {}%", current_progress);
-        let avail = term_width.saturating_sub(file_label.len() + file_suffix.len() + 2);
-        let bar_width_file = (avail / 2).max(10);
-        let name_width = avail.saturating_sub(bar_width_file + 1);
-
-        let file_info = &self.data.current_file;
-        let display_file = if file_info.len() > name_width {
-            let mut end = name_width.saturating_sub(3);
-            if !file_info.is_char_boundary(end) {
-                end = file_info.floor_char_boundary(end);
+        if self.data.parallel_total > 0 {
+            let mut parts = Vec::new();
+            for (i, worker) in self.data.workers.iter().enumerate() {
+                if worker.active {
+                    let pct = if worker.file_size > 0 {
+                        (worker.progress as f64 / worker.file_size as f64 * 100.0).min(100.0) as u16
+                    } else {
+                        0
+                    };
+                    let name_max = 12usize;
+                    let display_name = if worker.file_name.len() > name_max {
+                        let end = worker.file_name.floor_char_boundary(name_max.saturating_sub(3));
+                        format!("{}...", &worker.file_name[..end])
+                    } else {
+                        worker.file_name.clone()
+                    };
+                    parts.push(format!("[{}] {} {}%", i + 1, display_name, pct));
+                } else {
+                    parts.push(format!("[{}] idle", i + 1));
+                }
             }
-            format!("{}...", &file_info[..end])
+            write!(stdout, "{}", parts.join(" | "))?;
         } else {
-            format!("{:width$}", file_info, width = name_width)
-        };
+            let file_label = "File: ";
+            write!(stdout, "{}", file_label)?;
 
-        write!(stdout, "{} ", display_file)?;
+            let file_suffix = format!(" {}%", current_progress);
+            let avail = term_width.saturating_sub(file_label.len() + file_suffix.len() + 2);
+            let bar_width_file = (avail / 2).max(10);
+            let name_width = avail.saturating_sub(bar_width_file + 1);
 
-        write!(stdout, "[")?;
-        let filled = (bar_width_file * current_progress as usize / 100).min(bar_width_file);
-        let empty = bar_width_file - filled;
-        write!(stdout, "{}", "=".repeat(filled))?;
-        write!(stdout, "{}", "-".repeat(empty))?;
-        write!(stdout, "]{}", file_suffix)?;
+            let file_info = &self.data.current_file;
+            let display_file = if file_info.len() > name_width {
+                let mut end = name_width.saturating_sub(3);
+                if !file_info.is_char_boundary(end) {
+                    end = file_info.floor_char_boundary(end);
+                }
+                format!("{}...", &file_info[..end])
+            } else {
+                format!("{:width$}", file_info, width = name_width)
+            };
+
+            write!(stdout, "{} ", display_file)?;
+
+            write!(stdout, "[")?;
+            let filled = (bar_width_file * current_progress as usize / 100).min(bar_width_file);
+            let empty = bar_width_file - filled;
+            write!(stdout, "{}", "=".repeat(filled))?;
+            write!(stdout, "{}", "-".repeat(empty))?;
+            write!(stdout, "]{}", file_suffix)?;
+        }
 
         stdout.flush()?;
 
@@ -196,6 +229,34 @@ impl ProgressRenderer for InlineProgress {
 
     fn set_files_found(&mut self, count: u64) {
         self.data.files_found = count;
+    }
+
+    fn set_parallel_mode(&mut self, worker_count: usize) {
+        self.data.init_workers(worker_count);
+        let _ = self.redraw();
+    }
+
+    fn update_worker(&mut self, slot: usize, file_name: &str, file_size: u64, progress: u64) {
+        if slot < self.data.workers.len() {
+            let w = &mut self.data.workers[slot];
+            w.file_name = file_name.to_string();
+            w.file_size = file_size;
+            w.progress = progress;
+            w.active = true;
+            w.calculate_speed();
+        }
+    }
+
+    fn finish_worker(&mut self, slot: usize) {
+        if slot < self.data.workers.len() {
+            let w = &mut self.data.workers[slot];
+            w.active = false;
+            w.file_name.clear();
+            w.progress = 0;
+            w.file_size = 0;
+            w.speed = 0.0;
+        }
+        let _ = self.redraw();
     }
 
     fn tick(&mut self) {

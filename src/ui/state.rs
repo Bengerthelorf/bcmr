@@ -1,5 +1,46 @@
 use std::time::{Duration, Instant};
 
+pub struct WorkerState {
+    pub file_name: String,
+    pub file_size: u64,
+    pub progress: u64,
+    pub active: bool,
+    pub last_update: Instant,
+    pub last_bytes: u64,
+    pub speed: f64,
+}
+
+impl WorkerState {
+    pub fn new() -> Self {
+        Self {
+            file_name: String::new(),
+            file_size: 0,
+            progress: 0,
+            active: false,
+            last_update: Instant::now(),
+            last_bytes: 0,
+            speed: 0.0,
+        }
+    }
+
+    pub fn calculate_speed(&mut self) -> f64 {
+        let elapsed = self.last_update.elapsed().as_secs_f64();
+        if elapsed < 0.1 {
+            return self.speed;
+        }
+        let bytes_per_sec = (self.progress - self.last_bytes) as f64 / elapsed;
+        let speed = bytes_per_sec / (1024.0 * 1024.0);
+        self.speed = if self.speed > 0.0 {
+            self.speed * 0.8 + speed * 0.2
+        } else {
+            speed
+        };
+        self.last_update = Instant::now();
+        self.last_bytes = self.progress;
+        self.speed
+    }
+}
+
 pub struct ProgressData {
     pub total_bytes: u64,
     pub current_bytes: u64,
@@ -15,8 +56,10 @@ pub struct ProgressData {
     pub operation_type: String,
     pub items_total: Option<usize>, // Total number of items to process
     pub items_processed: usize,     // Number of items processed
-    pub scanning: bool,             // Whether we're still scanning (pipeline mode)
-    pub files_found: u64,           // Files discovered so far during scanning
+    pub scanning: bool,
+    pub files_found: u64,
+    pub workers: Vec<WorkerState>,
+    pub parallel_total: usize,
 }
 
 impl ProgressData {
@@ -39,7 +82,18 @@ impl ProgressData {
             items_processed: 0,
             scanning: false,
             files_found: 0,
+            workers: Vec::new(),
+            parallel_total: 0,
         }
+    }
+
+    pub fn init_workers(&mut self, count: usize) {
+        self.parallel_total = count;
+        self.workers = (0..count).map(|_| WorkerState::new()).collect();
+    }
+
+    pub fn active_worker_count(&self) -> usize {
+        self.workers.iter().filter(|w| w.active).count()
     }
 
     pub fn calculate_speed(&mut self) -> f64 {

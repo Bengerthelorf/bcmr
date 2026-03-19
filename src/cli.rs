@@ -138,6 +138,10 @@ pub enum Commands {
         /// Modes: force, auto (default), disable
         #[arg(long, num_args = 0..=1, default_missing_value = "auto")]
         sparse: Option<String>,
+
+        /// Number of parallel SCP transfers
+        #[arg(short = 'P', long)]
+        parallel: Option<usize>,
     },
 
     /// Move files or directories
@@ -394,6 +398,13 @@ impl Commands {
     pub fn get_sparse_mode(&self) -> Option<String> {
         match self {
             Commands::Copy { sparse, .. } => sparse.clone(),
+            _ => None,
+        }
+    }
+
+    pub fn get_parallel(&self) -> Option<usize> {
+        match self {
+            Commands::Copy { parallel, .. } => *parallel,
             _ => None,
         }
     }

@@ -94,6 +94,10 @@ bcmr copy -C large_file.iso /backup/
 # SSH 远程复制
 bcmr copy local.txt user@host:/remote/
 bcmr copy user@host:/remote/file.txt ./
+
+# 并行 SCP 传输（4 个工作线程）
+bcmr copy -P 4 *.bin user@host:/backup/
+bcmr copy -P 8 -r project/ user@host:/backup/
 ```
 
 ### Shell 集成
@@ -128,6 +132,9 @@ box_style = "rounded"    # "rounded", "double", "heavy", "single"
 [copy]
 reflink = "auto"         # "auto" 或 "never"
 sparse = "auto"          # "auto" 或 "never"
+
+[scp]
+parallel_transfers = 4   # 默认并行 SCP 工作线程数
 
 update_check = "notify"  # "notify"、"quiet" 或 "off"
 ```

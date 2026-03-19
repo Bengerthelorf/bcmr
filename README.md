@@ -94,6 +94,10 @@ bcmr copy -C large_file.iso /backup/
 # Remote copy via SSH
 bcmr copy local.txt user@host:/remote/
 bcmr copy user@host:/remote/file.txt ./
+
+# Parallel SCP transfers (4 workers)
+bcmr copy -P 4 *.bin user@host:/backup/
+bcmr copy -P 8 -r project/ user@host:/backup/
 ```
 
 ### Shell Integration
@@ -128,6 +132,9 @@ box_style = "rounded"    # "rounded", "double", "heavy", "single"
 [copy]
 reflink = "auto"         # "auto" or "never"
 sparse = "auto"          # "auto" or "never"
+
+[scp]
+parallel_transfers = 4   # default number of parallel SCP workers
 
 update_check = "notify"  # "notify", "quiet", or "off"
 ```
