@@ -27,7 +27,7 @@ features:
     details: 支持通过 mtime、文件大小或 BLAKE3 哈希校验续传中断的传输。复制后可验证文件完整性。
   - icon: 🌐
     title: 远程复制 (SSH)
-    details: 使用 SCP 风格语法通过 SSH 上传和下载文件，无需额外工具。
+    details: 通过 SSH 并行传输、智能压缩、逐 worker 进度显示。无需额外工具。
   - icon: ⚡
     title: 默认高性能
     details: Reflink (写时复制)、Linux copy_file_range、稀疏文件检测、流水线扫描+复制即时启动。

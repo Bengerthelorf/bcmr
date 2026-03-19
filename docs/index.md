@@ -27,7 +27,7 @@ features:
     details: Resume interrupted transfers with mtime, size, or strict BLAKE3 hash checks. Verify integrity after copy.
   - icon: 🌐
     title: Remote Copy (SSH)
-    details: Upload and download files over SSH with SCP-like syntax. No extra tools needed.
+    details: Upload and download over SSH with parallel transfers, smart compression, and per-worker progress. No extra tools needed.
   - icon: ⚡
     title: Fast by Default
     details: Reflink (copy-on-write), copy_file_range on Linux, sparse file detection, and pipeline scan+copy for immediate start.

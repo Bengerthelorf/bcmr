@@ -27,7 +27,7 @@ features:
     details: 支援透過 mtime、檔案大小或 BLAKE3 雜湊校驗續傳中斷的傳輸。複製後可驗證檔案完整性。
   - icon: "\U0001F310"
     title: 遠端複製 (SSH)
-    details: 使用 SCP 風格語法透過 SSH 上傳和下載檔案，無需額外工具。
+    details: 透過 SSH 並行傳輸、智慧壓縮、逐 worker 進度顯示。無需額外工具。
   - icon: "\u26A1"
     title: 預設高效能
     details: Reflink (寫時複製)、Linux copy_file_range、稀疏檔案偵測、流水線掃描+複製即時啟動。
