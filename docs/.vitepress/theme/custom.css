@@ -71,11 +71,26 @@
 .VPHero .VPImage {
   max-width: min(520px, 100%) !important;
   max-height: 520px !important;
+  border-radius: 12px;
 }
 
 .VPHero .text,
 .VPHero .tagline {
   text-wrap: balance;
+}
+
+@media (max-width: 639px) {
+  .VPHero .VPImage {
+    max-width: min(320px, 85vw) !important;
+    max-height: 280px !important;
+  }
+}
+
+@media (min-width: 640px) and (max-width: 959px) {
+  .VPHero .VPImage {
+    max-width: min(400px, 90vw) !important;
+    max-height: 360px !important;
+  }
 }
 
 @media (min-width: 960px) {
