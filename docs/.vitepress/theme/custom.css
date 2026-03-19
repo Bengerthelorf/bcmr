@@ -71,40 +71,11 @@
 .VPHero .VPImage {
   max-width: min(520px, 100%) !important;
   max-height: 520px !important;
-  border-radius: 12px;
 }
 
 .VPHero .text,
 .VPHero .tagline {
   text-wrap: balance;
-}
-
-@media (max-width: 959px) {
-  .VPHero .VPImage {
-    max-width: min(360px, 85vw) !important;
-    max-height: 300px !important;
-  }
-
-  .VPHero .image-container {
-    margin-top: 24px !important;
-    padding: 0 16px;
-  }
-
-  .VPHero .image-container img {
-    width: 100% !important;
-    height: auto !important;
-  }
-}
-
-@media (max-width: 480px) {
-  .VPHero .VPImage {
-    max-width: 90vw !important;
-    max-height: 240px !important;
-  }
-
-  .VPHero .image-container {
-    padding: 0 8px;
-  }
 }
 
 @media (min-width: 960px) {
