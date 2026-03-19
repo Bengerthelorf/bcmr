@@ -80,16 +80,22 @@
 }
 
 @media (max-width: 639px) {
-  .VPHero .VPImage {
-    max-width: min(320px, 85vw) !important;
-    max-height: 280px !important;
+  .VPHero .VPImage,
+  .VPHero .image-container,
+  .VPHero .image-container img {
+    max-width: min(300px, 80vw) !important;
+    max-height: 200px !important;
+    object-fit: contain;
   }
 }
 
 @media (min-width: 640px) and (max-width: 959px) {
-  .VPHero .VPImage {
-    max-width: min(400px, 90vw) !important;
-    max-height: 360px !important;
+  .VPHero .VPImage,
+  .VPHero .image-container,
+  .VPHero .image-container img {
+    max-width: min(400px, 85vw) !important;
+    max-height: 280px !important;
+    object-fit: contain;
   }
 }
 
