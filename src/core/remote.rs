@@ -21,6 +21,14 @@ impl RemotePath {
     pub fn display(&self) -> String {
         format!("{}:{}", self.ssh_target(), self.path)
     }
+
+    pub fn join(&self, subpath: &str) -> Self {
+        Self {
+            user: self.user.clone(),
+            host: self.host.clone(),
+            path: format!("{}/{}", self.path, subpath),
+        }
+    }
 }
 
 impl std::fmt::Display for RemotePath {
@@ -421,6 +429,45 @@ pub async fn download_directory(
         };
         let local_file = local_dst.join(rel_path);
         download_file(&file_remote, &local_file, progress_callback, on_new_file, *size).await?;
+    }
+
+    Ok(())
+}
+
+pub async fn ensure_remote_tree(
+    local_src: &Path,
+    remote: &RemotePath,
+) -> Result<(), BcmrError> {
+    use crate::core::traversal;
+
+    ssh_command(&remote.ssh_target())
+        .arg(format!("mkdir -p '{}'", shell_escape(&remote.path)))
+        .output()
+        .await?;
+
+    let excludes: Vec<regex::Regex> = Vec::new();
+    let mut dirs = Vec::new();
+
+    for entry in traversal::walk(local_src, true, false, 1, &excludes) {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            let rel = path.strip_prefix(local_src)?;
+            dirs.push(rel.to_path_buf());
+        }
+    }
+
+    if !dirs.is_empty() {
+        let mkdir_cmd = dirs
+            .iter()
+            .map(|d| format!("'{}/{}'", shell_escape(&remote.path), shell_escape(&d.display().to_string())))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        ssh_command(&remote.ssh_target())
+            .arg(format!("mkdir -p {}", mkdir_cmd))
+            .output()
+            .await?;
     }
 
     Ok(())

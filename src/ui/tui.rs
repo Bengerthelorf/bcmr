@@ -17,7 +17,6 @@ use std::time::Duration;
 pub struct TuiProgress {
     data: ProgressData,
     start_row: u16,
-    start_col: u16,
     raw_mode_enabled: bool,
     initialized: bool,
     finished: bool,
@@ -30,7 +29,6 @@ impl TuiProgress {
         Ok(Self {
             data,
             start_row: 0,
-            start_col: 0,
             raw_mode_enabled: false,
             initialized: false,
             finished: false,
@@ -41,8 +39,6 @@ impl TuiProgress {
     fn total_lines(&self) -> u16 {
         if self.data.parallel_total > 0 {
             5 + self.data.parallel_total as u16
-        } else if self.data.items_total.is_some() {
-            8
         } else {
             8
         }
@@ -75,7 +71,6 @@ impl TuiProgress {
             }
         }
 
-        self.start_col = 0;
         self.start_row = row;
 
         let _ = enable_raw_mode();
@@ -485,25 +480,11 @@ impl ProgressRenderer for TuiProgress {
     }
 
     fn update_worker(&mut self, slot: usize, file_name: &str, file_size: u64, progress: u64) {
-        if slot < self.data.workers.len() {
-            let w = &mut self.data.workers[slot];
-            w.file_name = file_name.to_string();
-            w.file_size = file_size;
-            w.progress = progress;
-            w.active = true;
-            w.calculate_speed();
-        }
+        self.data.update_worker(slot, file_name, file_size, progress);
     }
 
     fn finish_worker(&mut self, slot: usize) {
-        if slot < self.data.workers.len() {
-            let w = &mut self.data.workers[slot];
-            w.active = false;
-            w.file_name.clear();
-            w.progress = 0;
-            w.file_size = 0;
-            w.speed = 0.0;
-        }
+        self.data.finish_worker(slot);
         let _ = self.redraw();
     }
 

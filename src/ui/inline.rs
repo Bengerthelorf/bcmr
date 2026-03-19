@@ -237,25 +237,11 @@ impl ProgressRenderer for InlineProgress {
     }
 
     fn update_worker(&mut self, slot: usize, file_name: &str, file_size: u64, progress: u64) {
-        if slot < self.data.workers.len() {
-            let w = &mut self.data.workers[slot];
-            w.file_name = file_name.to_string();
-            w.file_size = file_size;
-            w.progress = progress;
-            w.active = true;
-            w.calculate_speed();
-        }
+        self.data.update_worker(slot, file_name, file_size, progress);
     }
 
     fn finish_worker(&mut self, slot: usize) {
-        if slot < self.data.workers.len() {
-            let w = &mut self.data.workers[slot];
-            w.active = false;
-            w.file_name.clear();
-            w.progress = 0;
-            w.file_size = 0;
-            w.speed = 0.0;
-        }
+        self.data.finish_worker(slot);
         let _ = self.redraw();
     }
 

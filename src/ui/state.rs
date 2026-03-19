@@ -96,6 +96,25 @@ impl ProgressData {
         self.workers.iter().filter(|w| w.active).count()
     }
 
+    pub fn update_worker(&mut self, slot: usize, file_name: &str, file_size: u64, progress: u64) {
+        if let Some(w) = self.workers.get_mut(slot) {
+            w.file_name = file_name.to_string();
+            w.file_size = file_size;
+            w.progress = progress;
+            w.active = true;
+        }
+    }
+
+    pub fn finish_worker(&mut self, slot: usize) {
+        if let Some(w) = self.workers.get_mut(slot) {
+            w.active = false;
+            w.file_name.clear();
+            w.progress = 0;
+            w.file_size = 0;
+            w.speed = 0.0;
+        }
+    }
+
     pub fn calculate_speed(&mut self) -> f64 {
         let elapsed = self.last_update.elapsed().as_secs_f64();
         if elapsed < 0.1 {
