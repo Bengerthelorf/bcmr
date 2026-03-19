@@ -24,6 +24,10 @@ reflink = "auto"         # "auto" (default), "force", or "disable"
 sparse = "auto"          # "auto" (default), "force", or "disable"
 
 update_check = "notify"  # "notify" (default), "quiet", or "off"
+
+[scp]
+parallel_transfers = 4   # concurrent SSH transfers (default: 4)
+compression = "auto"     # "auto" (default), "force", or "off"
 ```
 
 ## Progress Settings
@@ -76,6 +80,30 @@ Controls sparse file detection. Can be overridden per-command with `--sparse`.
 | `"disable"` | Write all data, no hole detection |
 
 > **Note:** The config file also accepts `"never"` as an alias for `"disable"`.
+
+## SCP Settings
+
+### `scp.parallel_transfers`
+
+Number of concurrent SSH file transfers for remote copy. Can be overridden per-command with `-P`.
+
+| Value | Description |
+|-------|-------------|
+| `4` | Default — 4 parallel SSH streams |
+| `1` | Sequential transfer (no parallelism) |
+| `N` | Any positive integer |
+
+### `scp.compression`
+
+Controls SSH transport compression for remote transfers.
+
+| Value | Description |
+|-------|-------------|
+| `"auto"` | Smart: enable if >30% of bytes are compressible by extension (default) |
+| `"force"` | Always enable SSH compression (`-o Compression=yes`) |
+| `"off"` | Never compress |
+
+In `auto` mode, known compressed extensions (`.gz`, `.zip`, `.mp4`, `.jpg`, etc.) are treated as incompressible. Compression is enabled only when a significant portion of the data would benefit.
 
 ## Update Check
 

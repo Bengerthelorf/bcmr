@@ -27,6 +27,7 @@ bcmr copy [OPTIONS] <SOURCES>... <DESTINATION>
 | `--sync` | Sync data to disk after copy (fsync) |
 | `--reflink <MODE>` | Copy-on-write: `auto` (default), `force`, `disable` |
 | `--sparse <MODE>` | Sparse file handling: `auto` (default), `force`, `disable` |
+| `-P`, `--parallel <N>` | Parallel SSH transfers for remote copy (default: config value) |
 
 **Examples:**
 
@@ -61,6 +62,9 @@ bcmr copy -s large_file.iso /backup/
 # Remote copy via SSH
 bcmr copy local_file.txt user@host:/remote/path/
 bcmr copy user@host:/remote/file.txt ./local/
+
+# Parallel remote upload (4 workers)
+bcmr copy -P 4 file1.bin file2.bin user@host:/remote/
 ```
 
 ### Resume Modes
