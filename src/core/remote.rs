@@ -322,8 +322,10 @@ pub async fn download_file(
     remote: &RemotePath,
     local_dst: &Path,
     progress_callback: &impl Fn(u64),
+    skip_callback: &impl Fn(u64),
     on_new_file: &impl Fn(&str, u64),
     file_size: u64,
+    opts: &RemoteTransferOptions,
 ) -> Result<(), BcmrError> {
     let file_name = remote
         .path
@@ -338,8 +340,62 @@ pub async fn download_file(
         }
     }
 
+    let mut skip_bytes: u64 = 0;
+    let mut use_append_mode = false;
+
+    if opts.resume || opts.append || opts.strict {
+        if local_dst.exists() {
+            let local_size = local_dst.metadata()?.len();
+            if local_size == file_size {
+                if opts.strict {
+                    let local_path = local_dst.to_path_buf();
+                    let local_hash = tokio::task::spawn_blocking(move || {
+                        crate::core::checksum::calculate_hash(&local_path)
+                    }).await.map_err(|e| BcmrError::InvalidInput(e.to_string()))??;
+                    let remote_hash = remote_file_hash(remote, None).await?;
+                    if local_hash == remote_hash {
+                        skip_callback(file_size);
+                        return Ok(());
+                    }
+                    // Hashes differ: re-download from scratch
+                } else {
+                    skip_callback(file_size);
+                    return Ok(());
+                }
+            } else if local_size < file_size {
+                if opts.strict {
+                    let remote_partial_hash = remote_file_hash(remote, Some(local_size)).await?;
+                    let local_path = local_dst.to_path_buf();
+                    let local_hash = tokio::task::spawn_blocking(move || {
+                        crate::core::checksum::calculate_hash(&local_path)
+                    }).await.map_err(|e| BcmrError::InvalidInput(e.to_string()))??;
+                    if local_hash == remote_partial_hash {
+                        skip_bytes = local_size;
+                        use_append_mode = true;
+                    }
+                    // Hashes differ: re-download from scratch
+                } else {
+                    skip_bytes = local_size;
+                    use_append_mode = true;
+                }
+            }
+            // local_size > file_size: re-download from scratch
+        }
+    }
+
+    if skip_bytes > 0 {
+        skip_callback(skip_bytes);
+    }
+
+    let ssh_cmd = if use_append_mode {
+        // tail -c +N is 1-indexed: +1 means from byte 0, so skip_bytes+1 starts after skipped portion
+        format!("tail -c +{} '{}'", skip_bytes + 1, shell_escape(&remote.path))
+    } else {
+        format!("cat '{}'", shell_escape(&remote.path))
+    };
+
     let mut child = ssh_command(&remote.ssh_target())
-        .arg(format!("cat '{}'", shell_escape(&remote.path)))
+        .arg(ssh_cmd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
@@ -349,7 +405,14 @@ pub async fn download_file(
     })?;
     let mut stderr_pipe = child.stderr.take();
 
-    let mut dst_file = tokio::fs::File::create(local_dst).await?;
+    let mut dst_file = if use_append_mode {
+        tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(local_dst)
+            .await?
+    } else {
+        tokio::fs::File::create(local_dst).await?
+    };
     let mut buffer = vec![0u8; 1024 * 1024];
 
     loop {
@@ -620,7 +683,9 @@ pub async fn download_directory(
     remote: &RemotePath,
     local_dst: &Path,
     progress_callback: &impl Fn(u64),
+    skip_callback: &impl Fn(u64),
     on_new_file: &impl Fn(&str, u64),
+    opts: &RemoteTransferOptions,
 ) -> Result<(), BcmrError> {
     let entries = remote_list_files(remote).await?;
 
@@ -643,7 +708,7 @@ pub async fn download_directory(
             path: format!("{}/{}", remote.path, rel_path),
         };
         let local_file = local_dst.join(rel_path);
-        download_file(&file_remote, &local_file, progress_callback, on_new_file, *size).await?;
+        download_file(&file_remote, &local_file, progress_callback, skip_callback, on_new_file, *size, opts).await?;
     }
 
     Ok(())

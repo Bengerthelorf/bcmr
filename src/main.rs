@@ -372,7 +372,7 @@ async fn run_parallel_transfers(
             let result = if item.is_upload {
                 remote::upload_file(&item.local_path, &item.remote, &progress_cb, &skip_cb, &noop_file_cb, &task_opts).await
             } else {
-                remote::download_file(&item.remote, &item.local_path, &progress_cb, &noop_file_cb, item.size).await
+                remote::download_file(&item.remote, &item.local_path, &progress_cb, &skip_cb, &noop_file_cb, item.size, &task_opts).await
             };
 
             if let Err(e) = result {
@@ -669,6 +669,7 @@ async fn handle_remote_download(
         for (rsrc, _) in &remote_sources {
             let info = remote::remote_stat(rsrc).await?;
             let inc = runner.inc_callback();
+            let skip = runner.skip_callback();
             let file_cb = runner.file_callback();
 
             if info.is_dir {
@@ -684,14 +685,14 @@ async fn handle_remote_download(
                 if !local_dir.exists() {
                     tokio::fs::create_dir_all(&local_dir).await?;
                 }
-                remote::download_directory(rsrc, &local_dir, &inc, &file_cb).await?;
+                remote::download_directory(rsrc, &local_dir, &inc, &skip, &file_cb, &opts).await?;
             } else {
                 let local_path = if dest_local.is_dir() {
                     dest_local.join(rsrc.path.rsplit('/').next().unwrap_or(&rsrc.path))
                 } else {
                     dest_local.to_path_buf()
                 };
-                remote::download_file(rsrc, &local_path, &inc, &file_cb, info.size).await?;
+                remote::download_file(rsrc, &local_path, &inc, &skip, &file_cb, info.size, &opts).await?;
             }
         }
     }
