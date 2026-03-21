@@ -295,9 +295,16 @@ impl TuiProgress {
             );
             draw_line_content(&mut stdout, 3, &workers_header)?;
 
+            let num_width = if self.data.parallel_total >= 10 { 2 } else { 1 };
+            // Worker bar is fixed width; extra space goes to file name
+            let worker_bar_width = 20usize.min(box_width.saturating_sub(30));
+            // Fixed parts: "│ " (2) + "[N] " (num_width+3) + " [" (2) + "] " (2) + "100%" (4) + " xx.xx MiB/s" (13) + " │" (2)
+            let fixed_chars = num_width + 26;
+            let name_max = box_width.saturating_sub(worker_bar_width + fixed_chars).max(8);
+
             for (i, worker) in self.data.workers.iter_mut().enumerate() {
                 let row_offset = 4 + i as u16;
-                let line = if worker.active {
+                if worker.active {
                     let pct = if worker.file_size > 0 {
                         (worker.progress as f64 / worker.file_size as f64 * 100.0).min(100.0) as u16
                     } else {
@@ -309,10 +316,6 @@ impl TuiProgress {
                     } else {
                         "-- /s".to_string()
                     };
-                    // [N] name [bar] pct% spd → dynamic name width based on terminal
-                    // Fixed parts: "[N] " (4) + " [" (2) + "] " (2) + "100%" (4) + " xx.xx MiB/s" (13) + borders (3) = ~28
-                    let worker_bar_width = (box_width.saturating_sub(40)).max(10);
-                    let name_max = box_width.saturating_sub(worker_bar_width + 28).max(12);
                     let display_name = if worker.file_name.chars().count() > name_max {
                         let end = worker.file_name.floor_char_boundary(name_max.saturating_sub(3));
                         format!("{}...", &worker.file_name[..end])
@@ -321,20 +324,36 @@ impl TuiProgress {
                     };
                     let filled = (worker_bar_width * pct as usize / 100).min(worker_bar_width);
                     let empty = worker_bar_width - filled;
-                    format!(
-                        "[{}] {:width$} [{}{}] {:>3}% {}",
-                        i + 1,
-                        display_name,
-                        theme.bar_complete_char.repeat(filled),
-                        theme.bar_incomplete_char.repeat(empty),
-                        pct,
-                        spd_str,
-                        width = name_max,
-                    )
+
+                    // Render with colors like the Total bar
+                    execute!(stdout, MoveTo(0, current_row + row_offset), SetForegroundColor(border_color))?;
+                    write!(stdout, "{} ", vertical)?;
+                    execute!(stdout, SetForegroundColor(text_color))?;
+                    write!(stdout, "[{:>width$}] {:name_w$} [", i + 1, display_name, width = num_width, name_w = name_max)?;
+
+                    for j in 0..filled {
+                        let frac = j as f32 / worker_bar_width as f32;
+                        let color = get_gradient_color(&theme.bar_gradient, frac);
+                        execute!(stdout, SetForegroundColor(color))?;
+                        write!(stdout, "{}", theme.bar_complete_char)?;
+                    }
+                    execute!(stdout, SetForegroundColor(parse_hex_color("#444444")))?;
+                    write!(stdout, "{}", theme.bar_incomplete_char.repeat(empty))?;
+
+                    execute!(stdout, SetForegroundColor(text_color))?;
+                    write!(stdout, "] {:>3}% {}", pct, spd_str)?;
+
+                    let content_len = num_width + 3 + name_max + 2 + worker_bar_width + 2 + 4 + 1 + spd_str.len();
+                    let padding = box_width.saturating_sub(content_len + 3);
+                    write!(stdout, "{}", " ".repeat(padding))?;
+
+                    execute!(stdout, MoveTo(right_border_col, current_row + row_offset), SetForegroundColor(border_color))?;
+                    write!(stdout, "{}", vertical)?;
+                    execute!(stdout, Clear(ClearType::UntilNewLine))?;
                 } else {
-                    format!("[{}] idle", i + 1)
-                };
-                draw_line_content(&mut stdout, row_offset, &line)?;
+                    let line = format!("[{:>width$}] idle", i + 1, width = num_width);
+                    draw_line_content(&mut stdout, row_offset, &line)?;
+                }
             }
 
             let bottom_row = 4 + self.data.parallel_total as u16;
