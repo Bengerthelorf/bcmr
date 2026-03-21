@@ -98,3 +98,19 @@ bcmr completions powershell | Out-String | Invoke-Expression
 bcmr co<TAB>       → bcmr copy
 bcmr copy -<TAB>   → --recursive --preserve --force --verify ...
 ```
+
+::: tip 别名补全（Zsh）
+使用 `bcmr init zsh --cmd <前缀>` 时，别名命令（如 `bcp`、`bmv`、`brm`）的补全会自动包含，无需额外配置。只需确保 `~/.zshrc` 中同时有：
+
+```bash
+eval "$(bcmr init zsh --cmd b)"
+eval "$(bcmr completions zsh)"
+```
+
+之后即可直接对别名命令进行 tab 补全：
+
+```
+bcp -<TAB>   → --recursive --preserve --force --verify ...
+bmv -<TAB>   → --recursive --preserve --force --verify ...
+```
+:::

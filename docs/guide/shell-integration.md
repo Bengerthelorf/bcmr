@@ -101,3 +101,19 @@ After setup, you can tab-complete commands and flags:
 bcmr co<TAB>       → bcmr copy
 bcmr copy -<TAB>   → --recursive --preserve --force --verify ...
 ```
+
+::: tip Alias Completions (Zsh)
+When using `bcmr init zsh --cmd <prefix>`, completions for aliased commands (e.g., `bcp`, `bmv`, `brm`) are automatically included. No extra configuration needed — just make sure `eval "$(bcmr completions zsh)"` is also in your `~/.zshrc`:
+
+```bash
+eval "$(bcmr init zsh --cmd b)"
+eval "$(bcmr completions zsh)"
+```
+
+Then you can tab-complete aliased commands directly:
+
+```
+bcp -<TAB>   → --recursive --preserve --force --verify ...
+bmv -<TAB>   → --recursive --preserve --force --verify ...
+```
+:::

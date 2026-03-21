@@ -59,7 +59,47 @@ function {prefix}mv{suffix}() {{
 function {prefix}rm{suffix}() {{
     "{exe_path}" remove "$@"
 }}
+"#,
+                    shell_name = shell,
+                    prefix = prefix,
+                    suffix = suffix,
+                    exe_path = exe_path
+                ));
 
+                // Add completion wrappers for zsh aliases
+                if matches!(shell, Shell::Zsh) {
+                    script.push_str(&format!(
+                        r#"
+# Completion wrappers for aliased commands
+# These forward completions to the main _bcmr function
+_{prefix}cp{suffix}() {{
+    words=("bcmr" "copy" "${{words[@]:1}}")
+    (( CURRENT += 1 ))
+    _bcmr "$@"
+}}
+compdef _{prefix}cp{suffix} {prefix}cp{suffix}
+
+_{prefix}mv{suffix}() {{
+    words=("bcmr" "move" "${{words[@]:1}}")
+    (( CURRENT += 1 ))
+    _bcmr "$@"
+}}
+compdef _{prefix}mv{suffix} {prefix}mv{suffix}
+
+_{prefix}rm{suffix}() {{
+    words=("bcmr" "remove" "${{words[@]:1}}")
+    (( CURRENT += 1 ))
+    _bcmr "$@"
+}}
+compdef _{prefix}rm{suffix} {prefix}rm{suffix}
+"#,
+                        prefix = prefix,
+                        suffix = suffix,
+                    ));
+                }
+
+                script.push_str(&format!(
+                    r#"
 # =============================================================================
 #
 # To initialize bcmr, add this to your shell configuration file:
@@ -73,9 +113,6 @@ function {prefix}rm{suffix}() {{
 # =============================================================================
 "#,
                     shell_name = shell,
-                    prefix = prefix,
-                    suffix = suffix,
-                    exe_path = exe_path
                 ));
             }
 
