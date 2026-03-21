@@ -375,6 +375,7 @@ pub async fn upload_file(
     remote: &RemotePath,
     progress_callback: &impl Fn(u64),
     on_new_file: &impl Fn(&str, u64),
+    preserve: bool,
 ) -> Result<(), BcmrError> {
     let file_size = local_src.metadata()?.len();
     let file_name = local_src
@@ -425,7 +426,59 @@ pub async fn upload_file(
         )));
     }
 
+    if preserve {
+        preserve_remote_attrs(local_src, remote).await?;
+    }
+
     Ok(())
+}
+
+async fn preserve_remote_attrs(local_src: &Path, remote: &RemotePath) -> Result<(), BcmrError> {
+    let meta = local_src.metadata()?;
+
+    let mode = {
+        #[cfg(unix)]
+        { use std::os::unix::fs::PermissionsExt; meta.permissions().mode() & 0o7777 }
+        #[cfg(not(unix))]
+        { 0o644u32 }
+    };
+
+    let mtime_secs = meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let ts = unix_to_touch_ts(mtime_secs as i64);
+    let cmd = format!(
+        "touch -t '{}' '{}'; chmod {:o} '{}'",
+        ts, shell_escape(&remote.path), mode, shell_escape(&remote.path)
+    );
+    let _ = ssh_command(&remote.ssh_target()).arg(cmd).output().await?;
+    Ok(())
+}
+
+/// Format unix timestamp as YYYYMMDDhhmm.ss for `touch -t`
+fn unix_to_touch_ts(secs: i64) -> String {
+    let days = secs / 86400;
+    let rem = secs % 86400;
+    let hours = rem / 3600;
+    let minutes = (rem % 3600) / 60;
+    let seconds = rem % 60;
+
+    // Civil days from epoch to y/m/d (Howard Hinnant's algorithm)
+    let z = days as i32 + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i32 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!("{:04}{:02}{:02}{:02}{:02}.{:02}", y, m, d, hours, minutes, seconds)
 }
 
 pub async fn download_directory(
@@ -506,6 +559,7 @@ pub async fn upload_directory(
     progress_callback: &impl Fn(u64),
     on_new_file: &impl Fn(&str, u64),
     excludes: &[regex::Regex],
+    preserve: bool,
 ) -> Result<(), BcmrError> {
     use crate::core::traversal;
 
@@ -555,7 +609,7 @@ pub async fn upload_directory(
             host: remote.host.clone(),
             path: format!("{}/{}", remote.path, rel_path.display()),
         };
-        upload_file(local_path, &file_remote, progress_callback, on_new_file).await?;
+        upload_file(local_path, &file_remote, progress_callback, on_new_file, preserve).await?;
     }
 
     Ok(())

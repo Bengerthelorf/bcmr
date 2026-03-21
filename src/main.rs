@@ -310,6 +310,7 @@ async fn run_parallel_transfers(
     parallel: usize,
     progress: &Arc<Mutex<Box<dyn ProgressRenderer>>>,
     append: bool,
+    preserve: bool,
 ) -> Result<(), BcmrError> {
     use crate::core::remote;
 
@@ -371,7 +372,7 @@ async fn run_parallel_transfers(
             }
 
             let result = if item.is_upload {
-                remote::upload_file(&item.local_path, &item.remote, &progress_cb, &noop_file_cb).await
+                remote::upload_file(&item.local_path, &item.remote, &progress_cb, &noop_file_cb, preserve).await
             } else {
                 remote::download_file(&item.remote, &item.local_path, &progress_cb, &noop_file_cb, item.size).await
             };
@@ -565,7 +566,7 @@ async fn handle_remote_upload(
             }
         }
 
-        run_parallel_transfers(items, parallel, runner.progress(), args.is_append()).await
+        run_parallel_transfers(items, parallel, runner.progress(), args.is_append(), args.is_preserve()).await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
     } else {
         let append = args.is_append();
@@ -581,10 +582,10 @@ async fn handle_remote_upload(
                         }
                     }
                 }
-                remote::upload_file(src, &file_remote, &runner.inc_callback(), &runner.file_callback()).await?;
+                remote::upload_file(src, &file_remote, &runner.inc_callback(), &runner.file_callback(), args.is_preserve()).await?;
             } else if src.is_dir() && args.is_recursive() {
                 let dir_remote = rdest.join(&src.file_name().unwrap().to_string_lossy());
-                remote::upload_directory(src, &dir_remote, &runner.inc_callback(), &runner.file_callback(), &excludes).await?;
+                remote::upload_directory(src, &dir_remote, &runner.inc_callback(), &runner.file_callback(), &excludes, args.is_preserve()).await?;
             }
         }
     }
@@ -658,7 +659,7 @@ async fn handle_remote_download(
             }
         }
 
-        run_parallel_transfers(items, parallel, runner.progress(), args.is_append()).await
+        run_parallel_transfers(items, parallel, runner.progress(), args.is_append(), args.is_preserve()).await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
     } else {
         for (rsrc, _) in &remote_sources {
