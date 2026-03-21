@@ -399,13 +399,13 @@ async fn run_parallel_transfers(
 fn collect_upload_files(
     local_src: &std::path::Path,
     remote_base: &crate::core::remote::RemotePath,
+    excludes: &[regex::Regex],
 ) -> Result<Vec<TransferItem>> {
     use crate::core::traversal;
 
-    let excludes: Vec<regex::Regex> = Vec::new();
     let mut items = Vec::new();
 
-    for entry in traversal::walk(local_src, true, false, 1, &excludes) {
+    for entry in traversal::walk(local_src, true, false, 1, excludes) {
         let entry = entry?;
         let path = entry.path();
         let rel = path.strip_prefix(local_src)?;
@@ -507,6 +507,7 @@ async fn handle_remote_upload(
 ) -> Result<()> {
     use crate::core::remote::{self, parse_remote_path};
 
+    let excludes = args.compile_excludes()?;
     let mut total_size = 0u64;
     for src in sources {
         if parse_remote_path(&src.to_string_lossy()).is_some() {
@@ -523,6 +524,21 @@ async fn handle_remote_upload(
         } else {
             bail!("Source '{}' not found", src.display());
         }
+    }
+
+    if args.is_dry_run() {
+        println!("Dry-run: would upload {} to {}", format_bytes(total_size as f64), rdest);
+        for src in sources {
+            if src.is_file() {
+                println!("  {} -> {}", src.display(), resolve_upload_remote(src, rdest, sources.len() > 1));
+            } else if src.is_dir() && args.is_recursive() {
+                let dir_remote = rdest.join(&src.file_name().unwrap().to_string_lossy());
+                for item in collect_upload_files(src, &dir_remote, &excludes)? {
+                    println!("  {} -> {}", item.local_path.display(), item.remote);
+                }
+            }
+        }
+        return Ok(());
     }
 
     let runner = ProgressRunner::new(total_size, is_plain_mode(args), false)?;
@@ -545,7 +561,7 @@ async fn handle_remote_upload(
             } else if src.is_dir() && args.is_recursive() {
                 let dir_remote = rdest.join(&src.file_name().unwrap().to_string_lossy());
                 remote::ensure_remote_tree(src, &dir_remote).await?;
-                items.extend(collect_upload_files(src, &dir_remote)?);
+                items.extend(collect_upload_files(src, &dir_remote, &excludes)?);
             }
         }
 
@@ -568,7 +584,7 @@ async fn handle_remote_upload(
                 remote::upload_file(src, &file_remote, &runner.inc_callback(), &runner.file_callback()).await?;
             } else if src.is_dir() && args.is_recursive() {
                 let dir_remote = rdest.join(&src.file_name().unwrap().to_string_lossy());
-                remote::upload_directory(src, &dir_remote, &runner.inc_callback(), &runner.file_callback()).await?;
+                remote::upload_directory(src, &dir_remote, &runner.inc_callback(), &runner.file_callback(), &excludes).await?;
             }
         }
     }

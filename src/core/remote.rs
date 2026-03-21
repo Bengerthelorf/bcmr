@@ -505,6 +505,7 @@ pub async fn upload_directory(
     remote: &RemotePath,
     progress_callback: &impl Fn(u64),
     on_new_file: &impl Fn(&str, u64),
+    excludes: &[regex::Regex],
 ) -> Result<(), BcmrError> {
     use crate::core::traversal;
 
@@ -520,7 +521,6 @@ pub async fn upload_directory(
         )));
     }
 
-    let excludes: Vec<regex::Regex> = Vec::new();
     let mut dirs = Vec::new();
     let mut files = Vec::new();
 
