@@ -188,7 +188,6 @@ pub async fn validate_ssh_connection(remote: &RemotePath) -> Result<(), BcmrErro
     Ok(())
 }
 
-/// Returns the size of a remote file, or None if it doesn't exist.
 pub async fn remote_file_size(remote: &RemotePath) -> Result<Option<u64>, BcmrError> {
     let output = ssh_command(&remote.ssh_target())
         .arg(format!(
@@ -376,6 +375,7 @@ pub async fn upload_file(
     progress_callback: &impl Fn(u64),
     on_new_file: &impl Fn(&str, u64),
     preserve: bool,
+    verify: bool,
 ) -> Result<(), BcmrError> {
     let file_size = local_src.metadata()?.len();
     let file_name = local_src
@@ -426,6 +426,14 @@ pub async fn upload_file(
         )));
     }
 
+    if verify {
+        if !verify_remote_file(local_src, remote).await? {
+            return Err(BcmrError::InvalidInput(format!(
+                "Verification failed: '{}' -> {}", local_src.display(), remote
+            )));
+        }
+    }
+
     if preserve {
         preserve_remote_attrs(local_src, remote).await?;
     }
@@ -458,7 +466,34 @@ async fn preserve_remote_attrs(local_src: &Path, remote: &RemotePath) -> Result<
     Ok(())
 }
 
-/// Format unix timestamp as YYYYMMDDhhmm.ss for `touch -t`
+pub async fn verify_remote_file(local_src: &Path, remote: &RemotePath) -> Result<bool, BcmrError> {
+    use crate::core::checksum;
+
+    // Compute local BLAKE3 hash
+    let local_path = local_src.to_path_buf();
+    let local_hash = tokio::task::spawn_blocking(move || {
+        checksum::calculate_hash(&local_path)
+    }).await.map_err(|e| BcmrError::InvalidInput(e.to_string()))??;
+
+    // Compute remote BLAKE3 by streaming the file back through SSH
+    let output = ssh_command(&remote.ssh_target())
+        .arg(format!("cat '{}'", shell_escape(&remote.path)))
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        return Err(BcmrError::InvalidInput(format!(
+            "Failed to read remote file for verification: '{}'", remote
+        )));
+    }
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&output.stdout);
+    let remote_hash = hasher.finalize().to_hex().to_string();
+
+    Ok(local_hash == remote_hash)
+}
+
 fn unix_to_touch_ts(secs: i64) -> String {
     let days = secs / 86400;
     let rem = secs % 86400;
@@ -560,6 +595,7 @@ pub async fn upload_directory(
     on_new_file: &impl Fn(&str, u64),
     excludes: &[regex::Regex],
     preserve: bool,
+    verify: bool,
 ) -> Result<(), BcmrError> {
     use crate::core::traversal;
 
@@ -609,7 +645,7 @@ pub async fn upload_directory(
             host: remote.host.clone(),
             path: format!("{}/{}", remote.path, rel_path.display()),
         };
-        upload_file(local_path, &file_remote, progress_callback, on_new_file, preserve).await?;
+        upload_file(local_path, &file_remote, progress_callback, on_new_file, preserve, verify).await?;
     }
 
     Ok(())
