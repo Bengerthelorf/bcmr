@@ -343,43 +343,38 @@ pub async fn download_file(
     let mut skip_bytes: u64 = 0;
     let mut use_append_mode = false;
 
-    if opts.resume || opts.append || opts.strict {
-        if local_dst.exists() {
-            let local_size = local_dst.metadata()?.len();
-            if local_size == file_size {
-                if opts.strict {
-                    let local_path = local_dst.to_path_buf();
-                    let local_hash = tokio::task::spawn_blocking(move || {
-                        crate::core::checksum::calculate_hash(&local_path)
-                    }).await.map_err(|e| BcmrError::InvalidInput(e.to_string()))??;
-                    let remote_hash = remote_file_hash(remote, None).await?;
-                    if local_hash == remote_hash {
-                        skip_callback(file_size);
-                        return Ok(());
-                    }
-                    // Hashes differ: re-download from scratch
-                } else {
+    if (opts.resume || opts.append || opts.strict) && local_dst.exists() {
+        let local_size = local_dst.metadata()?.len();
+        if local_size == file_size {
+            if opts.strict {
+                let local_path = local_dst.to_path_buf();
+                let local_hash = tokio::task::spawn_blocking(move || {
+                    crate::core::checksum::calculate_hash(&local_path)
+                }).await.map_err(|e| BcmrError::InvalidInput(e.to_string()))??;
+                let remote_hash = remote_file_hash(remote, None).await?;
+                if local_hash == remote_hash {
                     skip_callback(file_size);
                     return Ok(());
                 }
-            } else if local_size < file_size {
-                if opts.strict {
-                    let remote_partial_hash = remote_file_hash(remote, Some(local_size)).await?;
-                    let local_path = local_dst.to_path_buf();
-                    let local_hash = tokio::task::spawn_blocking(move || {
-                        crate::core::checksum::calculate_hash(&local_path)
-                    }).await.map_err(|e| BcmrError::InvalidInput(e.to_string()))??;
-                    if local_hash == remote_partial_hash {
-                        skip_bytes = local_size;
-                        use_append_mode = true;
-                    }
-                    // Hashes differ: re-download from scratch
-                } else {
+            } else {
+                skip_callback(file_size);
+                return Ok(());
+            }
+        } else if local_size < file_size {
+            if opts.strict {
+                let remote_partial_hash = remote_file_hash(remote, Some(local_size)).await?;
+                let local_path = local_dst.to_path_buf();
+                let local_hash = tokio::task::spawn_blocking(move || {
+                    crate::core::checksum::calculate_hash(&local_path)
+                }).await.map_err(|e| BcmrError::InvalidInput(e.to_string()))??;
+                if local_hash == remote_partial_hash {
                     skip_bytes = local_size;
                     use_append_mode = true;
                 }
+            } else {
+                skip_bytes = local_size;
+                use_append_mode = true;
             }
-            // local_size > file_size: re-download from scratch
         }
     }
 
@@ -507,7 +502,6 @@ pub async fn upload_file(
         if let Ok(Some(remote_size)) = remote_file_size(remote).await {
             if remote_size == file_size {
                 if opts.strict {
-                    // Full hash comparison to verify the file is identical
                     let local_path = local_src.to_path_buf();
                     let local_hash = tokio::task::spawn_blocking(move || {
                         crate::core::checksum::calculate_hash(&local_path)
@@ -517,14 +511,12 @@ pub async fn upload_file(
                         skip_callback(file_size);
                         return Ok(());
                     }
-                    // Hashes differ: overwrite from scratch
                 } else {
                     skip_callback(file_size);
                     return Ok(());
                 }
             } else if remote_size < file_size {
                 if opts.strict {
-                    // Verify the partial data matches before resuming
                     let local_path = local_src.to_path_buf();
                     let local_partial = tokio::task::spawn_blocking(move || {
                         crate::core::checksum::calculate_partial_hash(&local_path, remote_size)
@@ -534,13 +526,11 @@ pub async fn upload_file(
                         skip_bytes = remote_size;
                         use_append_mode = true;
                     }
-                    // Hashes differ: overwrite from scratch
                 } else {
                     skip_bytes = remote_size;
                     use_append_mode = true;
                 }
             }
-            // remote_size > file_size: overwrite from scratch
         }
     }
 
@@ -561,7 +551,6 @@ pub async fn upload_file(
 
     let mut src_file = tokio::fs::File::open(local_src).await?;
 
-    // Seek past already-transferred bytes
     if skip_bytes > 0 {
         use tokio::io::AsyncSeekExt;
         src_file.seek(std::io::SeekFrom::Start(skip_bytes)).await?;
@@ -588,12 +577,10 @@ pub async fn upload_file(
         )));
     }
 
-    if opts.verify {
-        if !verify_remote_file(local_src, remote).await? {
-            return Err(BcmrError::InvalidInput(format!(
-                "Verification failed: '{}' -> {}", local_src.display(), remote
-            )));
-        }
+    if opts.verify && !verify_remote_file(local_src, remote).await? {
+        return Err(BcmrError::InvalidInput(format!(
+            "Verification failed: '{}' -> {}", local_src.display(), remote
+        )));
     }
 
     if opts.preserve {
@@ -632,13 +619,11 @@ async fn preserve_remote_attrs(local_src: &Path, remote: &RemotePath) -> Result<
 pub async fn verify_remote_file(local_src: &Path, remote: &RemotePath) -> Result<bool, BcmrError> {
     use crate::core::checksum;
 
-    // Compute local BLAKE3 hash
     let local_path = local_src.to_path_buf();
     let local_hash = tokio::task::spawn_blocking(move || {
         checksum::calculate_hash(&local_path)
     }).await.map_err(|e| BcmrError::InvalidInput(e.to_string()))??;
 
-    // Compute remote BLAKE3 by streaming the file back through SSH
     let output = ssh_command(&remote.ssh_target())
         .arg(format!("cat '{}'", shell_escape(&remote.path)))
         .output()
@@ -779,7 +764,7 @@ pub async fn upload_directory(
     let mut dirs = Vec::new();
     let mut files = Vec::new();
 
-    for entry in traversal::walk(local_src, true, false, 1, &excludes) {
+    for entry in traversal::walk(local_src, true, false, 1, excludes) {
         let entry = entry?;
         let path = entry.path();
         let rel = path.strip_prefix(local_src)?;

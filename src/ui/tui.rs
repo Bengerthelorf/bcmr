@@ -336,7 +336,6 @@ impl TuiProgress {
                     let filled = (worker_bar_width * pct as usize / 100).min(worker_bar_width);
                     let empty = worker_bar_width - filled;
 
-                    // Render with colors like the Total bar
                     execute!(stdout, MoveTo(0, current_row + row_offset), SetForegroundColor(border_color))?;
                     write!(stdout, "{} ", vertical)?;
                     execute!(stdout, SetForegroundColor(text_color))?;
@@ -541,7 +540,6 @@ impl ProgressRenderer for TuiProgress {
         // If suspended, the signal handler already cleaned up raw mode.
         let was_suspended = self.suspended.load(Ordering::SeqCst);
 
-        // Make sure to show final progress state
         let _ = self.redraw();
 
         if self.raw_mode_enabled && !was_suspended {
@@ -552,7 +550,6 @@ impl ProgressRenderer for TuiProgress {
             println!();
         }
 
-        // Print a final overall summary line
         let elapsed = self.data.elapsed();
         let avg_bps = self.data.average_bytes_per_sec().unwrap_or(0.0);
         println!(
