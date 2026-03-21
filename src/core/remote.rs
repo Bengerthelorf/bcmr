@@ -766,14 +766,14 @@ async fn get_remote_attrs(remote: &RemotePath) -> Result<(i64, u32), BcmrError> 
     Ok((mtime_secs, mode))
 }
 
-fn apply_local_attrs(local_path: &Path, mtime_secs: i64, mode: u32) -> Result<(), BcmrError> {
+fn apply_local_attrs(local_path: &Path, mtime_secs: i64, _mode: u32) -> Result<(), BcmrError> {
     let mtime = filetime::FileTime::from_unix_time(mtime_secs, 0);
     filetime::set_file_mtime(local_path, mtime)?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(local_path, std::fs::Permissions::from_mode(mode))?;
+        std::fs::set_permissions(local_path, std::fs::Permissions::from_mode(_mode))?;
     }
 
     Ok(())
