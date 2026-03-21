@@ -309,14 +309,16 @@ impl TuiProgress {
                     } else {
                         "-- /s".to_string()
                     };
-                    let name_max = 20usize;
-                    let display_name = if worker.file_name.len() > name_max {
+                    // [N] name [bar] pct% spd → dynamic name width based on terminal
+                    // Fixed parts: "[N] " (4) + " [" (2) + "] " (2) + "100%" (4) + " xx.xx MiB/s" (13) + borders (3) = ~28
+                    let worker_bar_width = (box_width.saturating_sub(40)).max(10);
+                    let name_max = box_width.saturating_sub(worker_bar_width + 28).max(12);
+                    let display_name = if worker.file_name.chars().count() > name_max {
                         let end = worker.file_name.floor_char_boundary(name_max.saturating_sub(3));
                         format!("{}...", &worker.file_name[..end])
                     } else {
                         worker.file_name.clone()
                     };
-                    let worker_bar_width = (box_width.saturating_sub(40)).max(10);
                     let filled = (worker_bar_width * pct as usize / 100).min(worker_bar_width);
                     let empty = worker_bar_width - filled;
                     format!(
@@ -476,6 +478,8 @@ impl ProgressRenderer for TuiProgress {
 
     fn set_parallel_mode(&mut self, worker_count: usize) {
         self.data.init_workers(worker_count);
+        // Reinitialize to recalculate start_row for the new total_lines
+        self.initialized = false;
         let _ = self.redraw();
     }
 

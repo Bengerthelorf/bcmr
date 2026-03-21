@@ -133,8 +133,11 @@ impl InlineProgress {
                     } else {
                         0
                     };
-                    let name_max = 12usize;
-                    let display_name = if worker.file_name.len() > name_max {
+                    // Dynamic name width: divide available space among active workers
+                    let active = self.data.active_worker_count().max(1);
+                    let per_worker = term_width.saturating_sub(active * 14) / active;
+                    let name_max = per_worker.max(12);
+                    let display_name = if worker.file_name.chars().count() > name_max {
                         let end = worker.file_name.floor_char_boundary(name_max.saturating_sub(3));
                         format!("{}...", &worker.file_name[..end])
                     } else {
