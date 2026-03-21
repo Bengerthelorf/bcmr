@@ -44,18 +44,19 @@ impl WorkerState {
 pub struct ProgressData {
     pub total_bytes: u64,
     pub current_bytes: u64,
+    pub skipped_bytes: u64,
     pub current_file: String,
     pub current_file_size: u64,
     pub current_file_progress: u64,
 
     pub start_time: Instant,
     pub last_update: Instant,
-    pub last_bytes: u64,
+    pub last_transferred: u64,
     pub last_speed: f64,
 
     pub operation_type: String,
-    pub items_total: Option<usize>, // Total number of items to process
-    pub items_processed: usize,     // Number of items processed
+    pub items_total: Option<usize>,
+    pub items_processed: usize,
     pub scanning: bool,
     pub files_found: u64,
     pub workers: Vec<WorkerState>,
@@ -68,13 +69,14 @@ impl ProgressData {
         Self {
             total_bytes,
             current_bytes: 0,
+            skipped_bytes: 0,
             current_file: String::new(),
             current_file_size: 0,
             current_file_progress: 0,
 
             start_time: now,
             last_update: now,
-            last_bytes: 0,
+            last_transferred: 0,
             last_speed: 0.0,
 
             operation_type: String::new(),
@@ -125,7 +127,9 @@ impl ProgressData {
             return self.last_speed;
         }
 
-        let bytes_per_sec = (self.current_bytes - self.last_bytes) as f64 / elapsed;
+        // Speed based on actually transferred bytes, not skipped
+        let transferred = self.current_bytes - self.skipped_bytes;
+        let bytes_per_sec = (transferred - self.last_transferred) as f64 / elapsed;
         let speed = bytes_per_sec / (1024.0 * 1024.0);
 
         self.last_speed = if self.last_speed > 0.0 {
@@ -135,9 +139,14 @@ impl ProgressData {
         };
 
         self.last_update = Instant::now();
-        self.last_bytes = self.current_bytes;
+        self.last_transferred = transferred;
 
         self.last_speed
+    }
+
+    pub fn inc_skipped(&mut self, delta: u64) {
+        self.current_bytes += delta;
+        self.skipped_bytes += delta;
     }
 
     pub fn estimate_eta(&self) -> Option<Duration> {

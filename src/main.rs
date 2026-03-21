@@ -124,6 +124,11 @@ impl ProgressRunner {
         move |n| p.lock().inc_current(n)
     }
 
+    fn skip_callback(&self) -> impl Fn(u64) + Send + Sync + Clone + 'static {
+        let p = Arc::clone(&self.progress);
+        move |n| p.lock().inc_skipped(n)
+    }
+
     fn file_callback(&self) -> impl Fn(&str, u64) + Send + Sync + Clone + 'static {
         let p = Arc::clone(&self.progress);
         move |name, size| p.lock().set_current_file(name, size)
@@ -362,7 +367,7 @@ async fn run_parallel_transfers(
             if task_opts.append && item.is_upload {
                 if let Ok(Some(remote_size)) = remote::remote_file_size(&item.remote).await {
                     if remote_size == item.size {
-                        progress_cb(item.size);
+                        prog.lock().inc_skipped(item.size);
                         prog.lock().finish_worker(slot);
                         pool.lock().push(slot);
                         return;
@@ -583,7 +588,7 @@ async fn handle_remote_upload(
                     let local_size = src.metadata()?.len();
                     if let Ok(Some(remote_size)) = remote::remote_file_size(&file_remote).await {
                         if remote_size == local_size {
-                            (runner.inc_callback())(local_size);
+                            (runner.skip_callback())(local_size);
                             continue;
                         }
                     }
@@ -591,7 +596,7 @@ async fn handle_remote_upload(
                 remote::upload_file(src, &file_remote, &runner.inc_callback(), &runner.file_callback(), &opts).await?;
             } else if src.is_dir() && args.is_recursive() {
                 let dir_remote = rdest.join(&src.file_name().unwrap().to_string_lossy());
-                remote::upload_directory(src, &dir_remote, &runner.inc_callback(), &runner.file_callback(), &excludes, &opts).await?;
+                remote::upload_directory(src, &dir_remote, &runner.inc_callback(), &runner.skip_callback(), &runner.file_callback(), &excludes, &opts).await?;
             }
         }
     }

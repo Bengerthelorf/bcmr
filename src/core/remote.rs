@@ -601,6 +601,7 @@ pub async fn upload_directory(
     local_src: &Path,
     remote: &RemotePath,
     progress_callback: &impl Fn(u64),
+    skip_callback: &impl Fn(u64),
     on_new_file: &impl Fn(&str, u64),
     excludes: &[regex::Regex],
     opts: &RemoteTransferOptions,
@@ -657,7 +658,7 @@ pub async fn upload_directory(
             if let Ok(meta) = local_path.metadata() {
                 if let Ok(Some(remote_size)) = remote_file_size(&file_remote).await {
                     if remote_size == meta.len() {
-                        progress_callback(meta.len());
+                        skip_callback(meta.len());
                         continue;
                     }
                 }
