@@ -7,7 +7,9 @@ pub trait ProgressRenderer: Send {
     fn inc_items_processed(&mut self);
     fn set_current_file(&mut self, file_name: &str, file_size: u64);
     fn inc_current(&mut self, delta: u64);
-    fn inc_skipped(&mut self, delta: u64) { self.inc_current(delta); }
+    fn inc_skipped(&mut self, delta: u64) {
+        self.inc_current(delta);
+    }
     fn set_operation_type(&mut self, operation: &str);
     fn set_total_bytes(&mut self, total: u64);
     fn set_scanning(&mut self, scanning: bool);

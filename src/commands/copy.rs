@@ -1,7 +1,7 @@
-use crate::cli::{Commands, TestMode, SparseMode};
-use crate::core::traversal;
+use crate::cli::{Commands, SparseMode, TestMode};
 use crate::core::checksum;
 use crate::core::error::BcmrError;
+use crate::core::traversal;
 use crate::ui::display::{print_dry_run, ActionType};
 
 use once_cell::sync::Lazy;
@@ -9,9 +9,10 @@ use parking_lot::Mutex as ParkingMutex;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::fs::{self, File};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncSeekExt, SeekFrom};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 
-static CLEANUP_PATHS: Lazy<ParkingMutex<Vec<PathBuf>>> = Lazy::new(|| ParkingMutex::new(Vec::new()));
+static CLEANUP_PATHS: Lazy<ParkingMutex<Vec<PathBuf>>> =
+    Lazy::new(|| ParkingMutex::new(Vec::new()));
 
 fn register_cleanup(path: &Path) {
     CLEANUP_PATHS.lock().push(path.to_path_buf());
@@ -71,14 +72,19 @@ async fn try_copy_file_range(
 
     let src_file = std::fs::File::open(src).ok()?;
     let dst_file = std::fs::OpenOptions::new()
-        .write(true).create(true).truncate(true)
-        .open(dst).ok()?;
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(dst)
+        .ok()?;
 
     let src_fd = src_file.as_raw_fd();
     let dst_fd = dst_file.as_raw_fd();
 
     if file_size > 0 {
-        unsafe { libc::fallocate(dst_fd, 0, 0, file_size as libc::off_t); }
+        unsafe {
+            libc::fallocate(dst_fd, 0, 0, file_size as libc::off_t);
+        }
     }
 
     const CHUNK: usize = 4 * 1024 * 1024;
@@ -93,9 +99,12 @@ async fn try_copy_file_range(
         let result = tokio::task::spawn_blocking(move || {
             let ret = unsafe {
                 libc::copy_file_range(
-                    sfd, std::ptr::null_mut(),
-                    dfd, std::ptr::null_mut(),
-                    to_copy, 0,
+                    sfd,
+                    std::ptr::null_mut(),
+                    dfd,
+                    std::ptr::null_mut(),
+                    to_copy,
+                    0,
                 )
             };
             if ret < 0 {
@@ -103,14 +112,18 @@ async fn try_copy_file_range(
             } else {
                 Ok(ret)
             }
-        }).await.ok()?;
+        })
+        .await
+        .ok()?;
 
         match result {
             Err(err) => {
                 let errno = err.raw_os_error().unwrap_or(0);
                 // Not available or not supported — fall back to buffer copy
-                if errno == libc::ENOSYS || errno == libc::EXDEV
-                    || errno == libc::EINVAL || errno == libc::EOPNOTSUPP
+                if errno == libc::ENOSYS
+                    || errno == libc::EXDEV
+                    || errno == libc::EINVAL
+                    || errno == libc::EOPNOTSUPP
                 {
                     drop(dst_file);
                     let _ = std::fs::remove_file(dst);
@@ -159,10 +172,9 @@ pub async fn check_overwrites(
 
         if src.is_file() {
             let dst_path = if dst_is_dir {
-                dst.join(
-                    src.file_name()
-                        .ok_or_else(|| BcmrError::InvalidInput("Invalid source file name".to_string()))?,
-                )
+                dst.join(src.file_name().ok_or_else(|| {
+                    BcmrError::InvalidInput("Invalid source file name".to_string())
+                })?)
             } else {
                 dst.to_path_buf()
             };
@@ -174,9 +186,9 @@ pub async fn check_overwrites(
                 });
             }
         } else if recursive && src.is_dir() {
-            let src_name = src
-                .file_name()
-                .ok_or_else(|| BcmrError::InvalidInput("Invalid source directory name".to_string()))?;
+            let src_name = src.file_name().ok_or_else(|| {
+                BcmrError::InvalidInput("Invalid source directory name".to_string())
+            })?;
             let new_dst = if dst_is_dir {
                 dst.join(src_name)
             } else {
@@ -299,8 +311,15 @@ fn determine_dry_run_action(
 
 #[allow(dead_code)]
 pub enum PlanEntry {
-    CreateDir { src: PathBuf, dst: PathBuf },
-    CopyFile { src: PathBuf, dst: PathBuf, size: u64 },
+    CreateDir {
+        src: PathBuf,
+        dst: PathBuf,
+    },
+    CopyFile {
+        src: PathBuf,
+        dst: PathBuf,
+        size: u64,
+    },
 }
 
 pub struct CopyPlan {
@@ -326,27 +345,44 @@ fn plan_copy_sync(
         }
 
         if src.is_file() {
-            let dst_path = if dst_is_dir {
-                dst.join(src.file_name().ok_or_else(||
-                    BcmrError::InvalidInput("Invalid source file name".into()))?)
-            } else {
-                dst.clone()
-            };
+            let dst_path =
+                if dst_is_dir {
+                    dst.join(src.file_name().ok_or_else(|| {
+                        BcmrError::InvalidInput("Invalid source file name".into())
+                    })?)
+                } else {
+                    dst.clone()
+                };
 
             let size = src.metadata()?.len();
             total_size += size;
 
             if dst_path.exists() && !traversal::is_excluded(&dst_path, &excludes) {
-                overwrites.push(FileToOverwrite { path: dst_path.clone(), is_dir: false });
+                overwrites.push(FileToOverwrite {
+                    path: dst_path.clone(),
+                    is_dir: false,
+                });
             }
 
-            entries.push(PlanEntry::CopyFile { src: src.clone(), dst: dst_path, size });
+            entries.push(PlanEntry::CopyFile {
+                src: src.clone(),
+                dst: dst_path,
+                size,
+            });
         } else if recursive && src.is_dir() {
-            let src_name = src.file_name().ok_or_else(||
-                BcmrError::InvalidInput("Invalid source directory name".into()))?;
-            let new_dst = if dst_is_dir { dst.join(src_name) } else { dst.clone() };
+            let src_name = src
+                .file_name()
+                .ok_or_else(|| BcmrError::InvalidInput("Invalid source directory name".into()))?;
+            let new_dst = if dst_is_dir {
+                dst.join(src_name)
+            } else {
+                dst.clone()
+            };
 
-            entries.push(PlanEntry::CreateDir { src: src.clone(), dst: new_dst.clone() });
+            entries.push(PlanEntry::CreateDir {
+                src: src.clone(),
+                dst: new_dst.clone(),
+            });
 
             for entry in traversal::walk(src, true, false, 1, &excludes) {
                 let entry = entry?;
@@ -356,28 +392,46 @@ fn plan_copy_sync(
 
                 if path.is_dir() {
                     if target.exists() && !traversal::is_excluded(&target, &excludes) {
-                        overwrites.push(FileToOverwrite { path: target.clone(), is_dir: true });
+                        overwrites.push(FileToOverwrite {
+                            path: target.clone(),
+                            is_dir: true,
+                        });
                     }
-                    entries.push(PlanEntry::CreateDir { src: path.to_path_buf(), dst: target });
+                    entries.push(PlanEntry::CreateDir {
+                        src: path.to_path_buf(),
+                        dst: target,
+                    });
                 } else if path.is_file() {
                     let size = entry.metadata()?.len();
                     total_size += size;
                     if target.exists() && !traversal::is_excluded(&target, &excludes) {
-                        overwrites.push(FileToOverwrite { path: target.clone(), is_dir: false });
+                        overwrites.push(FileToOverwrite {
+                            path: target.clone(),
+                            is_dir: false,
+                        });
                     }
-                    entries.push(PlanEntry::CopyFile { src: path.to_path_buf(), dst: target, size });
+                    entries.push(PlanEntry::CopyFile {
+                        src: path.to_path_buf(),
+                        dst: target,
+                        size,
+                    });
                 }
             }
         } else if src.is_dir() {
             return Err(BcmrError::InvalidInput(format!(
-                "Source '{}' is a directory. Use -r flag for recursive copy.", src.display()
+                "Source '{}' is a directory. Use -r flag for recursive copy.",
+                src.display()
             )));
         } else {
             return Err(BcmrError::SourceNotFound(src.clone()));
         }
     }
 
-    Ok(CopyPlan { entries, total_size, overwrites })
+    Ok(CopyPlan {
+        entries,
+        total_size,
+        overwrites,
+    })
 }
 
 pub async fn plan_copy(
@@ -406,11 +460,7 @@ pub fn dry_run_plan(plan: &CopyPlan, cli: &Commands) -> std::result::Result<(), 
             }
             PlanEntry::CopyFile { src, dst, .. } => {
                 let action = determine_dry_run_action(src, dst, cli)?;
-                print_dry_run(
-                    action,
-                    &src.to_string_lossy(),
-                    Some(&dst.to_string_lossy()),
-                );
+                print_dry_run(action, &src.to_string_lossy(), Some(&dst.to_string_lossy()));
             }
         }
     }
@@ -450,17 +500,23 @@ where
                     fs::remove_file(dst).await?;
                 }
 
-                copy_file(src, dst, CopyFileOptions {
-                    preserve,
-                    verify: cli.is_verify(),
-                    resume: cli.is_resume(),
-                    strict: cli.is_strict(),
-                    append: cli.is_append(),
-                    sync: cli.is_sync(),
-                    reflink_arg: cli.get_reflink_mode(),
-                    sparse_arg: cli.get_sparse_mode(),
-                    test_mode: test_mode.clone(),
-                }, &callback).await?;
+                copy_file(
+                    src,
+                    dst,
+                    CopyFileOptions {
+                        preserve,
+                        verify: cli.is_verify(),
+                        resume: cli.is_resume(),
+                        strict: cli.is_strict(),
+                        append: cli.is_append(),
+                        sync: cli.is_sync(),
+                        reflink_arg: cli.get_reflink_mode(),
+                        sparse_arg: cli.get_sparse_mode(),
+                        test_mode: test_mode.clone(),
+                    },
+                    &callback,
+                )
+                .await?;
 
                 if cli.is_verbose() {
                     eprintln!("'{}' -> '{}'", src.display(), dst.display());
@@ -513,14 +569,14 @@ where
     }
 
     if src.is_file() {
-        let dst_path = if dst.is_dir() {
-            dst.join(
-                src.file_name()
-                    .ok_or_else(|| BcmrError::InvalidInput("Invalid source file name".to_string()))?,
-            )
-        } else {
-            dst.to_path_buf()
-        };
+        let dst_path =
+            if dst.is_dir() {
+                dst.join(src.file_name().ok_or_else(|| {
+                    BcmrError::InvalidInput("Invalid source file name".to_string())
+                })?)
+            } else {
+                dst.to_path_buf()
+            };
 
         if dst_path.exists() && !cli.is_force() && is_normal_write(cli) {
             return Err(BcmrError::TargetExists(dst_path));
@@ -531,7 +587,7 @@ where
             print_dry_run(
                 action,
                 &src.to_string_lossy(),
-                Some(&dst_path.to_string_lossy())
+                Some(&dst_path.to_string_lossy()),
             );
             return Ok(());
         }
@@ -541,13 +597,23 @@ where
         }
         // For normal writes: atomic rename handles overwrite, no pre-deletion needed
 
-        copy_file(src, &dst_path, CopyFileOptions {
-            preserve, verify: cli.is_verify(), resume: cli.is_resume(),
-            strict: cli.is_strict(), append: cli.is_append(),
-            sync: cli.is_sync(),
-            reflink_arg: cli.get_reflink_mode(), sparse_arg: cli.get_sparse_mode(),
-            test_mode,
-        }, &callback).await?;
+        copy_file(
+            src,
+            &dst_path,
+            CopyFileOptions {
+                preserve,
+                verify: cli.is_verify(),
+                resume: cli.is_resume(),
+                strict: cli.is_strict(),
+                append: cli.is_append(),
+                sync: cli.is_sync(),
+                reflink_arg: cli.get_reflink_mode(),
+                sparse_arg: cli.get_sparse_mode(),
+                test_mode,
+            },
+            &callback,
+        )
+        .await?;
 
         if cli.is_verbose() {
             eprintln!("'{}' -> '{}'", src.display(), dst_path.display());
@@ -566,7 +632,7 @@ where
             print_dry_run(
                 ActionType::Add,
                 &src.to_string_lossy(),
-                Some(&format!("(DIR) -> {}", new_dst.display()))
+                Some(&format!("(DIR) -> {}", new_dst.display())),
             );
         }
 
@@ -594,7 +660,7 @@ where
                     print_dry_run(
                         ActionType::Add,
                         &path.to_string_lossy(),
-                        Some(&format!("(DIR) -> {}", target_path.display()))
+                        Some(&format!("(DIR) -> {}", target_path.display())),
                     );
                 }
             } else if path.is_file() {
@@ -618,7 +684,7 @@ where
                 print_dry_run(
                     action,
                     &src_path.to_string_lossy(),
-                    Some(&dst_path.to_string_lossy())
+                    Some(&dst_path.to_string_lossy()),
                 );
             } else {
                 if dst_path.exists() && cli.is_force() && !is_normal_write(cli) {
@@ -708,8 +774,15 @@ where
     F: Fn(u64),
 {
     let CopyFileOptions {
-        preserve, verify, resume, strict, append, sync,
-        reflink_arg, sparse_arg, test_mode,
+        preserve,
+        verify,
+        resume,
+        strict,
+        append,
+        sync,
+        reflink_arg,
+        sparse_arg,
+        test_mode,
     } = opts;
 
     let file_size = src.metadata()?.len();
@@ -723,30 +796,30 @@ where
 
     let config_reflink = &crate::config::CONFIG.copy.reflink;
     let (try_reflink, fail_on_error) = if let Some(mode) = reflink_arg {
-         match mode.to_lowercase().as_str() {
-             "force" => (true, true),
-             "disable" => (false, false),
-             _ => (true, false),
-         }
+        match mode.to_lowercase().as_str() {
+            "force" => (true, true),
+            "disable" => (false, false),
+            _ => (true, false),
+        }
     } else {
         match config_reflink.to_lowercase().as_str() {
-             "never" => (false, false),
-             _ => (true, false),
+            "never" => (false, false),
+            _ => (true, false),
         }
     };
 
     let config_sparse = &crate::config::CONFIG.copy.sparse;
     let sparse_mode = if let Some(mode) = sparse_arg {
-         match mode.to_lowercase().as_str() {
-             "force" => SparseMode::Always,
-             "disable" => SparseMode::Never,
-             _ => SparseMode::Auto,
-         }
+        match mode.to_lowercase().as_str() {
+            "force" => SparseMode::Always,
+            "disable" => SparseMode::Never,
+            _ => SparseMode::Auto,
+        }
     } else {
-         match config_sparse.to_lowercase().as_str() {
-             "auto" => SparseMode::Auto,
-             _ => SparseMode::Never,
-         }
+        match config_sparse.to_lowercase().as_str() {
+            "auto" => SparseMode::Auto,
+            _ => SparseMode::Never,
+        }
     };
 
     if let Some(parent) = dst.parent() {
@@ -774,36 +847,53 @@ where
     if try_reflink && !matches!(sparse_mode, SparseMode::Always) {
         let src_path = src.to_path_buf();
         let target_path = write_target.clone();
-        let result = tokio::task::spawn_blocking(move || reflink_copy::reflink(&src_path, &target_path))
-            .await?;
+        let result =
+            tokio::task::spawn_blocking(move || reflink_copy::reflink(&src_path, &target_path))
+                .await?;
 
         match result {
             Ok(_) => {
                 if use_atomic {
                     fs::rename(&write_target, dst).await?;
-                    if let Some(ref mut g) = guard { g.disarm(); }
+                    if let Some(ref mut g) = guard {
+                        g.disarm();
+                    }
                 }
                 (callback.callback)(file_size);
-                if preserve { preserve_attributes(src, dst).await?; }
-                if verify { verify_copy(src, dst).await?; }
+                if preserve {
+                    preserve_attributes(src, dst).await?;
+                }
+                if verify {
+                    verify_copy(src, dst).await?;
+                }
                 return Ok(());
             }
             Err(e) => {
                 if fail_on_error {
-                   return Err(BcmrError::Reflink(format!("Reflink failed (forced): {}", e)));
+                    return Err(BcmrError::Reflink(format!(
+                        "Reflink failed (forced): {}",
+                        e
+                    )));
                 }
             }
         }
     }
 
     #[cfg(target_os = "linux")]
-    if use_atomic && matches!(test_mode, TestMode::None) && matches!(sparse_mode, SparseMode::Never) {
+    if use_atomic && matches!(test_mode, TestMode::None) && matches!(sparse_mode, SparseMode::Never)
+    {
         match try_copy_file_range(src, &write_target, file_size, &callback.callback, sync).await {
             Some(Ok(())) => {
                 fs::rename(&write_target, dst).await?;
-                if let Some(ref mut g) = guard { g.disarm(); }
-                if preserve { preserve_attributes(src, dst).await?; }
-                if verify { verify_copy(src, dst).await?; }
+                if let Some(ref mut g) = guard {
+                    g.disarm();
+                }
+                if preserve {
+                    preserve_attributes(src, dst).await?;
+                }
+                if verify {
+                    verify_copy(src, dst).await?;
+                }
                 return Ok(());
             }
             Some(Err(e)) => {
@@ -822,34 +912,36 @@ where
 
         let should_resume = if strict {
             if dst_len == file_size {
-                 let src_path = src.to_path_buf();
-                 let dst_path = dst.to_path_buf();
-                 let (src_hash, dst_hash) = tokio::join!(
-                     tokio::task::spawn_blocking(move || checksum::calculate_hash(&src_path)),
-                     tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)),
-                 );
-                 let src_hash = src_hash??;
-                 let dst_hash = dst_hash??;
+                let src_path = src.to_path_buf();
+                let dst_path = dst.to_path_buf();
+                let (src_hash, dst_hash) = tokio::join!(
+                    tokio::task::spawn_blocking(move || checksum::calculate_hash(&src_path)),
+                    tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)),
+                );
+                let src_hash = src_hash??;
+                let dst_hash = dst_hash??;
 
-                 if src_hash == dst_hash {
-                     (callback.callback)(file_size);
-                     return Ok(());
-                 }
-                 false
+                if src_hash == dst_hash {
+                    (callback.callback)(file_size);
+                    return Ok(());
+                }
+                false
             } else if dst_len < file_size {
-                 let src_path = src.to_path_buf();
-                 let dst_path = dst.to_path_buf();
-                 let limit = dst_len;
-                 let (dst_hash, src_partial_hash) = tokio::join!(
-                     tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)),
-                     tokio::task::spawn_blocking(move || checksum::calculate_partial_hash(&src_path, limit)),
-                 );
-                 let dst_hash = dst_hash??;
-                 let src_partial_hash = src_partial_hash??;
+                let src_path = src.to_path_buf();
+                let dst_path = dst.to_path_buf();
+                let limit = dst_len;
+                let (dst_hash, src_partial_hash) = tokio::join!(
+                    tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)),
+                    tokio::task::spawn_blocking(move || checksum::calculate_partial_hash(
+                        &src_path, limit
+                    )),
+                );
+                let dst_hash = dst_hash??;
+                let src_partial_hash = src_partial_hash??;
 
-                 dst_hash == src_partial_hash
+                dst_hash == src_partial_hash
             } else {
-                 false
+                false
             }
         } else if append {
             if dst_len == file_size {
@@ -873,14 +965,13 @@ where
         };
 
         if should_resume {
-             start_offset = dst_len;
-             file_flags.append(true);
-             (callback.callback)(start_offset);
+            start_offset = dst_len;
+            file_flags.append(true);
+            (callback.callback)(start_offset);
         } else {
-             start_offset = 0;
-             file_flags.create(true).truncate(true);
+            start_offset = 0;
+            file_flags.create(true).truncate(true);
         }
-
     } else {
         file_flags.create(true).truncate(true);
     }
@@ -953,7 +1044,11 @@ where
                         dst_file.write_all(&buffer[..n]).await?;
                     }
                     SparseMode::Always | SparseMode::Auto => {
-                        let min_block = if matches!(sparse_mode, SparseMode::Always) { 1 } else { BLOCK_SIZE };
+                        let min_block = if matches!(sparse_mode, SparseMode::Always) {
+                            1
+                        } else {
+                            BLOCK_SIZE
+                        };
                         let mut offset = 0;
                         while offset < n {
                             let end = (offset + BLOCK_SIZE).min(n);
@@ -964,7 +1059,9 @@ where
                                 pending_hole += chunk_len as u64;
                             } else {
                                 if pending_hole > 0 {
-                                    dst_file.seek(SeekFrom::Current(pending_hole as i64)).await?;
+                                    dst_file
+                                        .seek(SeekFrom::Current(pending_hole as i64))
+                                        .await?;
                                     pending_hole = 0;
                                 }
                                 dst_file.write_all(chunk).await?;
@@ -980,7 +1077,7 @@ where
                 let current_pos = dst_file.stream_position().await?;
                 dst_file.set_len(current_pos + pending_hole).await?;
             }
-        },
+        }
     }
 
     if sync {
@@ -992,7 +1089,9 @@ where
 
     if use_atomic {
         fs::rename(&write_target, dst).await?;
-        if let Some(ref mut g) = guard { g.disarm(); }
+        if let Some(ref mut g) = guard {
+            g.disarm();
+        }
     }
 
     if preserve {
@@ -1071,9 +1170,14 @@ where
                 on_total_update(total_size);
                 on_file_found(files_found);
 
-                if tx.blocking_send(ScanMessage::Entry(
-                    PlanEntry::CopyFile { src: src.clone(), dst: dst_path, size }
-                )).is_err() {
+                if tx
+                    .blocking_send(ScanMessage::Entry(PlanEntry::CopyFile {
+                        src: src.clone(),
+                        dst: dst_path,
+                        size,
+                    }))
+                    .is_err()
+                {
                     return Ok(()); // receiver dropped, abort
                 }
             } else if recursive && src.is_dir() {
@@ -1081,11 +1185,19 @@ where
                     Some(n) => n,
                     None => continue,
                 };
-                let new_dst = if dst_is_dir { dst.join(src_name) } else { dst.clone() };
+                let new_dst = if dst_is_dir {
+                    dst.join(src_name)
+                } else {
+                    dst.clone()
+                };
 
-                if tx.blocking_send(ScanMessage::Entry(
-                    PlanEntry::CreateDir { src: src.clone(), dst: new_dst.clone() }
-                )).is_err() {
+                if tx
+                    .blocking_send(ScanMessage::Entry(PlanEntry::CreateDir {
+                        src: src.clone(),
+                        dst: new_dst.clone(),
+                    }))
+                    .is_err()
+                {
                     return Ok(());
                 }
 
@@ -1108,9 +1220,13 @@ where
                     let target = new_dst.join(relative);
 
                     if path.is_dir() {
-                        if tx.blocking_send(ScanMessage::Entry(
-                            PlanEntry::CreateDir { src: path.to_path_buf(), dst: target }
-                        )).is_err() {
+                        if tx
+                            .blocking_send(ScanMessage::Entry(PlanEntry::CreateDir {
+                                src: path.to_path_buf(),
+                                dst: target,
+                            }))
+                            .is_err()
+                        {
                             return Ok(());
                         }
                     } else if path.is_file() {
@@ -1126,9 +1242,14 @@ where
                         on_total_update(total_size);
                         on_file_found(files_found);
 
-                        if tx.blocking_send(ScanMessage::Entry(
-                            PlanEntry::CopyFile { src: path.to_path_buf(), dst: target, size }
-                        )).is_err() {
+                        if tx
+                            .blocking_send(ScanMessage::Entry(PlanEntry::CopyFile {
+                                src: path.to_path_buf(),
+                                dst: target,
+                                size,
+                            }))
+                            .is_err()
+                        {
                             return Ok(());
                         }
                     }
@@ -1136,7 +1257,8 @@ where
             } else if src.is_dir() {
                 let _ = tx.blocking_send(ScanMessage::Done);
                 return Err(BcmrError::InvalidInput(format!(
-                    "Source '{}' is a directory. Use -r flag for recursive copy.", src.display()
+                    "Source '{}' is a directory. Use -r flag for recursive copy.",
+                    src.display()
                 )));
             } else {
                 let _ = tx.blocking_send(ScanMessage::Done);
@@ -1152,24 +1274,28 @@ where
 
     while let Some(msg) = rx.recv().await {
         match msg {
-            ScanMessage::Entry(entry) => {
-                match entry {
-                    PlanEntry::CreateDir { ref src, ref dst } => {
-                        if !dst.exists() {
-                            fs::create_dir_all(dst).await?;
-                        }
-                        dir_entries.push((src.clone(), dst.clone()));
+            ScanMessage::Entry(entry) => match entry {
+                PlanEntry::CreateDir { ref src, ref dst } => {
+                    if !dst.exists() {
+                        fs::create_dir_all(dst).await?;
                     }
-                    PlanEntry::CopyFile { ref src, ref dst, .. } => {
-                        if dst.exists() && !cli.is_force() && is_normal_write(cli) {
-                            return Err(BcmrError::TargetExists(dst.clone()));
-                        }
+                    dir_entries.push((src.clone(), dst.clone()));
+                }
+                PlanEntry::CopyFile {
+                    ref src, ref dst, ..
+                } => {
+                    if dst.exists() && !cli.is_force() && is_normal_write(cli) {
+                        return Err(BcmrError::TargetExists(dst.clone()));
+                    }
 
-                        if dst.exists() && cli.is_force() && !is_normal_write(cli) {
-                            fs::remove_file(dst).await?;
-                        }
+                    if dst.exists() && cli.is_force() && !is_normal_write(cli) {
+                        fs::remove_file(dst).await?;
+                    }
 
-                        copy_file(src, dst, CopyFileOptions {
+                    copy_file(
+                        src,
+                        dst,
+                        CopyFileOptions {
                             preserve,
                             verify: cli.is_verify(),
                             resume: cli.is_resume(),
@@ -1179,14 +1305,16 @@ where
                             reflink_arg: cli.get_reflink_mode(),
                             sparse_arg: cli.get_sparse_mode(),
                             test_mode: test_mode.clone(),
-                        }, &callback).await?;
+                        },
+                        &callback,
+                    )
+                    .await?;
 
-                        if cli.is_verbose() {
-                            eprintln!("'{}' -> '{}'", src.display(), dst.display());
-                        }
+                    if cli.is_verbose() {
+                        eprintln!("'{}' -> '{}'", src.display(), dst.display());
                     }
                 }
-            }
+            },
             ScanMessage::Done => {
                 on_scan_complete();
                 break;

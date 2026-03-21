@@ -1,7 +1,7 @@
-pub mod progress;
-pub mod utils;
-pub mod state;
-pub mod tui;
-pub mod inline;
 pub mod display;
+pub mod inline;
+pub mod progress;
+pub mod state;
 pub mod suspend;
+pub mod tui;
+pub mod utils;

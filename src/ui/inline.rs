@@ -138,7 +138,9 @@ impl InlineProgress {
                     let per_worker = term_width.saturating_sub(active * 14) / active;
                     let name_max = per_worker.max(12);
                     let display_name = if worker.file_name.chars().count() > name_max {
-                        let end = worker.file_name.floor_char_boundary(name_max.saturating_sub(3));
+                        let end = worker
+                            .file_name
+                            .floor_char_boundary(name_max.saturating_sub(3));
                         format!("{}...", &worker.file_name[..end])
                     } else {
                         worker.file_name.clone()
@@ -248,7 +250,8 @@ impl ProgressRenderer for InlineProgress {
     }
 
     fn update_worker(&mut self, slot: usize, file_name: &str, file_size: u64, progress: u64) {
-        self.data.update_worker(slot, file_name, file_size, progress);
+        self.data
+            .update_worker(slot, file_name, file_size, progress);
     }
 
     fn finish_worker(&mut self, slot: usize) {
@@ -257,7 +260,6 @@ impl ProgressRenderer for InlineProgress {
     }
 
     fn tick(&mut self) {
-        // Redraw on tick
         let _ = self.redraw();
     }
 

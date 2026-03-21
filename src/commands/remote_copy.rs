@@ -8,8 +8,8 @@ use crate::ui::utils::format_bytes;
 use anyhow::{bail, Result};
 use parking_lot::Mutex;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::Arc;
 use tokio::signal::ctrl_c;
 use tokio::time::Duration;
 
@@ -95,12 +95,9 @@ pub struct TransferItem {
 }
 
 const COMPRESSED_EXTENSIONS: &[&str] = &[
-    "gz", "bz2", "xz", "zst", "lz4", "zip", "rar", "7z",
-    "jpg", "jpeg", "png", "gif", "webp", "avif", "heic",
-    "mp4", "mkv", "avi", "mov", "webm",
-    "mp3", "aac", "ogg", "flac", "opus",
-    "pdf", "docx", "xlsx", "pptx",
-    "dmg", "iso", "whl", "egg",
+    "gz", "bz2", "xz", "zst", "lz4", "zip", "rar", "7z", "jpg", "jpeg", "png", "gif", "webp",
+    "avif", "heic", "mp4", "mkv", "avi", "mov", "webm", "mp3", "aac", "ogg", "flac", "opus", "pdf",
+    "docx", "xlsx", "pptx", "dmg", "iso", "whl", "egg",
 ];
 
 fn should_compress(items: &[TransferItem]) -> bool {
@@ -111,7 +108,11 @@ fn should_compress(items: &[TransferItem]) -> bool {
             item.local_path.to_str().unwrap_or("")
         } else {
             &item.remote.path
-        }).extension().unwrap_or_default().to_string_lossy().to_lowercase();
+        })
+        .extension()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_lowercase();
         if !COMPRESSED_EXTENSIONS.contains(&ext.as_str()) {
             compressible += item.size;
         }
@@ -148,9 +149,18 @@ async fn run_parallel_transfers(
             };
 
             let file_name = if item.is_upload {
-                item.local_path.file_name().unwrap().to_string_lossy().to_string()
+                item.local_path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
             } else {
-                item.remote.path.rsplit('/').next().unwrap_or(&item.remote.path).to_string()
+                item.remote
+                    .path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&item.remote.path)
+                    .to_string()
             };
 
             let worker_bytes = Arc::new(AtomicU64::new(0));
@@ -177,9 +187,26 @@ async fn run_parallel_transfers(
             };
 
             let result = if item.is_upload {
-                remote::upload_file(&item.local_path, &item.remote, &progress_cb, &skip_cb, &noop_file_cb, &task_opts).await
+                remote::upload_file(
+                    &item.local_path,
+                    &item.remote,
+                    &progress_cb,
+                    &skip_cb,
+                    &noop_file_cb,
+                    &task_opts,
+                )
+                .await
             } else {
-                remote::download_file(&item.remote, &item.local_path, &progress_cb, &skip_cb, &noop_file_cb, item.size, &task_opts).await
+                remote::download_file(
+                    &item.remote,
+                    &item.local_path,
+                    &progress_cb,
+                    &skip_cb,
+                    &noop_file_cb,
+                    item.size,
+                    &task_opts,
+                )
+                .await
             };
 
             if let Err(e) = result {
@@ -257,29 +284,39 @@ pub async fn handle_remote_copy(
         "off" | "never" => false,
         _ => {
             if is_upload {
-                let probe: Vec<TransferItem> = sources.iter().filter_map(|s| {
-                    if parse_remote_path(&s.to_string_lossy()).is_some() { return None; }
-                    let size = s.metadata().unwrap().len();
-                    Some(TransferItem {
-                        local_path: s.clone(),
-                        remote: RemotePath {
-                            user: None, host: String::new(), path: String::new(),
-                        },
-                        size,
-                        is_upload: true,
+                let probe: Vec<TransferItem> = sources
+                    .iter()
+                    .filter_map(|s| {
+                        if parse_remote_path(&s.to_string_lossy()).is_some() {
+                            return None;
+                        }
+                        let size = s.metadata().unwrap().len();
+                        Some(TransferItem {
+                            local_path: s.clone(),
+                            remote: RemotePath {
+                                user: None,
+                                host: String::new(),
+                                path: String::new(),
+                            },
+                            size,
+                            is_upload: true,
+                        })
                     })
-                }).collect();
+                    .collect();
                 should_compress(&probe)
             } else {
-                let probe: Vec<TransferItem> = sources.iter().filter_map(|s| {
-                    let rp = parse_remote_path(&s.to_string_lossy())?;
-                    Some(TransferItem {
-                        local_path: PathBuf::new(),
-                        remote: rp,
-                        size: 1,
-                        is_upload: false,
+                let probe: Vec<TransferItem> = sources
+                    .iter()
+                    .filter_map(|s| {
+                        let rp = parse_remote_path(&s.to_string_lossy())?;
+                        Some(TransferItem {
+                            local_path: PathBuf::new(),
+                            remote: rp,
+                            size: 1,
+                            is_upload: false,
+                        })
                     })
-                }).collect();
+                    .collect();
                 should_compress(&probe)
             }
         }
@@ -318,21 +355,31 @@ async fn handle_remote_upload(
         if src.is_file() {
             total_size += src.metadata()?.len();
         } else if src.is_dir() && args.is_recursive() {
-            total_size += commands::copy::get_total_size(
-                std::slice::from_ref(src), true, args, &[],
-            ).await?;
+            total_size +=
+                commands::copy::get_total_size(std::slice::from_ref(src), true, args, &[]).await?;
         } else if src.is_dir() {
-            bail!("Source '{}' is a directory. Use -r flag for recursive copy.", src.display());
+            bail!(
+                "Source '{}' is a directory. Use -r flag for recursive copy.",
+                src.display()
+            );
         } else {
             bail!("Source '{}' not found", src.display());
         }
     }
 
     if args.is_dry_run() {
-        println!("Dry-run: would upload {} to {}", format_bytes(total_size as f64), rdest);
+        println!(
+            "Dry-run: would upload {} to {}",
+            format_bytes(total_size as f64),
+            rdest
+        );
         for src in sources {
             if src.is_file() {
-                println!("  {} -> {}", src.display(), resolve_upload_remote(src, rdest, sources.len() > 1));
+                println!(
+                    "  {} -> {}",
+                    src.display(),
+                    resolve_upload_remote(src, rdest, sources.len() > 1)
+                );
             } else if src.is_dir() && args.is_recursive() {
                 let dir_remote = rdest.join(&src.file_name().unwrap().to_string_lossy());
                 for item in collect_upload_files(src, &dir_remote, &excludes)? {
@@ -375,16 +422,34 @@ async fn handle_remote_upload(
             }
         }
 
-        run_parallel_transfers(items, parallel, runner.progress(), &opts).await
+        run_parallel_transfers(items, parallel, runner.progress(), &opts)
+            .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
     } else {
         for src in sources {
             if src.is_file() {
                 let file_remote = resolve_upload_remote(src, rdest, multi_source);
-                remote::upload_file(src, &file_remote, &runner.inc_callback(), &runner.skip_callback(), &runner.file_callback(), &opts).await?;
+                remote::upload_file(
+                    src,
+                    &file_remote,
+                    &runner.inc_callback(),
+                    &runner.skip_callback(),
+                    &runner.file_callback(),
+                    &opts,
+                )
+                .await?;
             } else if src.is_dir() && args.is_recursive() {
                 let dir_remote = rdest.join(&src.file_name().unwrap().to_string_lossy());
-                remote::upload_directory(src, &dir_remote, &runner.inc_callback(), &runner.skip_callback(), &runner.file_callback(), &excludes, &opts).await?;
+                remote::upload_directory(
+                    src,
+                    &dir_remote,
+                    &runner.inc_callback(),
+                    &runner.skip_callback(),
+                    &runner.file_callback(),
+                    &excludes,
+                    &opts,
+                )
+                .await?;
             }
         }
     }
@@ -402,8 +467,9 @@ async fn handle_remote_download(
 
     let mut remote_sources = Vec::new();
     for src in sources {
-        let rsrc = parse_remote_path(&src.to_string_lossy())
-            .ok_or_else(|| anyhow::anyhow!("Mixed local/remote sources without remote destination"))?;
+        let rsrc = parse_remote_path(&src.to_string_lossy()).ok_or_else(|| {
+            anyhow::anyhow!("Mixed local/remote sources without remote destination")
+        })?;
         let size = remote::remote_total_size(&rsrc, args.is_recursive()).await?;
         remote_sources.push((rsrc, size));
     }
@@ -411,7 +477,11 @@ async fn handle_remote_download(
     let total_size: u64 = remote_sources.iter().map(|(_, s)| *s).sum();
 
     if args.is_dry_run() {
-        println!("Dry-run: would download {} to {}", format_bytes(total_size as f64), dest_local.display());
+        println!(
+            "Dry-run: would download {} to {}",
+            format_bytes(total_size as f64),
+            dest_local.display()
+        );
         for (rsrc, _) in &remote_sources {
             let info = remote::remote_stat(rsrc).await?;
             if info.is_dir && args.is_recursive() {
@@ -423,9 +493,20 @@ async fn handle_remote_download(
                 };
                 let entries = remote::remote_list_files(rsrc).await?;
                 for (rel_path, _, is_dir_entry) in &entries {
-                    if *is_dir_entry { continue; }
-                    if crate::core::traversal::is_excluded(std::path::Path::new(rel_path), &excludes) { continue; }
-                    println!("  {} -> {}", rsrc.join(rel_path), local_dir.join(rel_path).display());
+                    if *is_dir_entry {
+                        continue;
+                    }
+                    if crate::core::traversal::is_excluded(
+                        std::path::Path::new(rel_path),
+                        &excludes,
+                    ) {
+                        continue;
+                    }
+                    println!(
+                        "  {} -> {}",
+                        rsrc.join(rel_path),
+                        local_dir.join(rel_path).display()
+                    );
                 }
             } else {
                 let local_path = if dest_local.is_dir() {
@@ -468,15 +549,25 @@ async fn handle_remote_download(
                 };
                 let entries = remote::remote_list_files(rsrc).await?;
                 for (rel_path, _, is_dir_entry) in &entries {
-                    if *is_dir_entry {
-                        if !crate::core::traversal::is_excluded(std::path::Path::new(rel_path), &excludes) {
-                            tokio::fs::create_dir_all(local_dir.join(rel_path)).await?;
-                        }
+                    if *is_dir_entry
+                        && !crate::core::traversal::is_excluded(
+                            std::path::Path::new(rel_path),
+                            &excludes,
+                        )
+                    {
+                        tokio::fs::create_dir_all(local_dir.join(rel_path)).await?;
                     }
                 }
                 for (rel_path, size, is_dir_entry) in &entries {
-                    if *is_dir_entry { continue; }
-                    if crate::core::traversal::is_excluded(std::path::Path::new(rel_path), &excludes) { continue; }
+                    if *is_dir_entry {
+                        continue;
+                    }
+                    if crate::core::traversal::is_excluded(
+                        std::path::Path::new(rel_path),
+                        &excludes,
+                    ) {
+                        continue;
+                    }
                     items.push(TransferItem {
                         local_path: local_dir.join(rel_path),
                         remote: rsrc.join(rel_path),
@@ -499,7 +590,8 @@ async fn handle_remote_download(
             }
         }
 
-        run_parallel_transfers(items, parallel, runner.progress(), &opts).await
+        run_parallel_transfers(items, parallel, runner.progress(), &opts)
+            .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
     } else {
         for (rsrc, _) in &remote_sources {
@@ -521,14 +613,18 @@ async fn handle_remote_download(
                 if !local_dir.exists() {
                     tokio::fs::create_dir_all(&local_dir).await?;
                 }
-                remote::download_directory(rsrc, &local_dir, &inc, &skip, &file_cb, &excludes, &opts).await?;
+                remote::download_directory(
+                    rsrc, &local_dir, &inc, &skip, &file_cb, &excludes, &opts,
+                )
+                .await?;
             } else {
                 let local_path = if dest_local.is_dir() {
                     dest_local.join(rsrc.path.rsplit('/').next().unwrap_or(&rsrc.path))
                 } else {
                     dest_local.to_path_buf()
                 };
-                remote::download_file(rsrc, &local_path, &inc, &skip, &file_cb, info.size, &opts).await?;
+                remote::download_file(rsrc, &local_path, &inc, &skip, &file_cb, info.size, &opts)
+                    .await?;
             }
         }
     }

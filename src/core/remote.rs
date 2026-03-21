@@ -128,12 +128,22 @@ async fn check_resume_state(
     existing_partial_hash: impl AsyncFnOnce(u64) -> Result<String, BcmrError>,
 ) -> Result<ResumeDecision, BcmrError> {
     if !(opts.resume || opts.append || opts.strict) {
-        return Ok(ResumeDecision { skip_bytes: 0, use_append_mode: false, skip_entirely: false });
+        return Ok(ResumeDecision {
+            skip_bytes: 0,
+            use_append_mode: false,
+            skip_entirely: false,
+        });
     }
 
     let existing_size = match existing_size {
         Some(s) => s,
-        None => return Ok(ResumeDecision { skip_bytes: 0, use_append_mode: false, skip_entirely: false }),
+        None => {
+            return Ok(ResumeDecision {
+                skip_bytes: 0,
+                use_append_mode: false,
+                skip_entirely: false,
+            })
+        }
     };
 
     if existing_size == source_size {
@@ -141,24 +151,44 @@ async fn check_resume_state(
             let ex_hash = existing_full_hash().await?;
             let src_hash = source_full_hash().await?;
             if ex_hash == src_hash {
-                return Ok(ResumeDecision { skip_bytes: 0, use_append_mode: false, skip_entirely: true });
+                return Ok(ResumeDecision {
+                    skip_bytes: 0,
+                    use_append_mode: false,
+                    skip_entirely: true,
+                });
             }
         } else {
-            return Ok(ResumeDecision { skip_bytes: 0, use_append_mode: false, skip_entirely: true });
+            return Ok(ResumeDecision {
+                skip_bytes: 0,
+                use_append_mode: false,
+                skip_entirely: true,
+            });
         }
     } else if existing_size < source_size {
         if opts.strict {
             let ex_hash = existing_full_hash().await?;
             let partial = existing_partial_hash(existing_size).await?;
             if ex_hash == partial {
-                return Ok(ResumeDecision { skip_bytes: existing_size, use_append_mode: true, skip_entirely: false });
+                return Ok(ResumeDecision {
+                    skip_bytes: existing_size,
+                    use_append_mode: true,
+                    skip_entirely: false,
+                });
             }
         } else {
-            return Ok(ResumeDecision { skip_bytes: existing_size, use_append_mode: true, skip_entirely: false });
+            return Ok(ResumeDecision {
+                skip_bytes: existing_size,
+                use_append_mode: true,
+                skip_entirely: false,
+            });
         }
     }
 
-    Ok(ResumeDecision { skip_bytes: 0, use_append_mode: false, skip_entirely: false })
+    Ok(ResumeDecision {
+        skip_bytes: 0,
+        use_append_mode: false,
+        skip_entirely: false,
+    })
 }
 
 // ── SSH connection multiplexing ──
@@ -176,18 +206,26 @@ fn control_path(target: &str) -> String {
 
 fn is_interactive() -> bool {
     #[cfg(unix)]
-    { unsafe { libc::isatty(libc::STDIN_FILENO) != 0 } }
+    {
+        unsafe { libc::isatty(libc::STDIN_FILENO) != 0 }
+    }
     #[cfg(not(unix))]
-    { true }
+    {
+        true
+    }
 }
 
 fn ssh_base_args(target: &str) -> Vec<String> {
     let cp = control_path(target);
     let mut args = vec![
-        "-o".into(), format!("ControlPath={}", cp),
-        "-o".into(), "ControlMaster=auto".into(),
-        "-o".into(), "ControlPersist=300".into(),
-        "-o".into(), "ConnectTimeout=10".into(),
+        "-o".into(),
+        format!("ControlPath={}", cp),
+        "-o".into(),
+        "ControlMaster=auto".into(),
+        "-o".into(),
+        "ControlPersist=300".into(),
+        "-o".into(),
+        "ConnectTimeout=10".into(),
     ];
     if !is_interactive() {
         args.extend(["-o".into(), "BatchMode=yes".into()]);
@@ -211,12 +249,22 @@ fn ssh_command(target: &str) -> Command {
 fn ssh_error_message(stderr: &str, context: &str) -> String {
     let stderr_lower = stderr.to_lowercase();
     if stderr_lower.contains("connection refused") {
-        format!("{}: SSH connection refused (is sshd running on the host?)", context)
-    } else if stderr_lower.contains("no route to host") || stderr_lower.contains("network is unreachable") {
+        format!(
+            "{}: SSH connection refused (is sshd running on the host?)",
+            context
+        )
+    } else if stderr_lower.contains("no route to host")
+        || stderr_lower.contains("network is unreachable")
+    {
         format!("{}: host unreachable (check network connectivity)", context)
     } else if stderr_lower.contains("permission denied") {
-        format!("{}: SSH authentication failed (check credentials/keys)", context)
-    } else if stderr_lower.contains("could not resolve") || stderr_lower.contains("name or service not known") {
+        format!(
+            "{}: SSH authentication failed (check credentials/keys)",
+            context
+        )
+    } else if stderr_lower.contains("could not resolve")
+        || stderr_lower.contains("name or service not known")
+    {
         format!("{}: unknown host (check hostname)", context)
     } else if stderr_lower.contains("no such file") || stderr_lower.contains("not a regular file") {
         format!("{}: remote file not found", context)
@@ -230,10 +278,7 @@ fn ssh_error_message(stderr: &str, context: &str) -> String {
 pub async fn validate_ssh_connection(remote: &RemotePath) -> Result<(), BcmrError> {
     let target = remote.ssh_target();
     // Establishes the ControlMaster connection; may prompt for password if TTY
-    let output = ssh_command(&target)
-        .arg("echo ok")
-        .output()
-        .await?;
+    let output = ssh_command(&target).arg("echo ok").output().await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -249,7 +294,8 @@ pub async fn remote_file_size(remote: &RemotePath) -> Result<Option<u64>, BcmrEr
     let output = ssh_command(&remote.ssh_target())
         .arg(format!(
             "stat -c '%s' '{}' 2>/dev/null || stat -f '%z' '{}'",
-            shell_escape(&remote.path), shell_escape(&remote.path)
+            shell_escape(&remote.path),
+            shell_escape(&remote.path)
         ))
         .output()
         .await?;
@@ -266,7 +312,8 @@ pub async fn remote_stat(remote: &RemotePath) -> Result<RemoteFileInfo, BcmrErro
     let output = ssh_command(&remote.ssh_target())
         .arg(format!(
             "stat -c '%F %s' '{}' 2>/dev/null || stat -f '%HT %z' '{}'",
-            shell_escape(&remote.path), shell_escape(&remote.path)
+            shell_escape(&remote.path),
+            shell_escape(&remote.path)
         ))
         .output()
         .await?;
@@ -327,9 +374,7 @@ pub async fn remote_total_size(remote: &RemotePath, recursive: bool) -> Result<u
     Ok(total)
 }
 
-pub async fn remote_list_files(
-    remote: &RemotePath,
-) -> Result<Vec<(String, u64, bool)>, BcmrError> {
+pub async fn remote_list_files(remote: &RemotePath) -> Result<Vec<(String, u64, bool)>, BcmrError> {
     let output = ssh_command(&remote.ssh_target())
         .arg(format!(
             "find '{}' -printf '%P\\0%s\\0%y\\0' 2>/dev/null || find '{}' ! -path '{}' -exec stat -f '%N\\0%z\\0%HT\\0' {{}} +",
@@ -375,11 +420,7 @@ pub async fn download_file(
     file_size: u64,
     opts: &RemoteTransferOptions,
 ) -> Result<(), BcmrError> {
-    let file_name = remote
-        .path
-        .rsplit('/')
-        .next()
-        .unwrap_or(&remote.path);
+    let file_name = remote.path.rsplit('/').next().unwrap_or(&remote.path);
     on_new_file(file_name, file_size);
 
     if let Some(parent) = local_dst.parent() {
@@ -388,7 +429,11 @@ pub async fn download_file(
         }
     }
 
-    let existing_size = if local_dst.exists() { Some(local_dst.metadata()?.len()) } else { None };
+    let existing_size = if local_dst.exists() {
+        Some(local_dst.metadata()?.len())
+    } else {
+        None
+    };
     let local_path_for_hash = local_dst.to_path_buf();
     let remote_for_hash = remote.clone();
     let remote_for_partial = remote.clone();
@@ -400,12 +445,15 @@ pub async fn download_file(
         async move || {
             tokio::task::spawn_blocking(move || {
                 crate::core::checksum::calculate_hash(&local_path_for_hash)
-            }).await.map_err(|e| BcmrError::InvalidInput(e.to_string()))?
-                .map_err(BcmrError::Io)
+            })
+            .await
+            .map_err(|e| BcmrError::InvalidInput(e.to_string()))?
+            .map_err(BcmrError::Io)
         },
-        async move || { remote_file_hash(&remote_for_hash, None).await },
-        async move |limit| { remote_file_hash(&remote_for_partial, Some(limit)).await },
-    ).await?;
+        async move || remote_file_hash(&remote_for_hash, None).await,
+        async move |limit| remote_file_hash(&remote_for_partial, Some(limit)).await,
+    )
+    .await?;
 
     if decision.skip_entirely {
         skip_callback(file_size);
@@ -417,7 +465,11 @@ pub async fn download_file(
     }
 
     let ssh_cmd = if decision.use_append_mode {
-        format!("tail -c +{} '{}'", decision.skip_bytes + 1, shell_escape(&remote.path))
+        format!(
+            "tail -c +{} '{}'",
+            decision.skip_bytes + 1,
+            shell_escape(&remote.path)
+        )
     } else {
         format!("cat '{}'", shell_escape(&remote.path))
     };
@@ -428,9 +480,10 @@ pub async fn download_file(
         .stderr(std::process::Stdio::piped())
         .spawn()?;
 
-    let mut stdout = child.stdout.take().ok_or_else(|| {
-        BcmrError::InvalidInput("Failed to capture SSH stdout".to_string())
-    })?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| BcmrError::InvalidInput("Failed to capture SSH stdout".to_string()))?;
     let mut stderr_pipe = child.stderr.take();
 
     let mut dst_file = if decision.use_append_mode {
@@ -468,13 +521,16 @@ pub async fn download_file(
 
     if opts.verify {
         let local_path = local_dst.to_path_buf();
-        let local_hash = tokio::task::spawn_blocking(move || {
-            crate::core::checksum::calculate_hash(&local_path)
-        }).await.map_err(|e| BcmrError::InvalidInput(e.to_string()))??;
+        let local_hash =
+            tokio::task::spawn_blocking(move || crate::core::checksum::calculate_hash(&local_path))
+                .await
+                .map_err(|e| BcmrError::InvalidInput(e.to_string()))??;
         let remote_hash = remote_file_hash(remote, None).await?;
         if local_hash != remote_hash {
             return Err(BcmrError::InvalidInput(format!(
-                "Verification failed: {} -> '{}'", remote, local_dst.display()
+                "Verification failed: {} -> '{}'",
+                remote,
+                local_dst.display()
             )));
         }
     }
@@ -486,7 +542,10 @@ pub async fn download_file(
     Ok(())
 }
 
-pub async fn remote_file_hash(remote: &RemotePath, limit: Option<u64>) -> Result<String, BcmrError> {
+pub async fn remote_file_hash(
+    remote: &RemotePath,
+    limit: Option<u64>,
+) -> Result<String, BcmrError> {
     let cmd = match limit {
         Some(n) => format!("head -c {} '{}'", n, shell_escape(&remote.path)),
         None => format!("cat '{}'", shell_escape(&remote.path)),
@@ -498,22 +557,26 @@ pub async fn remote_file_hash(remote: &RemotePath, limit: Option<u64>) -> Result
         .stderr(std::process::Stdio::piped())
         .spawn()?;
 
-    let mut stdout = child.stdout.take().ok_or_else(|| {
-        BcmrError::InvalidInput("Failed to capture SSH stdout".to_string())
-    })?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| BcmrError::InvalidInput("Failed to capture SSH stdout".to_string()))?;
 
     let mut hasher = blake3::Hasher::new();
     let mut buffer = vec![0u8; 1024 * 1024];
     loop {
         let n = stdout.read(&mut buffer).await?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         hasher.update(&buffer[..n]);
     }
 
     let status = child.wait().await?;
     if !status.success() {
         return Err(BcmrError::InvalidInput(format!(
-            "Failed to hash remote file '{}'", remote
+            "Failed to hash remote file '{}'",
+            remote
         )));
     }
 
@@ -554,20 +617,25 @@ pub async fn upload_file(
         opts,
         existing_size,
         file_size,
-        async move || { remote_file_hash(&remote_for_hash, None).await },
+        async move || remote_file_hash(&remote_for_hash, None).await,
         async move || {
             tokio::task::spawn_blocking(move || {
                 crate::core::checksum::calculate_hash(&local_path_for_hash)
-            }).await.map_err(|e| BcmrError::InvalidInput(e.to_string()))?
-                .map_err(BcmrError::Io)
+            })
+            .await
+            .map_err(|e| BcmrError::InvalidInput(e.to_string()))?
+            .map_err(BcmrError::Io)
         },
         async move |limit| {
             tokio::task::spawn_blocking(move || {
                 crate::core::checksum::calculate_partial_hash(&local_path_for_partial, limit)
-            }).await.map_err(|e| BcmrError::InvalidInput(e.to_string()))?
-                .map_err(BcmrError::Io)
+            })
+            .await
+            .map_err(|e| BcmrError::InvalidInput(e.to_string()))?
+            .map_err(BcmrError::Io)
         },
-    ).await?;
+    )
+    .await?;
 
     if decision.skip_entirely {
         skip_callback(file_size);
@@ -585,15 +653,18 @@ pub async fn upload_file(
         .stderr(std::process::Stdio::piped())
         .spawn()?;
 
-    let mut stdin = child.stdin.take().ok_or_else(|| {
-        BcmrError::InvalidInput("Failed to capture SSH stdin".to_string())
-    })?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| BcmrError::InvalidInput("Failed to capture SSH stdin".to_string()))?;
 
     let mut src_file = tokio::fs::File::open(local_src).await?;
 
     if decision.skip_bytes > 0 {
         use tokio::io::AsyncSeekExt;
-        src_file.seek(std::io::SeekFrom::Start(decision.skip_bytes)).await?;
+        src_file
+            .seek(std::io::SeekFrom::Start(decision.skip_bytes))
+            .await?;
     }
 
     let mut buffer = vec![0u8; 1024 * 1024];
@@ -619,7 +690,9 @@ pub async fn upload_file(
 
     if opts.verify && !verify_remote_file(local_src, remote).await? {
         return Err(BcmrError::InvalidInput(format!(
-            "Verification failed: '{}' -> {}", local_src.display(), remote
+            "Verification failed: '{}' -> {}",
+            local_src.display(),
+            remote
         )));
     }
 
@@ -635,12 +708,18 @@ async fn preserve_remote_attrs(local_src: &Path, remote: &RemotePath) -> Result<
 
     let mode = {
         #[cfg(unix)]
-        { use std::os::unix::fs::PermissionsExt; meta.permissions().mode() & 0o7777 }
+        {
+            use std::os::unix::fs::PermissionsExt;
+            meta.permissions().mode() & 0o7777
+        }
         #[cfg(not(unix))]
-        { 0o644u32 }
+        {
+            0o644u32
+        }
     };
 
-    let mtime_secs = meta.modified()
+    let mtime_secs = meta
+        .modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
@@ -650,7 +729,10 @@ async fn preserve_remote_attrs(local_src: &Path, remote: &RemotePath) -> Result<
     let ts = unix_to_touch_ts(mtime_secs as i64);
     let cmd = format!(
         "TZ=UTC touch -t '{}' '{}'; chmod {:o} '{}'",
-        ts, shell_escape(&remote.path), mode, shell_escape(&remote.path)
+        ts,
+        shell_escape(&remote.path),
+        mode,
+        shell_escape(&remote.path)
     );
     let _ = ssh_command(&remote.ssh_target()).arg(cmd).output().await?;
     Ok(())
@@ -660,21 +742,26 @@ async fn get_remote_attrs(remote: &RemotePath) -> Result<(i64, u32), BcmrError> 
     let output = ssh_command(&remote.ssh_target())
         .arg(format!(
             "stat -c '%Y %a' '{}' 2>/dev/null || stat -f '%m %Lp' '{}'",
-            shell_escape(&remote.path), shell_escape(&remote.path)
+            shell_escape(&remote.path),
+            shell_escape(&remote.path)
         ))
         .output()
         .await?;
 
     if !output.status.success() {
         return Err(BcmrError::InvalidInput(format!(
-            "Cannot stat remote file '{}'", remote
+            "Cannot stat remote file '{}'",
+            remote
         )));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let parts: Vec<&str> = stdout.trim().split_whitespace().collect();
+    let parts: Vec<&str> = stdout.split_whitespace().collect();
     let mtime_secs: i64 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let mode: u32 = parts.get(1).and_then(|s| u32::from_str_radix(s, 8).ok()).unwrap_or(0o644);
+    let mode: u32 = parts
+        .get(1)
+        .and_then(|s| u32::from_str_radix(s, 8).ok())
+        .unwrap_or(0o644);
 
     Ok((mtime_secs, mode))
 }
@@ -692,7 +779,10 @@ fn apply_local_attrs(local_path: &Path, mtime_secs: i64, mode: u32) -> Result<()
     Ok(())
 }
 
-async fn apply_remote_attrs_locally(remote: &RemotePath, local_path: &Path) -> Result<(), BcmrError> {
+async fn apply_remote_attrs_locally(
+    remote: &RemotePath,
+    local_path: &Path,
+) -> Result<(), BcmrError> {
     let (mtime_secs, mode) = get_remote_attrs(remote).await?;
     apply_local_attrs(local_path, mtime_secs, mode)?;
     Ok(())
@@ -702,9 +792,9 @@ pub async fn verify_remote_file(local_src: &Path, remote: &RemotePath) -> Result
     use crate::core::checksum;
 
     let local_path = local_src.to_path_buf();
-    let local_hash = tokio::task::spawn_blocking(move || {
-        checksum::calculate_hash(&local_path)
-    }).await.map_err(|e| BcmrError::InvalidInput(e.to_string()))??;
+    let local_hash = tokio::task::spawn_blocking(move || checksum::calculate_hash(&local_path))
+        .await
+        .map_err(|e| BcmrError::InvalidInput(e.to_string()))??;
 
     let output = ssh_command(&remote.ssh_target())
         .arg(format!("cat '{}'", shell_escape(&remote.path)))
@@ -713,7 +803,8 @@ pub async fn verify_remote_file(local_src: &Path, remote: &RemotePath) -> Result
 
     if !output.status.success() {
         return Err(BcmrError::InvalidInput(format!(
-            "Failed to read remote file for verification: '{}'", remote
+            "Failed to read remote file for verification: '{}'",
+            remote
         )));
     }
 
@@ -743,7 +834,10 @@ fn unix_to_touch_ts(secs: i64) -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
 
-    format!("{:04}{:02}{:02}{:02}{:02}.{:02}", y, m, d, hours, minutes, seconds)
+    format!(
+        "{:04}{:02}{:02}{:02}{:02}.{:02}",
+        y, m, d, hours, minutes, seconds
+    )
 }
 
 pub async fn download_directory(
@@ -757,8 +851,11 @@ pub async fn download_directory(
 ) -> Result<(), BcmrError> {
     let entries = remote_list_files(remote).await?;
 
-    let entries: Vec<_> = entries.into_iter()
-        .filter(|(rel_path, _, _)| !crate::core::traversal::is_excluded(std::path::Path::new(rel_path), excludes))
+    let entries: Vec<_> = entries
+        .into_iter()
+        .filter(|(rel_path, _, _)| {
+            !crate::core::traversal::is_excluded(std::path::Path::new(rel_path), excludes)
+        })
         .collect();
 
     for (rel_path, _, is_dir) in &entries {
@@ -780,16 +877,22 @@ pub async fn download_directory(
             path: format!("{}/{}", remote.path, rel_path),
         };
         let local_file = local_dst.join(rel_path);
-        download_file(&file_remote, &local_file, progress_callback, skip_callback, on_new_file, *size, opts).await?;
+        download_file(
+            &file_remote,
+            &local_file,
+            progress_callback,
+            skip_callback,
+            on_new_file,
+            *size,
+            opts,
+        )
+        .await?;
     }
 
     Ok(())
 }
 
-pub async fn ensure_remote_tree(
-    local_src: &Path,
-    remote: &RemotePath,
-) -> Result<(), BcmrError> {
+pub async fn ensure_remote_tree(local_src: &Path, remote: &RemotePath) -> Result<(), BcmrError> {
     use crate::core::traversal;
 
     ssh_command(&remote.ssh_target())
@@ -812,7 +915,13 @@ pub async fn ensure_remote_tree(
     if !dirs.is_empty() {
         let mkdir_cmd = dirs
             .iter()
-            .map(|d| format!("'{}/{}'", shell_escape(&remote.path), shell_escape(&d.display().to_string())))
+            .map(|d| {
+                format!(
+                    "'{}/{}'",
+                    shell_escape(&remote.path),
+                    shell_escape(&d.display().to_string())
+                )
+            })
             .collect::<Vec<_>>()
             .join(" ");
 
@@ -866,7 +975,13 @@ pub async fn upload_directory(
     if !dirs.is_empty() {
         let mkdir_cmd = dirs
             .iter()
-            .map(|d| format!("'{}/{}'", shell_escape(&remote.path), shell_escape(&d.display().to_string())))
+            .map(|d| {
+                format!(
+                    "'{}/{}'",
+                    shell_escape(&remote.path),
+                    shell_escape(&d.display().to_string())
+                )
+            })
             .collect::<Vec<_>>()
             .join(" ");
 
@@ -882,7 +997,15 @@ pub async fn upload_directory(
             host: remote.host.clone(),
             path: format!("{}/{}", remote.path, rel_path.display()),
         };
-        upload_file(local_path, &file_remote, progress_callback, skip_callback, on_new_file, opts).await?;
+        upload_file(
+            local_path,
+            &file_remote,
+            progress_callback,
+            skip_callback,
+            on_new_file,
+            opts,
+        )
+        .await?;
     }
 
     Ok(())
@@ -897,7 +1020,10 @@ pub async fn complete_remote_path(partial: &str) -> Vec<String> {
     let (dir, prefix) = if remote.path.ends_with('/') || remote.path == "." {
         (remote.path.clone(), String::new())
     } else if let Some(pos) = remote.path.rfind('/') {
-        (remote.path[..=pos].to_string(), remote.path[pos + 1..].to_string())
+        (
+            remote.path[..=pos].to_string(),
+            remote.path[pos + 1..].to_string(),
+        )
     } else {
         (".".to_string(), remote.path.clone())
     };
@@ -968,22 +1094,38 @@ mod tests {
 
     #[test]
     fn test_remote_path_ssh_target() {
-        let r = RemotePath { user: Some("alice".to_string()), host: "example.com".to_string(), path: "/data".to_string() };
+        let r = RemotePath {
+            user: Some("alice".to_string()),
+            host: "example.com".to_string(),
+            path: "/data".to_string(),
+        };
         assert_eq!(r.ssh_target(), "alice@example.com");
 
-        let r2 = RemotePath { user: None, host: "example.com".to_string(), path: "/data".to_string() };
+        let r2 = RemotePath {
+            user: None,
+            host: "example.com".to_string(),
+            path: "/data".to_string(),
+        };
         assert_eq!(r2.ssh_target(), "example.com");
     }
 
     #[test]
     fn test_remote_path_display() {
-        let r = RemotePath { user: Some("bob".to_string()), host: "srv".to_string(), path: "/tmp/f".to_string() };
+        let r = RemotePath {
+            user: Some("bob".to_string()),
+            host: "srv".to_string(),
+            path: "/tmp/f".to_string(),
+        };
         assert_eq!(r.display(), "bob@srv:/tmp/f");
     }
 
     #[test]
     fn test_remote_path_join() {
-        let r = RemotePath { user: None, host: "h".to_string(), path: "/base".to_string() };
+        let r = RemotePath {
+            user: None,
+            host: "h".to_string(),
+            path: "/base".to_string(),
+        };
         let joined = r.join("sub/file.txt");
         assert_eq!(joined.path, "/base/sub/file.txt");
         assert_eq!(joined.host, "h");

@@ -1,8 +1,8 @@
 use crate::cli::{Commands, TestMode};
-use crate::ui::progress::ProgressRenderer;
-use crate::ui::display::{print_dry_run, ActionType};
-use crate::core::traversal;
 use crate::core::error::BcmrError;
+use crate::core::traversal;
+use crate::ui::display::{print_dry_run, ActionType};
+use crate::ui::progress::ProgressRenderer;
 
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
@@ -49,7 +49,10 @@ fn check_removes_sync(
                 // Use read_dir (blocking syscall, acceptable in spawn_blocking)
                 let mut read_dir = std::fs::read_dir(&path)?;
                 if read_dir.next().is_some() {
-                    return Err(BcmrError::InvalidInput(format!("Cannot remove '{}': Directory not empty", path.display())));
+                    return Err(BcmrError::InvalidInput(format!(
+                        "Cannot remove '{}': Directory not empty",
+                        path.display()
+                    )));
                 }
                 files_to_remove.push(FileToRemove {
                     path: path.to_path_buf(),
@@ -101,7 +104,6 @@ pub async fn check_removes(
     .await?
 }
 
-
 async fn confirm_remove(path: &Path, is_dir: bool) -> std::result::Result<bool, BcmrError> {
     use crossterm::{
         cursor::{Hide, Show},
@@ -145,7 +147,6 @@ pub async fn remove_path(
         return Ok(());
     }
 
-    // Handle interactive mode
     if cli.is_interactive() && !cli.is_force() && !confirm_remove(path, is_dir).await? {
         return Ok(());
     }
@@ -170,11 +171,11 @@ pub async fn remove_path(
                 0
             };
 
-            if cli.is_interactive() && !cli.is_force() {
-            // Interactive check
-                if !confirm_remove(entry_path, entry.file_type().is_dir()).await? {
-                    continue;
-                }
+            if cli.is_interactive()
+                && !cli.is_force()
+                && !confirm_remove(entry_path, entry.file_type().is_dir()).await?
+            {
+                continue;
             }
 
             let entry_name = entry_path
@@ -215,11 +216,7 @@ pub async fn remove_path(
                     fs::remove_dir(entry_path).await?;
                 }
             } else {
-                print_dry_run(
-                    ActionType::Remove, 
-                    &entry_path.to_string_lossy(),
-                    None
-                );
+                print_dry_run(ActionType::Remove, &entry_path.to_string_lossy(), None);
             }
 
             // Skip root item itself
@@ -233,11 +230,7 @@ pub async fn remove_path(
         }
     } else if path.is_file() {
         if cli.is_dry_run() {
-             print_dry_run(
-                ActionType::Remove, 
-                &path.to_string_lossy(), 
-                None
-            );
+            print_dry_run(ActionType::Remove, &path.to_string_lossy(), None);
             return Ok(());
         }
 

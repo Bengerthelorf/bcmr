@@ -1,18 +1,18 @@
 mod cli;
+mod commands;
 mod config;
 mod core;
-mod commands;
 mod ui;
 
-use crate::config::{CONFIG, UpdateCheck};
+use crate::commands::remote_copy::{handle_remote_copy, is_plain_mode, ProgressRunner};
+use crate::config::{UpdateCheck, CONFIG};
 use crate::core::error::BcmrError;
-use crate::commands::remote_copy::{ProgressRunner, is_plain_mode, handle_remote_copy};
 use anyhow::{bail, Result};
 use cli::Commands;
-use ui::utils::format_bytes;
 use std::io::{self, Write};
-use std::sync::Arc;
 use std::sync::mpsc;
+use std::sync::Arc;
+use ui::utils::format_bytes;
 
 fn prompt_yes_no(message: &str) -> Result<bool> {
     print!("{} [y/N] ", message);
@@ -76,9 +76,7 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
 
     let test_mode = args.get_test_mode();
     let excludes = args.compile_excludes()?;
-    let (sources, dest) = args
-        .get_sources_and_dest()
-        .map_err(anyhow::Error::msg)?;
+    let (sources, dest) = args.get_sources_and_dest().map_err(anyhow::Error::msg)?;
 
     if let Some(mode) = args.get_reflink_mode() {
         validate_mode(&mode, "reflink")?;
@@ -120,7 +118,11 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         if args.is_dry_run() {
             println!("DRY RUN MODE: No changes will be made.\n");
             commands::copy::dry_run_plan(&plan, args)?;
-            println!("\nSummary: {} sources, {}", sources.len(), format_bytes(plan.total_size as f64));
+            println!(
+                "\nSummary: {} sources, {}",
+                sources.len(),
+                format_bytes(plan.total_size as f64)
+            );
             return Ok(());
         }
 
@@ -142,7 +144,8 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
             args,
             runner.inc_callback(),
             runner.file_callback(),
-        ).await;
+        )
+        .await;
 
         if let Err(e) = result {
             return runner.finish_err(e.to_string());
@@ -188,7 +191,8 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
             total_cb,
             scan_done_cb,
             files_found_cb,
-        ).await;
+        )
+        .await;
 
         if let Err(e) = result {
             return runner.finish_err(e.to_string());
@@ -201,9 +205,7 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
 async fn handle_move_command(args: &Commands) -> Result<()> {
     let test_mode = args.get_test_mode();
     let excludes = args.compile_excludes()?;
-    let (sources, dest) = args
-        .get_sources_and_dest()
-        .map_err(anyhow::Error::msg)?;
+    let (sources, dest) = args.get_sources_and_dest().map_err(anyhow::Error::msg)?;
 
     if sources.len() > 1 && (!dest.exists() || !dest.is_dir()) {
         bail!(
@@ -214,7 +216,8 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
 
     if args.is_force() {
         let files_to_overwrite =
-            commands::r#move::check_overwrites(sources, dest, args.is_recursive(), args, &excludes).await?;
+            commands::r#move::check_overwrites(sources, dest, args.is_recursive(), args, &excludes)
+                .await?;
 
         if !files_to_overwrite.is_empty()
             && args.should_prompt_for_overwrite()
@@ -224,21 +227,32 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
         }
     }
 
-    let total_size = commands::r#move::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
+    let total_size =
+        commands::r#move::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
 
     if args.is_dry_run() {
         println!("DRY RUN MODE: No changes will be made.\n");
 
         for src in sources {
             let _ = commands::r#move::move_path(
-                src, dest,
-                args.is_recursive(), args.is_preserve(),
-                test_mode.clone(), args, &excludes,
-                |_| {}, |_, _| {},
-            ).await;
+                src,
+                dest,
+                args.is_recursive(),
+                args.is_preserve(),
+                test_mode.clone(),
+                args,
+                &excludes,
+                |_| {},
+                |_, _| {},
+            )
+            .await;
         }
 
-        println!("\nSummary: {} sources, {}", sources.len(), format_bytes(total_size as f64));
+        println!(
+            "\nSummary: {} sources, {}",
+            sources.len(),
+            format_bytes(total_size as f64)
+        );
         return Ok(());
     }
 
@@ -253,11 +267,17 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
 
     for src in sources {
         let result = commands::r#move::move_path(
-            src, dest,
-            args.is_recursive(), args.is_preserve(),
-            test_mode.clone(), args, &excludes,
-            runner.inc_callback(), runner.file_callback(),
-        ).await;
+            src,
+            dest,
+            args.is_recursive(),
+            args.is_preserve(),
+            test_mode.clone(),
+            args,
+            &excludes,
+            runner.inc_callback(),
+            runner.file_callback(),
+        )
+        .await;
 
         if let Err(e) = result {
             eprintln!("Error moving '{}': {}", src.display(), e);
@@ -285,12 +305,16 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
 
         let runner = ProgressRunner::new(total_size, is_plain_mode(args), true)?;
         commands::remove::remove_paths(
-            paths, test_mode, args, &excludes,
+            paths,
+            test_mode,
+            args,
+            &excludes,
             Arc::clone(runner.progress()),
             runner.inc_callback(),
             Box::new(runner.file_callback()),
             files_to_remove.len(),
-        ).await?;
+        )
+        .await?;
 
         print!("\nSummary: {} files", file_count);
         if dir_count > 0 {
@@ -316,7 +340,10 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
 
     if let Some(first_path) = paths.first() {
         let display_name = first_path.file_name().unwrap_or_default().to_string_lossy();
-        runner.progress().lock().set_current_file(&display_name, total_size);
+        runner
+            .progress()
+            .lock()
+            .set_current_file(&display_name, total_size);
     }
 
     commands::remove::remove_paths(
@@ -328,7 +355,8 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         runner.inc_callback(),
         Box::new(runner.file_callback()),
         files_to_remove.len(),
-    ).await?;
+    )
+    .await?;
 
     runner.finish_ok()
 }
@@ -336,7 +364,12 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
 fn handle_init_command(args: &Commands) -> Result<()> {
     match args {
         Commands::Init {
-            shell, cmd, prefix, suffix, path, no_cmd,
+            shell,
+            cmd,
+            prefix,
+            suffix,
+            path,
+            no_cmd,
         } => {
             let script = commands::init::generate_init_script(
                 shell,
@@ -344,7 +377,7 @@ fn handle_init_command(args: &Commands) -> Result<()> {
                 prefix.as_deref(),
                 suffix.as_deref(),
                 path.as_ref(),
-                *no_cmd
+                *no_cmd,
             );
             print!("{}", script);
             Ok(())
@@ -356,9 +389,11 @@ fn handle_init_command(args: &Commands) -> Result<()> {
 fn validate_mode(mode: &str, name: &str) -> Result<()> {
     match mode.to_lowercase().as_str() {
         "force" | "disable" | "auto" => Ok(()),
-        other => Err(BcmrError::InvalidInput(
-            format!("Invalid {} mode '{}'. Supported modes: force, disable, auto.", name, other)
-        ).into()),
+        other => Err(BcmrError::InvalidInput(format!(
+            "Invalid {} mode '{}'. Supported modes: force, disable, auto.",
+            name, other
+        ))
+        .into()),
     }
 }
 
@@ -390,7 +425,8 @@ fn build_completion_command() -> clap::Command {
 fn remote_completion_script(shell: &clap_complete::Shell) -> &'static str {
     use clap_complete::Shell;
     match shell {
-        Shell::Zsh => r#"
+        Shell::Zsh => {
+            r#"
 
 _bcmr_with_remote() {
     local cur="${words[CURRENT]}"
@@ -405,8 +441,10 @@ _bcmr_with_remote() {
     _bcmr "$@"
 }
 compdef _bcmr_with_remote bcmr
-"#,
-        Shell::Bash => r#"
+"#
+        }
+        Shell::Bash => {
+            r#"
 
 _bcmr_with_remote() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
@@ -422,18 +460,24 @@ _bcmr_with_remote() {
     _bcmr "$@"
 }
 complete -F _bcmr_with_remote bcmr
-"#,
-        Shell::Fish => r#"
+"#
+        }
+        Shell::Fish => {
+            r#"
 
 complete -c bcmr -n '__fish_seen_subcommand_from copy move; and string match -q "*:*" -- (commandline -ct)' -f -a '(bcmr __complete-remote (commandline -ct) 2>/dev/null)'
-"#,
+"#
+        }
         Shell::PowerShell => "", // handled via injection into clap-generated script
         _ => "",
     }
 }
 
 fn background_update_check(command: &Commands) -> Option<mpsc::Receiver<Option<String>>> {
-    if matches!(command, Commands::Update | Commands::Completions { .. } | Commands::CompleteRemote { .. }) {
+    if matches!(
+        command,
+        Commands::Update | Commands::Completions { .. } | Commands::CompleteRemote { .. }
+    ) {
         return None;
     }
     if CONFIG.update_check != UpdateCheck::Notify {
@@ -475,7 +519,10 @@ async fn main() -> Result<()> {
                 // so there's only ONE Register-ArgumentCompleter
                 let injected = base.replacen(
                     "param($wordToComplete, $commandAst, $cursorPosition)\n",
-                    &format!("param($wordToComplete, $commandAst, $cursorPosition)\n{}\n", POWERSHELL_REMOTE_INJECT),
+                    &format!(
+                        "param($wordToComplete, $commandAst, $cursorPosition)\n{}\n",
+                        POWERSHELL_REMOTE_INJECT
+                    ),
                     1,
                 );
                 print!("{}", injected);

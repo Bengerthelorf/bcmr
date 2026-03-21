@@ -102,7 +102,11 @@ impl TuiProgress {
         if self.last_rendered_lines > new_lines {
             let mut stdout = stdout();
             for i in new_lines..self.last_rendered_lines {
-                let _ = execute!(stdout, MoveTo(0, self.start_row + i), Clear(ClearType::CurrentLine));
+                let _ = execute!(
+                    stdout,
+                    MoveTo(0, self.start_row + i),
+                    Clear(ClearType::CurrentLine)
+                );
             }
         }
 
@@ -311,7 +315,9 @@ impl TuiProgress {
             let worker_bar_width = 20usize.min(box_width.saturating_sub(30));
             // Fixed parts: "│ " (2) + "[N] " (num_width+3) + " [" (2) + "] " (2) + "100%" (4) + " xx.xx MiB/s" (13) + " │" (2)
             let fixed_chars = num_width + 26;
-            let name_max = box_width.saturating_sub(worker_bar_width + fixed_chars).max(8);
+            let name_max = box_width
+                .saturating_sub(worker_bar_width + fixed_chars)
+                .max(8);
 
             for (i, worker) in self.data.workers.iter_mut().enumerate() {
                 let row_offset = 4 + i as u16;
@@ -328,7 +334,9 @@ impl TuiProgress {
                         "-- /s".to_string()
                     };
                     let display_name = if worker.file_name.chars().count() > name_max {
-                        let end = worker.file_name.floor_char_boundary(name_max.saturating_sub(3));
+                        let end = worker
+                            .file_name
+                            .floor_char_boundary(name_max.saturating_sub(3));
                         format!("{}...", &worker.file_name[..end])
                     } else {
                         worker.file_name.clone()
@@ -336,10 +344,21 @@ impl TuiProgress {
                     let filled = (worker_bar_width * pct as usize / 100).min(worker_bar_width);
                     let empty = worker_bar_width - filled;
 
-                    execute!(stdout, MoveTo(0, current_row + row_offset), SetForegroundColor(border_color))?;
+                    execute!(
+                        stdout,
+                        MoveTo(0, current_row + row_offset),
+                        SetForegroundColor(border_color)
+                    )?;
                     write!(stdout, "{} ", vertical)?;
                     execute!(stdout, SetForegroundColor(text_color))?;
-                    write!(stdout, "[{:>width$}] {:name_w$} [", i + 1, display_name, width = num_width, name_w = name_max)?;
+                    write!(
+                        stdout,
+                        "[{:>width$}] {:name_w$} [",
+                        i + 1,
+                        display_name,
+                        width = num_width,
+                        name_w = name_max
+                    )?;
 
                     for j in 0..filled {
                         let frac = j as f32 / worker_bar_width as f32;
@@ -353,11 +372,16 @@ impl TuiProgress {
                     execute!(stdout, SetForegroundColor(text_color))?;
                     write!(stdout, "] {:>3}% {}", pct, spd_str)?;
 
-                    let content_len = num_width + 3 + name_max + 2 + worker_bar_width + 2 + 4 + 1 + spd_str.len();
+                    let content_len =
+                        num_width + 3 + name_max + 2 + worker_bar_width + 2 + 4 + 1 + spd_str.len();
                     let padding = box_width.saturating_sub(content_len + 3);
                     write!(stdout, "{}", " ".repeat(padding))?;
 
-                    execute!(stdout, MoveTo(right_border_col, current_row + row_offset), SetForegroundColor(border_color))?;
+                    execute!(
+                        stdout,
+                        MoveTo(right_border_col, current_row + row_offset),
+                        SetForegroundColor(border_color)
+                    )?;
                     write!(stdout, "{}", vertical)?;
                     execute!(stdout, Clear(ClearType::UntilNewLine))?;
                 } else {
@@ -520,7 +544,8 @@ impl ProgressRenderer for TuiProgress {
     }
 
     fn update_worker(&mut self, slot: usize, file_name: &str, file_size: u64, progress: u64) {
-        self.data.update_worker(slot, file_name, file_size, progress);
+        self.data
+            .update_worker(slot, file_name, file_size, progress);
     }
 
     fn finish_worker(&mut self, slot: usize) {

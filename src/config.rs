@@ -147,25 +147,16 @@ impl Config {
                 defaults.progress.layout.box_style,
             )
             .unwrap()
-            .set_default(
-                "copy.reflink",
-                defaults.copy.reflink,
-            )
+            .set_default("copy.reflink", defaults.copy.reflink)
             .unwrap()
-            .set_default(
-                "copy.sparse",
-                defaults.copy.sparse,
-            )
+            .set_default("copy.sparse", defaults.copy.sparse)
             .unwrap()
             .set_default(
                 "scp.parallel_transfers",
                 defaults.scp.parallel_transfers as i64,
             )
             .unwrap()
-            .set_default(
-                "scp.compression",
-                defaults.scp.compression,
-            )
+            .set_default("scp.compression", defaults.scp.compression)
             .unwrap()
             .set_default("update_check", "notify")
             .unwrap();

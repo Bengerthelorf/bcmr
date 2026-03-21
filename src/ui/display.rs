@@ -1,4 +1,4 @@
-use crossterm::style::{Color, SetForegroundColor, ResetColor};
+use crossterm::style::{Color, ResetColor, SetForegroundColor};
 use std::fmt;
 
 pub enum ActionType {
@@ -36,12 +36,12 @@ pub fn print_dry_run(action: ActionType, path: &str, details: Option<&str>) {
     print!("{}", SetForegroundColor(color));
     print!("{:<10} ", action);
     print!("{}", ResetColor);
-    
+
     print!("{}", path);
-    
+
     if let Some(detail) = details {
         print!(" -> {}", detail);
     }
-    
+
     println!();
 }

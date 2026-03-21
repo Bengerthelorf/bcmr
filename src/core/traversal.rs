@@ -1,5 +1,5 @@
-use walkdir::{DirEntry, WalkDir};
 use std::path::Path;
+use walkdir::{DirEntry, WalkDir};
 
 pub fn is_excluded(path: &Path, excludes: &[regex::Regex]) -> bool {
     let path_str = path.to_string_lossy();
@@ -14,11 +14,11 @@ pub fn walk(
     excludes: &[regex::Regex],
 ) -> impl Iterator<Item = walkdir::Result<DirEntry>> {
     let mut walker = WalkDir::new(root);
-    
+
     if min_depth > 0 {
         walker = walker.min_depth(min_depth);
     }
-    
+
     if contents_first {
         walker = walker.contents_first(true);
     }
@@ -29,9 +29,9 @@ pub fn walk(
 
     let excludes = excludes.to_vec();
 
-    walker.into_iter().filter_entry(move |e| {
-        !is_excluded(e.path(), &excludes)
-    })
+    walker
+        .into_iter()
+        .filter_entry(move |e| !is_excluded(e.path(), &excludes))
 }
 
 #[cfg(test)]

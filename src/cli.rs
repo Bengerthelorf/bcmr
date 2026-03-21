@@ -212,9 +212,7 @@ pub enum Commands {
     Update,
 
     #[command(name = "__complete-remote", hide = true)]
-    CompleteRemote {
-        partial: String,
-    },
+    CompleteRemote { partial: String },
 
     /// Generate shell completions
     Completions {
@@ -319,7 +317,10 @@ impl Commands {
             Commands::Remove {
                 force, interactive, ..
             } => !*force && *interactive,
-            Commands::Init { .. } | Commands::Update | Commands::Completions { .. } | Commands::CompleteRemote { .. } => false,
+            Commands::Init { .. }
+            | Commands::Update
+            | Commands::Completions { .. }
+            | Commands::CompleteRemote { .. } => false,
         }
     }
 
@@ -463,7 +464,6 @@ impl Commands {
             _ => Err("command does not support remove paths".to_string()),
         }
     }
-
 }
 
 pub fn parse_args() -> Cli {
@@ -560,11 +560,28 @@ mod tests {
     #[test]
     fn test_commands_get_sources_and_dest() {
         let cmd = Commands::Copy {
-            paths: vec![PathBuf::from("a"), PathBuf::from("b"), PathBuf::from("dest")],
-            recursive: false, preserve: false, force: false, yes: false,
-            verbose: false, exclude: None, tui: false, dry_run: false,
-            test_mode: None, verify: false, resume: false, strict: false,
-            append: false, sync: false, reflink: None, sparse: None, parallel: None,
+            paths: vec![
+                PathBuf::from("a"),
+                PathBuf::from("b"),
+                PathBuf::from("dest"),
+            ],
+            recursive: false,
+            preserve: false,
+            force: false,
+            yes: false,
+            verbose: false,
+            exclude: None,
+            tui: false,
+            dry_run: false,
+            test_mode: None,
+            verify: false,
+            resume: false,
+            strict: false,
+            append: false,
+            sync: false,
+            reflink: None,
+            sparse: None,
+            parallel: None,
         };
 
         let (sources, dest) = cmd.get_sources_and_dest().unwrap();

@@ -34,7 +34,11 @@ export PATH="{}:$PATH"
             }
 
             if !no_cmd {
-                let prefix = prefix_arg.unwrap_or(if cmd_compat.is_empty() { "" } else { cmd_compat });
+                let prefix = prefix_arg.unwrap_or(if cmd_compat.is_empty() {
+                    ""
+                } else {
+                    cmd_compat
+                });
                 let suffix = suffix_arg.unwrap_or("");
 
                 script.push_str(&format!(
@@ -66,7 +70,6 @@ function {prefix}rm{suffix}() {{
                     exe_path = exe_path
                 ));
 
-                // Add completion wrappers for zsh aliases
                 if matches!(shell, Shell::Zsh) {
                     script.push_str(&format!(
                         r#"
@@ -140,9 +143,13 @@ fish_add_path "{}"
             }
 
             if !no_cmd {
-                let prefix = prefix_arg.unwrap_or(if cmd_compat.is_empty() { "" } else { cmd_compat });
+                let prefix = prefix_arg.unwrap_or(if cmd_compat.is_empty() {
+                    ""
+                } else {
+                    cmd_compat
+                });
                 let suffix = suffix_arg.unwrap_or("");
-                
+
                 script.push_str(&format!(
                     r#"
 # bcmr shell integration

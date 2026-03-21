@@ -1,22 +1,28 @@
 use crate::cli::{Commands, TestMode};
 use crate::commands::copy;
-use crate::core::traversal;
 use crate::core::error::BcmrError;
+use crate::core::traversal;
 use crate::ui::display::{print_dry_run, ActionType};
 
+pub use copy::FileToOverwrite;
 use std::path::{Path, PathBuf};
 use tokio::fs;
-pub use copy::FileToOverwrite;
 
 fn is_cross_device_error(err: &std::io::Error) -> bool {
     #[cfg(unix)]
-    { err.raw_os_error() == Some(libc::EXDEV) }
+    {
+        err.raw_os_error() == Some(libc::EXDEV)
+    }
 
     #[cfg(windows)]
-    { err.raw_os_error() == Some(17) } // ERROR_NOT_SAME_DEVICE
+    {
+        err.raw_os_error() == Some(17)
+    } // ERROR_NOT_SAME_DEVICE
 
     #[cfg(not(any(unix, windows)))]
-    { false }
+    {
+        false
+    }
 }
 
 pub async fn check_overwrites(
@@ -58,14 +64,14 @@ where
     }
 
     if src.is_file() {
-        let dst_path = if dst.is_dir() {
-            dst.join(
-                src.file_name()
-                    .ok_or_else(|| BcmrError::InvalidInput("Invalid source file name".to_string()))?,
-            )
-        } else {
-            dst.to_path_buf()
-        };
+        let dst_path =
+            if dst.is_dir() {
+                dst.join(src.file_name().ok_or_else(|| {
+                    BcmrError::InvalidInput("Invalid source file name".to_string())
+                })?)
+            } else {
+                dst.to_path_buf()
+            };
 
         if dst_path.exists() && !cli.is_force() {
             return Err(BcmrError::TargetExists(dst_path));
@@ -75,7 +81,7 @@ where
             print_dry_run(
                 ActionType::Move,
                 &src.to_string_lossy(),
-                Some(&dst_path.to_string_lossy())
+                Some(&dst_path.to_string_lossy()),
             );
             return Ok(());
         }
@@ -85,7 +91,11 @@ where
         }
 
         let file_size = src.metadata()?.len();
-        let file_name = src.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let file_name = src
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         if let Err(e) = fs::rename(src, &dst_path).await {
             if is_cross_device_error(&e) {
                 copy::copy_path(
@@ -97,8 +107,9 @@ where
                     cli,
                     excludes,
                     progress_callback.clone(),
-                    on_new_file.clone()
-                ).await?;
+                    on_new_file.clone(),
+                )
+                .await?;
                 fs::remove_file(src).await?;
             } else {
                 return Err(BcmrError::Io(e));
@@ -122,60 +133,66 @@ where
 
         if !excludes.is_empty() || cli.is_dry_run() {
             if cli.is_dry_run() {
-                 if !new_dst.exists() {
-                     print_dry_run(
+                if !new_dst.exists() {
+                    print_dry_run(
                         ActionType::Add,
                         &src.to_string_lossy(),
-                        Some(&format!("(DIR) -> {}", new_dst.display()))
-                     );
-                 }
-                 
-                 for entry in traversal::walk(src, true, false, 1, excludes) {
-                     let entry = entry?;
-                     let path = entry.path();
-                     let relative_path = path.strip_prefix(src)?;
-                     let target_path = new_dst.join(relative_path);
-                     
-                     if path.is_dir() {
-                         if !target_path.exists() {
-                             print_dry_run(
+                        Some(&format!("(DIR) -> {}", new_dst.display())),
+                    );
+                }
+
+                for entry in traversal::walk(src, true, false, 1, excludes) {
+                    let entry = entry?;
+                    let path = entry.path();
+                    let relative_path = path.strip_prefix(src)?;
+                    let target_path = new_dst.join(relative_path);
+
+                    if path.is_dir() {
+                        if !target_path.exists() {
+                            print_dry_run(
                                 ActionType::Add,
                                 &path.to_string_lossy(),
-                                Some(&format!("(DIR) -> {}", target_path.display()))
+                                Some(&format!("(DIR) -> {}", target_path.display())),
                             );
-                         }
-                     } else {
-                         print_dry_run(
-                            ActionType::Move, 
+                        }
+                    } else {
+                        print_dry_run(
+                            ActionType::Move,
                             &path.to_string_lossy(),
-                            Some(&target_path.to_string_lossy())
+                            Some(&target_path.to_string_lossy()),
                         );
-                     }
-                 }
-                 return Ok(());
+                    }
+                }
+                return Ok(());
             }
 
             // Excludes: rename ignores excludes -> Copy + Remove source(files) + Remove source(dir, if empty)
-            
+
             copy::copy_path(
                 src,
-                dst, 
+                dst,
                 recursive,
                 preserve,
                 test_mode.clone(),
                 cli,
                 excludes,
                 progress_callback.clone(),
-                on_new_file.clone()
-            ).await?;
+                on_new_file.clone(),
+            )
+            .await?;
 
             remove_directory_contents(src, excludes).await?;
-            let _ = fs::remove_dir(src).await; 
-
+            let _ = fs::remove_dir(src).await;
         } else {
             // Calculate size before rename (for progress reporting on success)
-            let dir_size = copy::get_total_size(&[src.to_path_buf()], true, cli, excludes).await.unwrap_or(0);
-            let dir_name = src.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let dir_size = copy::get_total_size(&[src.to_path_buf()], true, cli, excludes)
+                .await
+                .unwrap_or(0);
+            let dir_name = src
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
 
             if let Err(e) = fs::rename(src, &new_dst).await {
                 if is_cross_device_error(&e) {
@@ -188,8 +205,9 @@ where
                         cli,
                         excludes,
                         progress_callback.clone(),
-                        on_new_file.clone()
-                    ).await?;
+                        on_new_file.clone(),
+                    )
+                    .await?;
                     fs::remove_dir_all(src).await?;
                 } else {
                     return Err(e.into());
@@ -215,7 +233,10 @@ where
     Ok(())
 }
 
-async fn remove_directory_contents(dir: &Path, excludes: &[regex::Regex]) -> std::result::Result<(), BcmrError> {
+async fn remove_directory_contents(
+    dir: &Path,
+    excludes: &[regex::Regex],
+) -> std::result::Result<(), BcmrError> {
     for entry in traversal::walk(dir, true, true, 0, excludes) {
         let entry = entry?;
         let path = entry.path();
