@@ -8,7 +8,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/bcmr?style=for-the-badge&color=blue)](https://crates.io/crates/bcmr)
 &nbsp;
-[![Documentation](https://img.shields.io/badge/Documentation-Visit_→-2ea44f?style=for-the-badge)](https://bengerthelorf.github.io/bcmr/)
+[![Documentation](https://img.shields.io/badge/Documentation-Visit_→-2ea44f?style=for-the-badge)](https://bcmr.snaix.homes/bcmr/)
 &nbsp;
 [![Homebrew](https://img.shields.io/badge/Homebrew-Available-orange?style=for-the-badge)](https://github.com/Bengerthelorf/bcmr#install)
 
@@ -20,7 +20,7 @@
 
 <br>
 
-### [📖 Read the Full Documentation →](https://bengerthelorf.github.io/bcmr/)
+### [📖 Read the Full Documentation →](https://bcmr.snaix.homes/bcmr/)
 
 Installation, shell integration, CLI reference, configuration, and more.
 
@@ -49,7 +49,7 @@ brew install Bengerthelorf/tap/bcmr
 ### Install Script
 
 ```bash
-curl -fsSL https://bcmr.snaix.homes/ | bash
+curl -fsSL https://bcmr.snaix.homes/install | bash
 ```
 
 ### Cargo
@@ -60,7 +60,7 @@ cargo install bcmr
 
 ### Pre-built Binaries
 
-Download from [Releases](https://github.com/Bengerthelorf/bcmr/releases/latest) — available for Linux (x86_64 musl static), macOS Intel, macOS Apple Silicon, and Windows.
+Download from [Releases](https://github.com/Bengerthelorf/bcmr/releases/latest) — available for Linux (x86_64/ARM64), macOS (Intel/Apple Silicon), Windows (x86_64/ARM64), and FreeBSD.
 
 ### From Source
 
@@ -110,7 +110,7 @@ eval "$(bcmr init zsh --cmd b)"    # creates bcp, bmv, brm
 eval "$(bcmr init zsh --cmd '')"   # creates cp, mv, rm
 ```
 
-> **Need help?** Check the [Getting Started](https://bengerthelorf.github.io/bcmr/guide/getting-started) guide, or browse the full [Documentation](https://bengerthelorf.github.io/bcmr/).
+> **Need help?** Check the [Getting Started](https://bcmr.snaix.homes/bcmr/guide/getting-started) guide, or browse the full [Documentation](https://bcmr.snaix.homes/bcmr/).
 
 ## Configuration
 
