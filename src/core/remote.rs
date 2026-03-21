@@ -113,6 +113,54 @@ pub struct RemoteTransferOptions {
     pub append: bool,
 }
 
+struct ResumeDecision {
+    skip_bytes: u64,
+    use_append_mode: bool,
+    skip_entirely: bool,
+}
+
+async fn check_resume_state(
+    opts: &RemoteTransferOptions,
+    existing_size: Option<u64>,
+    source_size: u64,
+    existing_full_hash: impl AsyncFnOnce() -> Result<String, BcmrError>,
+    source_full_hash: impl AsyncFnOnce() -> Result<String, BcmrError>,
+    existing_partial_hash: impl AsyncFnOnce(u64) -> Result<String, BcmrError>,
+) -> Result<ResumeDecision, BcmrError> {
+    if !(opts.resume || opts.append || opts.strict) {
+        return Ok(ResumeDecision { skip_bytes: 0, use_append_mode: false, skip_entirely: false });
+    }
+
+    let existing_size = match existing_size {
+        Some(s) => s,
+        None => return Ok(ResumeDecision { skip_bytes: 0, use_append_mode: false, skip_entirely: false }),
+    };
+
+    if existing_size == source_size {
+        if opts.strict {
+            let ex_hash = existing_full_hash().await?;
+            let src_hash = source_full_hash().await?;
+            if ex_hash == src_hash {
+                return Ok(ResumeDecision { skip_bytes: 0, use_append_mode: false, skip_entirely: true });
+            }
+        } else {
+            return Ok(ResumeDecision { skip_bytes: 0, use_append_mode: false, skip_entirely: true });
+        }
+    } else if existing_size < source_size {
+        if opts.strict {
+            let ex_hash = existing_full_hash().await?;
+            let partial = existing_partial_hash(existing_size).await?;
+            if ex_hash == partial {
+                return Ok(ResumeDecision { skip_bytes: existing_size, use_append_mode: true, skip_entirely: false });
+            }
+        } else {
+            return Ok(ResumeDecision { skip_bytes: existing_size, use_append_mode: true, skip_entirely: false });
+        }
+    }
+
+    Ok(ResumeDecision { skip_bytes: 0, use_append_mode: false, skip_entirely: false })
+}
+
 // ── SSH connection multiplexing ──
 // Uses ControlMaster to reuse a single TCP connection for all SSH commands
 // to the same host. The first connection may prompt for a password (if TTY
@@ -340,51 +388,36 @@ pub async fn download_file(
         }
     }
 
-    let mut skip_bytes: u64 = 0;
-    let mut use_append_mode = false;
+    let existing_size = if local_dst.exists() { Some(local_dst.metadata()?.len()) } else { None };
+    let local_path_for_hash = local_dst.to_path_buf();
+    let remote_for_hash = remote.clone();
+    let remote_for_partial = remote.clone();
 
-    if (opts.resume || opts.append || opts.strict) && local_dst.exists() {
-        let local_size = local_dst.metadata()?.len();
-        if local_size == file_size {
-            if opts.strict {
-                let local_path = local_dst.to_path_buf();
-                let local_hash = tokio::task::spawn_blocking(move || {
-                    crate::core::checksum::calculate_hash(&local_path)
-                }).await.map_err(|e| BcmrError::InvalidInput(e.to_string()))??;
-                let remote_hash = remote_file_hash(remote, None).await?;
-                if local_hash == remote_hash {
-                    skip_callback(file_size);
-                    return Ok(());
-                }
-            } else {
-                skip_callback(file_size);
-                return Ok(());
-            }
-        } else if local_size < file_size {
-            if opts.strict {
-                let remote_partial_hash = remote_file_hash(remote, Some(local_size)).await?;
-                let local_path = local_dst.to_path_buf();
-                let local_hash = tokio::task::spawn_blocking(move || {
-                    crate::core::checksum::calculate_hash(&local_path)
-                }).await.map_err(|e| BcmrError::InvalidInput(e.to_string()))??;
-                if local_hash == remote_partial_hash {
-                    skip_bytes = local_size;
-                    use_append_mode = true;
-                }
-            } else {
-                skip_bytes = local_size;
-                use_append_mode = true;
-            }
-        }
+    let decision = check_resume_state(
+        opts,
+        existing_size,
+        file_size,
+        async move || {
+            tokio::task::spawn_blocking(move || {
+                crate::core::checksum::calculate_hash(&local_path_for_hash)
+            }).await.map_err(|e| BcmrError::InvalidInput(e.to_string()))?
+                .map_err(BcmrError::Io)
+        },
+        async move || { remote_file_hash(&remote_for_hash, None).await },
+        async move |limit| { remote_file_hash(&remote_for_partial, Some(limit)).await },
+    ).await?;
+
+    if decision.skip_entirely {
+        skip_callback(file_size);
+        return Ok(());
     }
 
-    if skip_bytes > 0 {
-        skip_callback(skip_bytes);
+    if decision.skip_bytes > 0 {
+        skip_callback(decision.skip_bytes);
     }
 
-    let ssh_cmd = if use_append_mode {
-        // tail -c +N is 1-indexed: +1 means from byte 0, so skip_bytes+1 starts after skipped portion
-        format!("tail -c +{} '{}'", skip_bytes + 1, shell_escape(&remote.path))
+    let ssh_cmd = if decision.use_append_mode {
+        format!("tail -c +{} '{}'", decision.skip_bytes + 1, shell_escape(&remote.path))
     } else {
         format!("cat '{}'", shell_escape(&remote.path))
     };
@@ -400,7 +433,7 @@ pub async fn download_file(
     })?;
     let mut stderr_pipe = child.stderr.take();
 
-    let mut dst_file = if use_append_mode {
+    let mut dst_file = if decision.use_append_mode {
         tokio::fs::OpenOptions::new()
             .append(true)
             .open(local_dst)
@@ -512,50 +545,40 @@ pub async fn upload_file(
         }
     }
 
-    let mut skip_bytes: u64 = 0;
-    let mut use_append_mode = false;
+    let existing_size = remote_file_size(remote).await.ok().flatten();
+    let remote_for_hash = remote.clone();
+    let local_path_for_hash = local_src.to_path_buf();
+    let local_path_for_partial = local_src.to_path_buf();
 
-    if opts.resume || opts.append || opts.strict {
-        if let Ok(Some(remote_size)) = remote_file_size(remote).await {
-            if remote_size == file_size {
-                if opts.strict {
-                    let local_path = local_src.to_path_buf();
-                    let local_hash = tokio::task::spawn_blocking(move || {
-                        crate::core::checksum::calculate_hash(&local_path)
-                    }).await.map_err(|e| BcmrError::InvalidInput(e.to_string()))??;
-                    let remote_hash = remote_file_hash(remote, None).await?;
-                    if local_hash == remote_hash {
-                        skip_callback(file_size);
-                        return Ok(());
-                    }
-                } else {
-                    skip_callback(file_size);
-                    return Ok(());
-                }
-            } else if remote_size < file_size {
-                if opts.strict {
-                    let local_path = local_src.to_path_buf();
-                    let local_partial = tokio::task::spawn_blocking(move || {
-                        crate::core::checksum::calculate_partial_hash(&local_path, remote_size)
-                    }).await.map_err(|e| BcmrError::InvalidInput(e.to_string()))??;
-                    let remote_hash = remote_file_hash(remote, None).await?;
-                    if local_partial == remote_hash {
-                        skip_bytes = remote_size;
-                        use_append_mode = true;
-                    }
-                } else {
-                    skip_bytes = remote_size;
-                    use_append_mode = true;
-                }
-            }
-        }
+    let decision = check_resume_state(
+        opts,
+        existing_size,
+        file_size,
+        async move || { remote_file_hash(&remote_for_hash, None).await },
+        async move || {
+            tokio::task::spawn_blocking(move || {
+                crate::core::checksum::calculate_hash(&local_path_for_hash)
+            }).await.map_err(|e| BcmrError::InvalidInput(e.to_string()))?
+                .map_err(BcmrError::Io)
+        },
+        async move |limit| {
+            tokio::task::spawn_blocking(move || {
+                crate::core::checksum::calculate_partial_hash(&local_path_for_partial, limit)
+            }).await.map_err(|e| BcmrError::InvalidInput(e.to_string()))?
+                .map_err(BcmrError::Io)
+        },
+    ).await?;
+
+    if decision.skip_entirely {
+        skip_callback(file_size);
+        return Ok(());
     }
 
-    if skip_bytes > 0 {
-        skip_callback(skip_bytes);
+    if decision.skip_bytes > 0 {
+        skip_callback(decision.skip_bytes);
     }
 
-    let cat_op = if use_append_mode { ">>" } else { ">" };
+    let cat_op = if decision.use_append_mode { ">>" } else { ">" };
     let mut child = ssh_command(&remote.ssh_target())
         .arg(format!("cat {} '{}'", cat_op, shell_escape(&remote.path)))
         .stdin(std::process::Stdio::piped())
@@ -568,9 +591,9 @@ pub async fn upload_file(
 
     let mut src_file = tokio::fs::File::open(local_src).await?;
 
-    if skip_bytes > 0 {
+    if decision.skip_bytes > 0 {
         use tokio::io::AsyncSeekExt;
-        src_file.seek(std::io::SeekFrom::Start(skip_bytes)).await?;
+        src_file.seek(std::io::SeekFrom::Start(decision.skip_bytes)).await?;
     }
 
     let mut buffer = vec![0u8; 1024 * 1024];
