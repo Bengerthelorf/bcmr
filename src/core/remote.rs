@@ -104,6 +104,15 @@ pub struct RemoteFileInfo {
     pub size: u64,
 }
 
+#[derive(Clone)]
+pub struct RemoteTransferOptions {
+    pub preserve: bool,
+    pub verify: bool,
+    pub resume: bool,
+    pub strict: bool,
+    pub append: bool,
+}
+
 // ── SSH connection multiplexing ──
 // Uses ControlMaster to reuse a single TCP connection for all SSH commands
 // to the same host. The first connection may prompt for a password (if TTY
@@ -374,8 +383,7 @@ pub async fn upload_file(
     remote: &RemotePath,
     progress_callback: &impl Fn(u64),
     on_new_file: &impl Fn(&str, u64),
-    preserve: bool,
-    verify: bool,
+    opts: &RemoteTransferOptions,
 ) -> Result<(), BcmrError> {
     let file_size = local_src.metadata()?.len();
     let file_name = local_src
@@ -426,7 +434,7 @@ pub async fn upload_file(
         )));
     }
 
-    if verify {
+    if opts.verify {
         if !verify_remote_file(local_src, remote).await? {
             return Err(BcmrError::InvalidInput(format!(
                 "Verification failed: '{}' -> {}", local_src.display(), remote
@@ -434,7 +442,7 @@ pub async fn upload_file(
         }
     }
 
-    if preserve {
+    if opts.preserve {
         preserve_remote_attrs(local_src, remote).await?;
     }
 
@@ -595,9 +603,7 @@ pub async fn upload_directory(
     progress_callback: &impl Fn(u64),
     on_new_file: &impl Fn(&str, u64),
     excludes: &[regex::Regex],
-    preserve: bool,
-    verify: bool,
-    append: bool,
+    opts: &RemoteTransferOptions,
 ) -> Result<(), BcmrError> {
     use crate::core::traversal;
 
@@ -647,7 +653,7 @@ pub async fn upload_directory(
             host: remote.host.clone(),
             path: format!("{}/{}", remote.path, rel_path.display()),
         };
-        if append {
+        if opts.append {
             if let Ok(meta) = local_path.metadata() {
                 if let Ok(Some(remote_size)) = remote_file_size(&file_remote).await {
                     if remote_size == meta.len() {
@@ -657,7 +663,7 @@ pub async fn upload_directory(
                 }
             }
         }
-        upload_file(local_path, &file_remote, progress_callback, on_new_file, preserve, verify).await?;
+        upload_file(local_path, &file_remote, progress_callback, on_new_file, opts).await?;
     }
 
     Ok(())

@@ -309,9 +309,7 @@ async fn run_parallel_transfers(
     items: Vec<TransferItem>,
     parallel: usize,
     progress: &Arc<Mutex<Box<dyn ProgressRenderer>>>,
-    append: bool,
-    preserve: bool,
-    verify: bool,
+    opts: &crate::core::remote::RemoteTransferOptions,
 ) -> Result<(), BcmrError> {
     use crate::core::remote;
 
@@ -325,6 +323,7 @@ async fn run_parallel_transfers(
         let pool = Arc::clone(&slot_pool);
         let prog = Arc::clone(progress);
         let errs = Arc::clone(&errors);
+        let task_opts = opts.clone();
 
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
@@ -360,11 +359,10 @@ async fn run_parallel_transfers(
                 p2.lock().update_worker(slot, name, size, 0);
             };
 
-            // In append mode, skip files that already exist with the same size
-            if append && item.is_upload {
+            if task_opts.append && item.is_upload {
                 if let Ok(Some(remote_size)) = remote::remote_file_size(&item.remote).await {
                     if remote_size == item.size {
-                        progress_cb(item.size); // Count as done
+                        progress_cb(item.size);
                         prog.lock().finish_worker(slot);
                         pool.lock().push(slot);
                         return;
@@ -373,7 +371,7 @@ async fn run_parallel_transfers(
             }
 
             let result = if item.is_upload {
-                remote::upload_file(&item.local_path, &item.remote, &progress_cb, &noop_file_cb, preserve, verify).await
+                remote::upload_file(&item.local_path, &item.remote, &progress_cb, &noop_file_cb, &task_opts).await
             } else {
                 remote::download_file(&item.remote, &item.local_path, &progress_cb, &noop_file_cb, item.size).await
             };
@@ -543,6 +541,14 @@ async fn handle_remote_upload(
         return Ok(());
     }
 
+    let opts = remote::RemoteTransferOptions {
+        preserve: args.is_preserve(),
+        verify: args.is_verify(),
+        resume: args.is_resume(),
+        strict: args.is_strict(),
+        append: args.is_append(),
+    };
+
     let runner = ProgressRunner::new(total_size, is_plain_mode(args), false)?;
     runner.progress().lock().set_operation_type("Uploading");
     let multi_source = sources.len() > 1;
@@ -567,14 +573,13 @@ async fn handle_remote_upload(
             }
         }
 
-        run_parallel_transfers(items, parallel, runner.progress(), args.is_append(), args.is_preserve(), args.is_verify()).await
+        run_parallel_transfers(items, parallel, runner.progress(), &opts).await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
     } else {
-        let append = args.is_append();
         for src in sources {
             if src.is_file() {
                 let file_remote = resolve_upload_remote(src, rdest, multi_source);
-                if append {
+                if opts.append {
                     let local_size = src.metadata()?.len();
                     if let Ok(Some(remote_size)) = remote::remote_file_size(&file_remote).await {
                         if remote_size == local_size {
@@ -583,10 +588,10 @@ async fn handle_remote_upload(
                         }
                     }
                 }
-                remote::upload_file(src, &file_remote, &runner.inc_callback(), &runner.file_callback(), args.is_preserve(), args.is_verify()).await?;
+                remote::upload_file(src, &file_remote, &runner.inc_callback(), &runner.file_callback(), &opts).await?;
             } else if src.is_dir() && args.is_recursive() {
                 let dir_remote = rdest.join(&src.file_name().unwrap().to_string_lossy());
-                remote::upload_directory(src, &dir_remote, &runner.inc_callback(), &runner.file_callback(), &excludes, args.is_preserve(), args.is_verify(), append).await?;
+                remote::upload_directory(src, &dir_remote, &runner.inc_callback(), &runner.file_callback(), &excludes, &opts).await?;
             }
         }
     }
@@ -609,6 +614,14 @@ async fn handle_remote_download(
         let size = remote::remote_total_size(&rsrc, args.is_recursive()).await?;
         remote_sources.push((rsrc, size));
     }
+
+    let opts = remote::RemoteTransferOptions {
+        preserve: args.is_preserve(),
+        verify: args.is_verify(),
+        resume: args.is_resume(),
+        strict: args.is_strict(),
+        append: args.is_append(),
+    };
 
     let total_size: u64 = remote_sources.iter().map(|(_, s)| *s).sum();
     let runner = ProgressRunner::new(total_size, is_plain_mode(args), false)?;
@@ -660,7 +673,7 @@ async fn handle_remote_download(
             }
         }
 
-        run_parallel_transfers(items, parallel, runner.progress(), args.is_append(), args.is_preserve(), args.is_verify()).await
+        run_parallel_transfers(items, parallel, runner.progress(), &opts).await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
     } else {
         for (rsrc, _) in &remote_sources {
