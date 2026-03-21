@@ -437,18 +437,45 @@ pub async fn upload_file(
         }
     }
 
-    // Determine how much to skip based on resume/append/strict
     let mut skip_bytes: u64 = 0;
     let mut use_append_mode = false;
 
-    if opts.resume || opts.append {
+    if opts.resume || opts.append || opts.strict {
         if let Ok(Some(remote_size)) = remote_file_size(remote).await {
             if remote_size == file_size {
-                skip_callback(file_size);
-                return Ok(());
+                if opts.strict {
+                    // Full hash comparison to verify the file is identical
+                    let local_path = local_src.to_path_buf();
+                    let local_hash = tokio::task::spawn_blocking(move || {
+                        crate::core::checksum::calculate_hash(&local_path)
+                    }).await.map_err(|e| BcmrError::InvalidInput(e.to_string()))??;
+                    let remote_hash = remote_file_hash(remote, None).await?;
+                    if local_hash == remote_hash {
+                        skip_callback(file_size);
+                        return Ok(());
+                    }
+                    // Hashes differ: overwrite from scratch
+                } else {
+                    skip_callback(file_size);
+                    return Ok(());
+                }
             } else if remote_size < file_size {
-                skip_bytes = remote_size;
-                use_append_mode = true;
+                if opts.strict {
+                    // Verify the partial data matches before resuming
+                    let local_path = local_src.to_path_buf();
+                    let local_partial = tokio::task::spawn_blocking(move || {
+                        crate::core::checksum::calculate_partial_hash(&local_path, remote_size)
+                    }).await.map_err(|e| BcmrError::InvalidInput(e.to_string()))??;
+                    let remote_hash = remote_file_hash(remote, None).await?;
+                    if local_partial == remote_hash {
+                        skip_bytes = remote_size;
+                        use_append_mode = true;
+                    }
+                    // Hashes differ: overwrite from scratch
+                } else {
+                    skip_bytes = remote_size;
+                    use_append_mode = true;
+                }
             }
             // remote_size > file_size: overwrite from scratch
         }
