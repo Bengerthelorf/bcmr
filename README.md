@@ -8,7 +8,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/bcmr?style=for-the-badge&color=blue)](https://crates.io/crates/bcmr)
 &nbsp;
-[![Documentation](https://img.shields.io/badge/Documentation-Visit_→-2ea44f?style=for-the-badge)](https://bcmr.snaix.homes/bcmr/)
+[![Documentation](https://img.shields.io/badge/Documentation-Visit_→-2ea44f?style=for-the-badge)](https://app.snaix.homes/bcmr/)
 &nbsp;
 [![Homebrew](https://img.shields.io/badge/Homebrew-Available-orange?style=for-the-badge)](https://github.com/Bengerthelorf/bcmr#install)
 
@@ -20,7 +20,7 @@
 
 <br>
 
-### [📖 Read the Full Documentation →](https://bcmr.snaix.homes/bcmr/)
+### [📖 Read the Full Documentation →](https://app.snaix.homes/bcmr/)
 
 Installation, shell integration, CLI reference, configuration, and more.
 
@@ -49,7 +49,7 @@ brew install Bengerthelorf/tap/bcmr
 ### Install Script
 
 ```bash
-curl -fsSL https://bcmr.snaix.homes/install | bash
+curl -fsSL https://app.snaix.homes/bcmr/install | bash
 ```
 
 ### Cargo
@@ -110,7 +110,7 @@ eval "$(bcmr init zsh --cmd b)"    # creates bcp, bmv, brm
 eval "$(bcmr init zsh --cmd '')"   # creates cp, mv, rm
 ```
 
-> **Need help?** Check the [Getting Started](https://bcmr.snaix.homes/bcmr/guide/getting-started) guide, or browse the full [Documentation](https://bcmr.snaix.homes/bcmr/).
+> **Need help?** Check the [Getting Started](https://app.snaix.homes/bcmr/guide/getting-started) guide, or browse the full [Documentation](https://app.snaix.homes/bcmr/).
 
 ## Configuration
 

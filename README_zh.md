@@ -8,7 +8,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/bcmr?style=for-the-badge&color=blue)](https://crates.io/crates/bcmr)
 &nbsp;
-[![Documentation](https://img.shields.io/badge/文档-查看_→-2ea44f?style=for-the-badge)](https://bcmr.snaix.homes/bcmr/zh/)
+[![Documentation](https://img.shields.io/badge/文档-查看_→-2ea44f?style=for-the-badge)](https://app.snaix.homes/bcmr/zh/)
 &nbsp;
 [![Homebrew](https://img.shields.io/badge/Homebrew-可用-orange?style=for-the-badge)](https://github.com/Bengerthelorf/bcmr#安装)
 
@@ -20,7 +20,7 @@
 
 <br>
 
-### [📖 阅读完整文档 →](https://bcmr.snaix.homes/bcmr/zh/)
+### [📖 阅读完整文档 →](https://app.snaix.homes/bcmr/zh/)
 
 安装、Shell 集成、CLI 参考、配置等。
 
@@ -49,7 +49,7 @@ brew install Bengerthelorf/tap/bcmr
 ### 安装脚本
 
 ```bash
-curl -fsSL https://bcmr.snaix.homes/install | bash
+curl -fsSL https://app.snaix.homes/bcmr/install | bash
 ```
 
 ### Cargo
@@ -110,7 +110,7 @@ eval "$(bcmr init zsh --cmd b)"    # 创建 bcp, bmv, brm
 eval "$(bcmr init zsh --cmd '')"   # 创建 cp, mv, rm
 ```
 
-> **需要帮助？** 查看 [快速开始](https://bcmr.snaix.homes/bcmr/zh/guide/getting-started) 指南，或浏览完整 [文档](https://bcmr.snaix.homes/bcmr/zh/)。
+> **需要帮助？** 查看 [快速开始](https://app.snaix.homes/bcmr/zh/guide/getting-started) 指南，或浏览完整 [文档](https://app.snaix.homes/bcmr/zh/)。
 
 ## 配置
 
