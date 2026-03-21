@@ -586,7 +586,7 @@ async fn handle_remote_upload(
                 remote::upload_file(src, &file_remote, &runner.inc_callback(), &runner.file_callback(), args.is_preserve(), args.is_verify()).await?;
             } else if src.is_dir() && args.is_recursive() {
                 let dir_remote = rdest.join(&src.file_name().unwrap().to_string_lossy());
-                remote::upload_directory(src, &dir_remote, &runner.inc_callback(), &runner.file_callback(), &excludes, args.is_preserve(), args.is_verify()).await?;
+                remote::upload_directory(src, &dir_remote, &runner.inc_callback(), &runner.file_callback(), &excludes, args.is_preserve(), args.is_verify(), append).await?;
             }
         }
     }

@@ -457,9 +457,10 @@ async fn preserve_remote_attrs(local_src: &Path, remote: &RemotePath) -> Result<
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
+    // TZ=UTC so the UTC-formatted timestamp is interpreted correctly on any remote
     let ts = unix_to_touch_ts(mtime_secs as i64);
     let cmd = format!(
-        "touch -t '{}' '{}'; chmod {:o} '{}'",
+        "TZ=UTC touch -t '{}' '{}'; chmod {:o} '{}'",
         ts, shell_escape(&remote.path), mode, shell_escape(&remote.path)
     );
     let _ = ssh_command(&remote.ssh_target()).arg(cmd).output().await?;
@@ -596,6 +597,7 @@ pub async fn upload_directory(
     excludes: &[regex::Regex],
     preserve: bool,
     verify: bool,
+    append: bool,
 ) -> Result<(), BcmrError> {
     use crate::core::traversal;
 
@@ -645,6 +647,16 @@ pub async fn upload_directory(
             host: remote.host.clone(),
             path: format!("{}/{}", remote.path, rel_path.display()),
         };
+        if append {
+            if let Ok(meta) = local_path.metadata() {
+                if let Ok(Some(remote_size)) = remote_file_size(&file_remote).await {
+                    if remote_size == meta.len() {
+                        progress_callback(meta.len());
+                        continue;
+                    }
+                }
+            }
+        }
         upload_file(local_path, &file_remote, progress_callback, on_new_file, preserve, verify).await?;
     }
 
