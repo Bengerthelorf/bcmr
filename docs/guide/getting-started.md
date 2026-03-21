@@ -15,7 +15,7 @@ brew install Bengerthelorf/tap/bcmr
 ```
 
 ```bash [Install Script]
-curl -fsSL https://bcmr.snaix.homes/ | bash
+curl -fsSL https://bcmr.snaix.homes/install | bash
 ```
 
 ```bash [Cargo]
