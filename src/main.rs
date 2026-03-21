@@ -597,12 +597,45 @@ async fn handle_remote_download(
 ) -> Result<()> {
     use crate::core::remote::{self, parse_remote_path};
 
+    let excludes = args.compile_excludes()?;
+
     let mut remote_sources = Vec::new();
     for src in sources {
         let rsrc = parse_remote_path(&src.to_string_lossy())
             .ok_or_else(|| anyhow::anyhow!("Mixed local/remote sources without remote destination"))?;
         let size = remote::remote_total_size(&rsrc, args.is_recursive()).await?;
         remote_sources.push((rsrc, size));
+    }
+
+    let total_size: u64 = remote_sources.iter().map(|(_, s)| *s).sum();
+
+    if args.is_dry_run() {
+        println!("Dry-run: would download {} to {}", format_bytes(total_size as f64), dest_local.display());
+        for (rsrc, _) in &remote_sources {
+            let info = remote::remote_stat(rsrc).await?;
+            if info.is_dir && args.is_recursive() {
+                let dir_name = rsrc.path.rsplit('/').next().unwrap_or(&rsrc.path);
+                let local_dir = if dest_local.is_dir() {
+                    dest_local.join(dir_name)
+                } else {
+                    dest_local.to_path_buf()
+                };
+                let entries = remote::remote_list_files(rsrc).await?;
+                for (rel_path, _, is_dir_entry) in &entries {
+                    if *is_dir_entry { continue; }
+                    if crate::core::traversal::is_excluded(std::path::Path::new(rel_path), &excludes) { continue; }
+                    println!("  {} -> {}", rsrc.join(rel_path), local_dir.join(rel_path).display());
+                }
+            } else {
+                let local_path = if dest_local.is_dir() {
+                    dest_local.join(rsrc.path.rsplit('/').next().unwrap_or(&rsrc.path))
+                } else {
+                    dest_local.to_path_buf()
+                };
+                println!("  {} -> {}", rsrc, local_path.display());
+            }
+        }
+        return Ok(());
     }
 
     let opts = remote::RemoteTransferOptions {
@@ -613,7 +646,6 @@ async fn handle_remote_download(
         append: args.is_append(),
     };
 
-    let total_size: u64 = remote_sources.iter().map(|(_, s)| *s).sum();
     let runner = ProgressRunner::new(total_size, is_plain_mode(args), false)?;
     runner.progress().lock().set_operation_type("Downloading");
 
@@ -636,11 +668,14 @@ async fn handle_remote_download(
                 let entries = remote::remote_list_files(rsrc).await?;
                 for (rel_path, _, is_dir_entry) in &entries {
                     if *is_dir_entry {
-                        tokio::fs::create_dir_all(local_dir.join(rel_path)).await?;
+                        if !crate::core::traversal::is_excluded(std::path::Path::new(rel_path), &excludes) {
+                            tokio::fs::create_dir_all(local_dir.join(rel_path)).await?;
+                        }
                     }
                 }
                 for (rel_path, size, is_dir_entry) in &entries {
                     if *is_dir_entry { continue; }
+                    if crate::core::traversal::is_excluded(std::path::Path::new(rel_path), &excludes) { continue; }
                     items.push(TransferItem {
                         local_path: local_dir.join(rel_path),
                         remote: rsrc.join(rel_path),
@@ -685,7 +720,7 @@ async fn handle_remote_download(
                 if !local_dir.exists() {
                     tokio::fs::create_dir_all(&local_dir).await?;
                 }
-                remote::download_directory(rsrc, &local_dir, &inc, &skip, &file_cb, &opts).await?;
+                remote::download_directory(rsrc, &local_dir, &inc, &skip, &file_cb, &excludes, &opts).await?;
             } else {
                 let local_path = if dest_local.is_dir() {
                     dest_local.join(rsrc.path.rsplit('/').next().unwrap_or(&rsrc.path))

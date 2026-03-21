@@ -433,6 +433,23 @@ pub async fn download_file(
         )));
     }
 
+    if opts.verify {
+        let local_path = local_dst.to_path_buf();
+        let local_hash = tokio::task::spawn_blocking(move || {
+            crate::core::checksum::calculate_hash(&local_path)
+        }).await.map_err(|e| BcmrError::InvalidInput(e.to_string()))??;
+        let remote_hash = remote_file_hash(remote, None).await?;
+        if local_hash != remote_hash {
+            return Err(BcmrError::InvalidInput(format!(
+                "Verification failed: {} -> '{}'", remote, local_dst.display()
+            )));
+        }
+    }
+
+    if opts.preserve {
+        apply_remote_attrs_locally(remote, local_dst).await?;
+    }
+
     Ok(())
 }
 
@@ -616,6 +633,48 @@ async fn preserve_remote_attrs(local_src: &Path, remote: &RemotePath) -> Result<
     Ok(())
 }
 
+async fn get_remote_attrs(remote: &RemotePath) -> Result<(i64, u32), BcmrError> {
+    let output = ssh_command(&remote.ssh_target())
+        .arg(format!(
+            "stat -c '%Y %a' '{}' 2>/dev/null || stat -f '%m %Lp' '{}'",
+            shell_escape(&remote.path), shell_escape(&remote.path)
+        ))
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        return Err(BcmrError::InvalidInput(format!(
+            "Cannot stat remote file '{}'", remote
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parts: Vec<&str> = stdout.trim().split_whitespace().collect();
+    let mtime_secs: i64 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let mode: u32 = parts.get(1).and_then(|s| u32::from_str_radix(s, 8).ok()).unwrap_or(0o644);
+
+    Ok((mtime_secs, mode))
+}
+
+fn apply_local_attrs(local_path: &Path, mtime_secs: i64, mode: u32) -> Result<(), BcmrError> {
+    let mtime = filetime::FileTime::from_unix_time(mtime_secs, 0);
+    filetime::set_file_mtime(local_path, mtime)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(local_path, std::fs::Permissions::from_mode(mode))?;
+    }
+
+    Ok(())
+}
+
+async fn apply_remote_attrs_locally(remote: &RemotePath, local_path: &Path) -> Result<(), BcmrError> {
+    let (mtime_secs, mode) = get_remote_attrs(remote).await?;
+    apply_local_attrs(local_path, mtime_secs, mode)?;
+    Ok(())
+}
+
 pub async fn verify_remote_file(local_src: &Path, remote: &RemotePath) -> Result<bool, BcmrError> {
     use crate::core::checksum;
 
@@ -670,9 +729,14 @@ pub async fn download_directory(
     progress_callback: &impl Fn(u64),
     skip_callback: &impl Fn(u64),
     on_new_file: &impl Fn(&str, u64),
+    excludes: &[regex::Regex],
     opts: &RemoteTransferOptions,
 ) -> Result<(), BcmrError> {
     let entries = remote_list_files(remote).await?;
+
+    let entries: Vec<_> = entries.into_iter()
+        .filter(|(rel_path, _, _)| !crate::core::traversal::is_excluded(std::path::Path::new(rel_path), excludes))
+        .collect();
 
     for (rel_path, _, is_dir) in &entries {
         if *is_dir {
