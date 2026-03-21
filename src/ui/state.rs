@@ -178,3 +178,81 @@ impl ProgressData {
         Some(self.current_bytes as f64 / secs)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_progress_data_new() {
+        let pd = ProgressData::new(1000);
+        assert_eq!(pd.total_bytes, 1000);
+        assert_eq!(pd.current_bytes, 0);
+        assert_eq!(pd.skipped_bytes, 0);
+    }
+
+    #[test]
+    fn test_inc_skipped() {
+        let mut pd = ProgressData::new(1000);
+        pd.inc_skipped(100);
+        assert_eq!(pd.current_bytes, 100);
+        assert_eq!(pd.skipped_bytes, 100);
+        pd.inc_skipped(200);
+        assert_eq!(pd.current_bytes, 300);
+        assert_eq!(pd.skipped_bytes, 300);
+    }
+
+    #[test]
+    fn test_estimate_eta_complete() {
+        let pd = ProgressData::new(0);
+        assert_eq!(pd.estimate_eta(), Some(Duration::from_secs(0)));
+    }
+
+    #[test]
+    fn test_estimate_eta_no_speed() {
+        let pd = ProgressData::new(1000);
+        assert_eq!(pd.estimate_eta(), None);
+    }
+
+    #[test]
+    fn test_estimate_eta_with_speed() {
+        let mut pd = ProgressData::new(1024 * 1024 * 100);
+        pd.current_bytes = 1024 * 1024 * 50;
+        pd.last_speed = 10.0; // 10 MiB/s
+        let eta = pd.estimate_eta().unwrap();
+        assert_eq!(eta.as_secs(), 5);
+    }
+
+    #[test]
+    fn test_init_workers() {
+        let mut pd = ProgressData::new(1000);
+        pd.init_workers(4);
+        assert_eq!(pd.workers.len(), 4);
+        assert_eq!(pd.parallel_total, 4);
+        assert_eq!(pd.active_worker_count(), 0);
+    }
+
+    #[test]
+    fn test_update_and_finish_worker() {
+        let mut pd = ProgressData::new(1000);
+        pd.init_workers(2);
+
+        pd.update_worker(0, "file.txt", 500, 100);
+        assert_eq!(pd.active_worker_count(), 1);
+        assert_eq!(pd.workers[0].file_name, "file.txt");
+        assert_eq!(pd.workers[0].progress, 100);
+
+        pd.finish_worker(0);
+        assert_eq!(pd.active_worker_count(), 0);
+        assert!(pd.workers[0].file_name.is_empty());
+    }
+
+    #[test]
+    fn test_worker_calculate_speed() {
+        let mut w = WorkerState::new();
+        w.progress = 1024 * 1024;
+        w.last_update = Instant::now() - Duration::from_secs(1);
+        let speed = w.calculate_speed();
+        assert!(speed > 0.0);
+    }
+}

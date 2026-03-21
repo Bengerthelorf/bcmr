@@ -96,3 +96,108 @@ pub fn get_gradient_color(colors: &[String], progress: f32) -> Color {
 
     interpolate_color(c1, c2, t)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_bytes_zero() {
+        assert_eq!(format_bytes(0.0), "0 B");
+    }
+
+    #[test]
+    fn test_format_bytes_bytes() {
+        assert_eq!(format_bytes(512.0), "512 B");
+    }
+
+    #[test]
+    fn test_format_bytes_kib() {
+        assert_eq!(format_bytes(2048.0), "2.00 KiB");
+    }
+
+    #[test]
+    fn test_format_bytes_mib() {
+        assert_eq!(format_bytes(5.0 * 1024.0 * 1024.0), "5.00 MiB");
+    }
+
+    #[test]
+    fn test_format_bytes_gib() {
+        assert_eq!(format_bytes(2.5 * 1024.0 * 1024.0 * 1024.0), "2.50 GiB");
+    }
+
+    #[test]
+    fn test_format_eta_seconds_only() {
+        assert_eq!(format_eta(45), "00:45");
+    }
+
+    #[test]
+    fn test_format_eta_minutes() {
+        assert_eq!(format_eta(125), "02:05");
+    }
+
+    #[test]
+    fn test_format_eta_hours() {
+        assert_eq!(format_eta(3661), "01:01:01");
+    }
+
+    #[test]
+    fn test_format_eta_zero() {
+        assert_eq!(format_eta(0), "00:00");
+    }
+
+    #[test]
+    fn test_parse_hex_color_valid() {
+        match parse_hex_color("#FF0000") {
+            Color::Rgb { r, g, b } => {
+                assert_eq!(r, 255);
+                assert_eq!(g, 0);
+                assert_eq!(b, 0);
+            }
+            _ => panic!("Expected RGB color"),
+        }
+    }
+
+    #[test]
+    fn test_parse_hex_color_named() {
+        assert!(matches!(parse_hex_color("red"), Color::Red));
+        assert!(matches!(parse_hex_color("green"), Color::Green));
+        assert!(matches!(parse_hex_color("reset"), Color::Reset));
+    }
+
+    #[test]
+    fn test_parse_hex_color_unknown() {
+        assert!(matches!(parse_hex_color("invalid"), Color::White));
+    }
+
+    #[test]
+    fn test_get_gradient_color_empty() {
+        assert!(matches!(get_gradient_color(&[], 0.5), Color::White));
+    }
+
+    #[test]
+    fn test_get_gradient_color_single() {
+        let colors = vec!["#FF0000".to_string()];
+        match get_gradient_color(&colors, 0.5) {
+            Color::Rgb { r, g, b } => {
+                assert_eq!(r, 255);
+                assert_eq!(g, 0);
+                assert_eq!(b, 0);
+            }
+            _ => panic!("Expected RGB color"),
+        }
+    }
+
+    #[test]
+    fn test_get_gradient_color_two_colors_midpoint() {
+        let colors = vec!["#000000".to_string(), "#FFFFFF".to_string()];
+        match get_gradient_color(&colors, 0.5) {
+            Color::Rgb { r, g, b } => {
+                assert!(r > 100 && r < 200);
+                assert_eq!(r, g);
+                assert_eq!(g, b);
+            }
+            _ => panic!("Expected RGB color"),
+        }
+    }
+}

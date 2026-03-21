@@ -482,3 +482,129 @@ fn parse_test_mode(s: &str) -> Result<TestMode, String> {
         Ok(TestMode::None)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_test_mode_delay() {
+        match parse_test_mode("delay:100").unwrap() {
+            TestMode::Delay(ms) => assert_eq!(ms, 100),
+            _ => panic!("Expected Delay"),
+        }
+    }
+
+    #[test]
+    fn test_parse_test_mode_speed_limit() {
+        match parse_test_mode("speed_limit:1048576").unwrap() {
+            TestMode::SpeedLimit(bps) => assert_eq!(bps, 1048576),
+            _ => panic!("Expected SpeedLimit"),
+        }
+    }
+
+    #[test]
+    fn test_parse_test_mode_none() {
+        match parse_test_mode("none").unwrap() {
+            TestMode::None => {}
+            _ => panic!("Expected None"),
+        }
+    }
+
+    #[test]
+    fn test_parse_test_mode_invalid() {
+        assert!(parse_test_mode("invalid:abc").is_err());
+    }
+
+    #[test]
+    fn test_commands_copy_accessors() {
+        let cmd = Commands::Copy {
+            paths: vec![PathBuf::from("src"), PathBuf::from("dst")],
+            recursive: true,
+            preserve: true,
+            force: true,
+            yes: false,
+            verbose: true,
+            exclude: Some(vec!["*.log".to_string()]),
+            tui: false,
+            dry_run: true,
+            test_mode: None,
+            verify: true,
+            resume: true,
+            strict: true,
+            append: false,
+            sync: false,
+            reflink: Some("auto".to_string()),
+            sparse: None,
+            parallel: Some(4),
+        };
+
+        assert!(cmd.is_recursive());
+        assert!(cmd.is_preserve());
+        assert!(cmd.is_force());
+        assert!(!cmd.is_yes());
+        assert!(cmd.is_verbose());
+        assert!(cmd.is_dry_run());
+        assert!(!cmd.is_tui_mode());
+        assert!(cmd.is_verify());
+        assert!(cmd.is_resume());
+        assert!(cmd.is_strict());
+        assert!(!cmd.is_append());
+        assert!(!cmd.is_sync());
+        assert_eq!(cmd.get_reflink_mode(), Some("auto".to_string()));
+        assert_eq!(cmd.get_sparse_mode(), None);
+        assert_eq!(cmd.get_parallel(), Some(4));
+        assert!(cmd.should_prompt_for_overwrite());
+    }
+
+    #[test]
+    fn test_commands_get_sources_and_dest() {
+        let cmd = Commands::Copy {
+            paths: vec![PathBuf::from("a"), PathBuf::from("b"), PathBuf::from("dest")],
+            recursive: false, preserve: false, force: false, yes: false,
+            verbose: false, exclude: None, tui: false, dry_run: false,
+            test_mode: None, verify: false, resume: false, strict: false,
+            append: false, sync: false, reflink: None, sparse: None, parallel: None,
+        };
+
+        let (sources, dest) = cmd.get_sources_and_dest().unwrap();
+        assert_eq!(sources.len(), 2);
+        assert_eq!(dest, &PathBuf::from("dest"));
+    }
+
+    #[test]
+    fn test_commands_remove_accessors() {
+        let cmd = Commands::Remove {
+            paths: vec![PathBuf::from("file.txt")],
+            recursive: false,
+            force: true,
+            yes: false,
+            interactive: true,
+            verbose: false,
+            dir: true,
+            exclude: None,
+            tui: false,
+            dry_run: false,
+            test_mode: None,
+        };
+
+        assert!(cmd.is_force());
+        assert!(cmd.is_interactive());
+        assert!(cmd.is_dir_only());
+        assert!(!cmd.is_recursive());
+        let paths = cmd.get_remove_paths().unwrap();
+        assert_eq!(paths.len(), 1);
+    }
+
+    #[test]
+    fn test_commands_non_file_defaults() {
+        let cmd = Commands::Update;
+        assert!(!cmd.is_recursive());
+        assert!(!cmd.is_force());
+        assert!(!cmd.is_preserve());
+        assert!(!cmd.is_verify());
+        assert!(!cmd.is_dry_run());
+        assert!(!cmd.is_verbose());
+        assert_eq!(cmd.get_parallel(), None);
+    }
+}

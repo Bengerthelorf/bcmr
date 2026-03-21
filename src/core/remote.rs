@@ -955,4 +955,66 @@ mod tests {
         assert!(parse_remote_path("@host:path").is_none());
         assert!(parse_remote_path("user@:path").is_none());
     }
+
+    #[test]
+    fn test_parse_remote_path_with_spaces_in_host() {
+        assert!(parse_remote_path("host name:path").is_none());
+    }
+
+    #[test]
+    fn test_parse_remote_path_with_slash_in_host() {
+        assert!(parse_remote_path("host/name:path").is_none());
+    }
+
+    #[test]
+    fn test_remote_path_ssh_target() {
+        let r = RemotePath { user: Some("alice".to_string()), host: "example.com".to_string(), path: "/data".to_string() };
+        assert_eq!(r.ssh_target(), "alice@example.com");
+
+        let r2 = RemotePath { user: None, host: "example.com".to_string(), path: "/data".to_string() };
+        assert_eq!(r2.ssh_target(), "example.com");
+    }
+
+    #[test]
+    fn test_remote_path_display() {
+        let r = RemotePath { user: Some("bob".to_string()), host: "srv".to_string(), path: "/tmp/f".to_string() };
+        assert_eq!(r.display(), "bob@srv:/tmp/f");
+    }
+
+    #[test]
+    fn test_remote_path_join() {
+        let r = RemotePath { user: None, host: "h".to_string(), path: "/base".to_string() };
+        let joined = r.join("sub/file.txt");
+        assert_eq!(joined.path, "/base/sub/file.txt");
+        assert_eq!(joined.host, "h");
+    }
+
+    #[test]
+    fn test_shell_escape_no_quotes() {
+        assert_eq!(shell_escape("simple"), "simple");
+    }
+
+    #[test]
+    fn test_shell_escape_with_quotes() {
+        assert_eq!(shell_escape("it's"), "it'\\''s");
+    }
+
+    #[test]
+    fn test_unix_to_touch_ts_epoch() {
+        assert_eq!(unix_to_touch_ts(0), "197001010000.00");
+    }
+
+    #[test]
+    fn test_unix_to_touch_ts_known_date() {
+        // 2020-01-01 12:00:00 UTC = 1577880000
+        let ts = unix_to_touch_ts(1577880000);
+        assert_eq!(ts, "202001011200.00");
+    }
+
+    #[test]
+    fn test_unix_to_touch_ts_with_seconds() {
+        // 2020-06-15 08:30:45 UTC = 1592210445 (approx, computed manually)
+        let ts = unix_to_touch_ts(1592210445);
+        assert!(ts.ends_with(".45"));
+    }
 }

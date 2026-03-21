@@ -38,3 +38,73 @@ pub fn calculate_partial_hash(path: &Path, limit: u64) -> io::Result<String> {
 
     Ok(hasher.finalize().to_hex().to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn test_calculate_hash_known_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, b"hello world").unwrap();
+
+        let hash = calculate_hash(&path).unwrap();
+        let expected = blake3::hash(b"hello world").to_hex().to_string();
+        assert_eq!(hash, expected);
+    }
+
+    #[test]
+    fn test_calculate_hash_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.txt");
+        std::fs::write(&path, b"").unwrap();
+
+        let hash = calculate_hash(&path).unwrap();
+        let expected = blake3::hash(b"").to_hex().to_string();
+        assert_eq!(hash, expected);
+    }
+
+    #[test]
+    fn test_calculate_partial_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("partial.txt");
+        std::fs::write(&path, b"hello world").unwrap();
+
+        let partial = calculate_partial_hash(&path, 5).unwrap();
+        let expected = blake3::hash(b"hello").to_hex().to_string();
+        assert_eq!(partial, expected);
+    }
+
+    #[test]
+    fn test_partial_hash_beyond_file_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("short.txt");
+        std::fs::write(&path, b"abc").unwrap();
+
+        let partial = calculate_partial_hash(&path, 100).unwrap();
+        let full = calculate_hash(&path).unwrap();
+        assert_eq!(partial, full);
+    }
+
+    #[test]
+    fn test_calculate_hash_large_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large.bin");
+        let mut f = std::fs::File::create(&path).unwrap();
+        let chunk = vec![0xABu8; 1024 * 1024];
+        for _ in 0..5 {
+            f.write_all(&chunk).unwrap();
+        }
+        drop(f);
+
+        let hash = calculate_hash(&path).unwrap();
+        let mut hasher = blake3::Hasher::new();
+        for _ in 0..5 {
+            hasher.update(&chunk);
+        }
+        let expected = hasher.finalize().to_hex().to_string();
+        assert_eq!(hash, expected);
+    }
+}

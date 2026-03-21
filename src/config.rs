@@ -196,3 +196,33 @@ impl Config {
         s.build()?.try_deserialize()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config() {
+        let cfg = Config::default();
+        assert_eq!(cfg.progress.style, "fancy");
+        assert_eq!(cfg.update_check, UpdateCheck::Notify);
+    }
+
+    #[test]
+    fn test_default_theme() {
+        let cfg = Config::default();
+        assert_eq!(cfg.progress.theme.bar_gradient.len(), 2);
+        assert_eq!(cfg.progress.layout.box_style, "rounded");
+    }
+
+    #[test]
+    fn test_config_new_loads_defaults() {
+        let cfg = Config::new().unwrap();
+        assert!(!cfg.progress.style.is_empty());
+    }
+
+    #[test]
+    fn test_static_config() {
+        assert!(!CONFIG.progress.style.is_empty());
+    }
+}
