@@ -21,6 +21,7 @@ pub struct TuiProgress {
     initialized: bool,
     finished: bool,
     suspended: Arc<AtomicBool>,
+    last_rendered_lines: u16,
 }
 
 impl TuiProgress {
@@ -33,6 +34,7 @@ impl TuiProgress {
             initialized: false,
             finished: false,
             suspended: Arc::new(AtomicBool::new(false)),
+            last_rendered_lines: 0,
         })
     }
 
@@ -93,6 +95,15 @@ impl TuiProgress {
 
         if !self.initialized {
             self.initialize()?;
+        }
+
+        // Clear leftover lines when switching between modes with different heights
+        let new_lines = self.total_lines();
+        if self.last_rendered_lines > new_lines {
+            let mut stdout = stdout();
+            for i in new_lines..self.last_rendered_lines {
+                let _ = execute!(stdout, MoveTo(0, self.start_row + i), Clear(ClearType::CurrentLine));
+            }
         }
 
         if self.data.current_file.is_empty() {
@@ -442,6 +453,7 @@ impl TuiProgress {
             execute!(stdout, Clear(ClearType::UntilNewLine))?;
         }
 
+        self.last_rendered_lines = self.total_lines();
         stdout.flush()?;
         Ok(())
     }
@@ -504,17 +516,7 @@ impl ProgressRenderer for TuiProgress {
     }
 
     fn set_parallel_mode(&mut self, worker_count: usize) {
-        if self.initialized {
-            // Clear old TUI area and reposition cursor to start_row
-            let old_lines = self.total_lines();
-            let mut stdout = stdout();
-            for i in 0..old_lines {
-                let _ = execute!(stdout, MoveTo(0, self.start_row + i), Clear(ClearType::CurrentLine));
-            }
-            let _ = execute!(stdout, MoveTo(0, self.start_row));
-        }
         self.data.init_workers(worker_count);
-        self.initialized = false;
         let _ = self.redraw();
     }
 
