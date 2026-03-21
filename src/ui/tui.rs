@@ -496,8 +496,15 @@ impl ProgressRenderer for TuiProgress {
     }
 
     fn set_parallel_mode(&mut self, worker_count: usize) {
+        // Clear old TUI area before switching to parallel layout
+        if self.initialized {
+            let old_lines = self.total_lines();
+            let mut stdout = stdout();
+            for i in 0..old_lines {
+                let _ = execute!(stdout, MoveTo(0, self.start_row + i), Clear(ClearType::CurrentLine));
+            }
+        }
         self.data.init_workers(worker_count);
-        // Reinitialize to recalculate start_row for the new total_lines
         self.initialized = false;
         let _ = self.redraw();
     }

@@ -188,6 +188,24 @@ pub async fn validate_ssh_connection(remote: &RemotePath) -> Result<(), BcmrErro
     Ok(())
 }
 
+/// Returns the size of a remote file, or None if it doesn't exist.
+pub async fn remote_file_size(remote: &RemotePath) -> Result<Option<u64>, BcmrError> {
+    let output = ssh_command(&remote.ssh_target())
+        .arg(format!(
+            "stat -c '%s' '{}' 2>/dev/null || stat -f '%z' '{}'",
+            shell_escape(&remote.path), shell_escape(&remote.path)
+        ))
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout.trim().parse::<u64>().ok())
+}
+
 pub async fn remote_stat(remote: &RemotePath) -> Result<RemoteFileInfo, BcmrError> {
     let output = ssh_command(&remote.ssh_target())
         .arg(format!(

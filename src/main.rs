@@ -309,6 +309,7 @@ async fn run_parallel_transfers(
     items: Vec<TransferItem>,
     parallel: usize,
     progress: &Arc<Mutex<Box<dyn ProgressRenderer>>>,
+    append: bool,
 ) -> Result<(), BcmrError> {
     use crate::core::remote;
 
@@ -356,6 +357,18 @@ async fn run_parallel_transfers(
             let noop_file_cb = move |name: &str, size: u64| {
                 p2.lock().update_worker(slot, name, size, 0);
             };
+
+            // In append mode, skip files that already exist with the same size
+            if append && item.is_upload {
+                if let Ok(Some(remote_size)) = remote::remote_file_size(&item.remote).await {
+                    if remote_size == item.size {
+                        progress_cb(item.size); // Count as done
+                        prog.lock().finish_worker(slot);
+                        pool.lock().push(slot);
+                        return;
+                    }
+                }
+            }
 
             let result = if item.is_upload {
                 remote::upload_file(&item.local_path, &item.remote, &progress_cb, &noop_file_cb).await
@@ -536,12 +549,22 @@ async fn handle_remote_upload(
             }
         }
 
-        run_parallel_transfers(items, parallel, runner.progress()).await
+        run_parallel_transfers(items, parallel, runner.progress(), args.is_append()).await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
     } else {
+        let append = args.is_append();
         for src in sources {
             if src.is_file() {
                 let file_remote = resolve_upload_remote(src, rdest, multi_source);
+                if append {
+                    let local_size = src.metadata()?.len();
+                    if let Ok(Some(remote_size)) = remote::remote_file_size(&file_remote).await {
+                        if remote_size == local_size {
+                            (runner.inc_callback())(local_size);
+                            continue;
+                        }
+                    }
+                }
                 remote::upload_file(src, &file_remote, &runner.inc_callback(), &runner.file_callback()).await?;
             } else if src.is_dir() && args.is_recursive() {
                 let dir_remote = rdest.join(&src.file_name().unwrap().to_string_lossy());
@@ -619,7 +642,7 @@ async fn handle_remote_download(
             }
         }
 
-        run_parallel_transfers(items, parallel, runner.progress()).await
+        run_parallel_transfers(items, parallel, runner.progress(), args.is_append()).await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
     } else {
         for (rsrc, _) in &remote_sources {
