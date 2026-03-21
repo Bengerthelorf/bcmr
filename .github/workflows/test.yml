@@ -33,13 +33,13 @@ jobs:
       - name: Check compilation
         run: cargo check --verbose
 
-      - name: Run unit tests
+      - name: Run all unit tests
         run: cargo test --verbose
 
-      - name: Run clippy
+      - name: Clippy (deny warnings)
         run: cargo clippy -- -D warnings
 
-      - name: Check formatting
+      - name: Formatting check
         run: cargo fmt --check
 
       - name: Test shell init scripts
