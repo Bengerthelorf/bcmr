@@ -71,18 +71,26 @@ function {prefix}rm{suffix}() {{
                     script.push_str(&format!(
                         r#"
 # Completion wrappers for aliased commands
-# These forward completions to the main _bcmr function
+# Use _bcmr_with_remote if available (supports remote path completion)
 _{prefix}cp{suffix}() {{
     words=("bcmr" "copy" "${{words[@]:1}}")
     (( CURRENT += 1 ))
-    _bcmr "$@"
+    if (( $+functions[_bcmr_with_remote] )); then
+        _bcmr_with_remote "$@"
+    else
+        _bcmr "$@"
+    fi
 }}
 compdef _{prefix}cp{suffix} {prefix}cp{suffix}
 
 _{prefix}mv{suffix}() {{
     words=("bcmr" "move" "${{words[@]:1}}")
     (( CURRENT += 1 ))
-    _bcmr "$@"
+    if (( $+functions[_bcmr_with_remote] )); then
+        _bcmr_with_remote "$@"
+    else
+        _bcmr "$@"
+    fi
 }}
 compdef _{prefix}mv{suffix} {prefix}mv{suffix}
 
