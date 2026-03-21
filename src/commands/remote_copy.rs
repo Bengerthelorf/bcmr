@@ -151,7 +151,7 @@ async fn run_parallel_transfers(
             let file_name = if item.is_upload {
                 item.local_path
                     .file_name()
-                    .unwrap()
+                    .unwrap_or_default()
                     .to_string_lossy()
                     .to_string()
             } else {
@@ -247,7 +247,7 @@ fn collect_upload_files(
             items.push(TransferItem {
                 local_path: path.to_path_buf(),
                 remote: remote_base.join(&rel.to_string_lossy()),
-                size: entry.metadata().unwrap().len(),
+                size: entry.metadata()?.len(),
                 is_upload: true,
             });
         }
@@ -290,7 +290,7 @@ pub async fn handle_remote_copy(
                         if parse_remote_path(&s.to_string_lossy()).is_some() {
                             return None;
                         }
-                        let size = s.metadata().unwrap().len();
+                        let size = s.metadata().ok()?.len();
                         Some(TransferItem {
                             local_path: s.clone(),
                             remote: RemotePath {
@@ -381,7 +381,7 @@ async fn handle_remote_upload(
                     resolve_upload_remote(src, rdest, sources.len() > 1)
                 );
             } else if src.is_dir() && args.is_recursive() {
-                let dir_remote = rdest.join(&src.file_name().unwrap().to_string_lossy());
+                let dir_remote = rdest.join(&src.file_name().unwrap_or_default().to_string_lossy());
                 for item in collect_upload_files(src, &dir_remote, &excludes)? {
                     println!("  {} -> {}", item.local_path.display(), item.remote);
                 }
@@ -416,7 +416,7 @@ async fn handle_remote_upload(
                     is_upload: true,
                 });
             } else if src.is_dir() && args.is_recursive() {
-                let dir_remote = rdest.join(&src.file_name().unwrap().to_string_lossy());
+                let dir_remote = rdest.join(&src.file_name().unwrap_or_default().to_string_lossy());
                 remote::ensure_remote_tree(src, &dir_remote).await?;
                 items.extend(collect_upload_files(src, &dir_remote, &excludes)?);
             }
@@ -439,7 +439,7 @@ async fn handle_remote_upload(
                 )
                 .await?;
             } else if src.is_dir() && args.is_recursive() {
-                let dir_remote = rdest.join(&src.file_name().unwrap().to_string_lossy());
+                let dir_remote = rdest.join(&src.file_name().unwrap_or_default().to_string_lossy());
                 remote::upload_directory(
                     src,
                     &dir_remote,
