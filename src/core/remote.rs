@@ -378,10 +378,45 @@ pub async fn download_file(
     Ok(())
 }
 
+pub async fn remote_file_hash(remote: &RemotePath, limit: Option<u64>) -> Result<String, BcmrError> {
+    let cmd = match limit {
+        Some(n) => format!("head -c {} '{}'", n, shell_escape(&remote.path)),
+        None => format!("cat '{}'", shell_escape(&remote.path)),
+    };
+
+    let mut child = ssh_command(&remote.ssh_target())
+        .arg(cmd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+
+    let mut stdout = child.stdout.take().ok_or_else(|| {
+        BcmrError::InvalidInput("Failed to capture SSH stdout".to_string())
+    })?;
+
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let n = stdout.read(&mut buffer).await?;
+        if n == 0 { break; }
+        hasher.update(&buffer[..n]);
+    }
+
+    let status = child.wait().await?;
+    if !status.success() {
+        return Err(BcmrError::InvalidInput(format!(
+            "Failed to hash remote file '{}'", remote
+        )));
+    }
+
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
 pub async fn upload_file(
     local_src: &Path,
     remote: &RemotePath,
     progress_callback: &impl Fn(u64),
+    skip_callback: &impl Fn(u64),
     on_new_file: &impl Fn(&str, u64),
     opts: &RemoteTransferOptions,
 ) -> Result<(), BcmrError> {
@@ -402,8 +437,30 @@ pub async fn upload_file(
         }
     }
 
+    // Determine how much to skip based on resume/append/strict
+    let mut skip_bytes: u64 = 0;
+    let mut use_append_mode = false;
+
+    if opts.resume || opts.append {
+        if let Ok(Some(remote_size)) = remote_file_size(remote).await {
+            if remote_size == file_size {
+                skip_callback(file_size);
+                return Ok(());
+            } else if remote_size < file_size {
+                skip_bytes = remote_size;
+                use_append_mode = true;
+            }
+            // remote_size > file_size: overwrite from scratch
+        }
+    }
+
+    if skip_bytes > 0 {
+        skip_callback(skip_bytes);
+    }
+
+    let cat_op = if use_append_mode { ">>" } else { ">" };
     let mut child = ssh_command(&remote.ssh_target())
-        .arg(format!("cat > '{}'", shell_escape(&remote.path)))
+        .arg(format!("cat {} '{}'", cat_op, shell_escape(&remote.path)))
         .stdin(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
@@ -413,6 +470,13 @@ pub async fn upload_file(
     })?;
 
     let mut src_file = tokio::fs::File::open(local_src).await?;
+
+    // Seek past already-transferred bytes
+    if skip_bytes > 0 {
+        use tokio::io::AsyncSeekExt;
+        src_file.seek(std::io::SeekFrom::Start(skip_bytes)).await?;
+    }
+
     let mut buffer = vec![0u8; 1024 * 1024];
 
     loop {
@@ -424,7 +488,7 @@ pub async fn upload_file(
         progress_callback(n as u64);
     }
 
-    drop(stdin); // Close stdin to signal EOF
+    drop(stdin);
     let output = child.wait_with_output().await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -654,17 +718,7 @@ pub async fn upload_directory(
             host: remote.host.clone(),
             path: format!("{}/{}", remote.path, rel_path.display()),
         };
-        if opts.append {
-            if let Ok(meta) = local_path.metadata() {
-                if let Ok(Some(remote_size)) = remote_file_size(&file_remote).await {
-                    if remote_size == meta.len() {
-                        skip_callback(meta.len());
-                        continue;
-                    }
-                }
-            }
-        }
-        upload_file(local_path, &file_remote, progress_callback, on_new_file, opts).await?;
+        upload_file(local_path, &file_remote, progress_callback, skip_callback, on_new_file, opts).await?;
     }
 
     Ok(())

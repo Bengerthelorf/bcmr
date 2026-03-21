@@ -364,19 +364,13 @@ async fn run_parallel_transfers(
                 p2.lock().update_worker(slot, name, size, 0);
             };
 
-            if task_opts.append && item.is_upload {
-                if let Ok(Some(remote_size)) = remote::remote_file_size(&item.remote).await {
-                    if remote_size == item.size {
-                        prog.lock().inc_skipped(item.size);
-                        prog.lock().finish_worker(slot);
-                        pool.lock().push(slot);
-                        return;
-                    }
-                }
-            }
+            let p_skip = Arc::clone(&prog);
+            let skip_cb = move |n: u64| {
+                p_skip.lock().inc_skipped(n);
+            };
 
             let result = if item.is_upload {
-                remote::upload_file(&item.local_path, &item.remote, &progress_cb, &noop_file_cb, &task_opts).await
+                remote::upload_file(&item.local_path, &item.remote, &progress_cb, &skip_cb, &noop_file_cb, &task_opts).await
             } else {
                 remote::download_file(&item.remote, &item.local_path, &progress_cb, &noop_file_cb, item.size).await
             };
@@ -584,16 +578,7 @@ async fn handle_remote_upload(
         for src in sources {
             if src.is_file() {
                 let file_remote = resolve_upload_remote(src, rdest, multi_source);
-                if opts.append {
-                    let local_size = src.metadata()?.len();
-                    if let Ok(Some(remote_size)) = remote::remote_file_size(&file_remote).await {
-                        if remote_size == local_size {
-                            (runner.skip_callback())(local_size);
-                            continue;
-                        }
-                    }
-                }
-                remote::upload_file(src, &file_remote, &runner.inc_callback(), &runner.file_callback(), &opts).await?;
+                remote::upload_file(src, &file_remote, &runner.inc_callback(), &runner.skip_callback(), &runner.file_callback(), &opts).await?;
             } else if src.is_dir() && args.is_recursive() {
                 let dir_remote = rdest.join(&src.file_name().unwrap().to_string_lossy());
                 remote::upload_directory(src, &dir_remote, &runner.inc_callback(), &runner.skip_callback(), &runner.file_callback(), &excludes, &opts).await?;
