@@ -204,7 +204,7 @@ impl TuiProgress {
                 let available_width = box_width.saturating_sub(3);
                 let content_len = content.chars().count();
                 let display_content = if content_len > available_width {
-                    &content[..available_width]
+                    &content[..content.floor_char_boundary(available_width)]
                 } else {
                     content
                 };

@@ -325,7 +325,13 @@ async fn run_parallel_transfers(
 
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
-            let slot = pool.lock().pop().unwrap();
+            let slot = match pool.lock().pop() {
+                Some(s) => s,
+                None => {
+                    errs.lock().push("no available worker slot".to_string());
+                    return;
+                }
+            };
 
             let file_name = if item.is_upload {
                 item.local_path.file_name().unwrap().to_string_lossy().to_string()
