@@ -196,6 +196,16 @@ pub async fn remove_path(
 
             on_new_file(&entry_name, size);
 
+            if !cli.is_dry_run() {
+                if entry.file_type().is_file() {
+                    fs::remove_file(entry_path).await?;
+                } else if entry.file_type().is_dir() {
+                    fs::remove_dir(entry_path).await?;
+                }
+            } else {
+                print_dry_run(ActionType::Remove, &entry_path.to_string_lossy(), None);
+            }
+
             if entry.file_type().is_file() {
                 match test_mode {
                     TestMode::Delay(ms) => {
@@ -217,16 +227,6 @@ pub async fn remove_path(
                         progress_callback(size);
                     }
                 }
-            }
-
-            if !cli.is_dry_run() {
-                if entry.file_type().is_file() {
-                    fs::remove_file(entry_path).await?;
-                } else if entry.file_type().is_dir() {
-                    fs::remove_dir(entry_path).await?;
-                }
-            } else {
-                print_dry_run(ActionType::Remove, &entry_path.to_string_lossy(), None);
             }
 
             // Skip root item itself

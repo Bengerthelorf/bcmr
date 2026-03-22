@@ -304,7 +304,7 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         let dir_count = files_to_remove.iter().filter(|f| f.is_dir).count();
 
         let runner = ProgressRunner::new(total_size, is_plain_mode(args), true)?;
-        commands::remove::remove_paths(
+        let result = commands::remove::remove_paths(
             paths,
             test_mode,
             args,
@@ -314,7 +314,11 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
             Box::new(runner.file_callback()),
             files_to_remove.len(),
         )
-        .await?;
+        .await;
+
+        runner.finish_ok()?;
+
+        result?;
 
         print!("\nSummary: {} files", file_count);
         if dir_count > 0 {
