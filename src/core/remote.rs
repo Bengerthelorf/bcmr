@@ -494,15 +494,27 @@ pub async fn download_file(
     } else {
         tokio::fs::File::create(local_dst).await?
     };
-    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut buffer = vec![0u8; 4 * 1024 * 1024];
 
-    loop {
-        let n = stdout.read(&mut buffer).await?;
-        if n == 0 {
-            break;
+    let io_result: Result<(), BcmrError> = async {
+        loop {
+            let n = stdout.read(&mut buffer).await?;
+            if n == 0 {
+                break;
+            }
+            dst_file.write_all(&buffer[..n]).await?;
+            progress_callback(n as u64);
         }
-        dst_file.write_all(&buffer[..n]).await?;
-        progress_callback(n as u64);
+        Ok(())
+    }
+    .await;
+
+    if let Err(e) = io_result {
+        let _ = child.kill().await;
+        if !decision.use_append_mode {
+            let _ = tokio::fs::remove_file(local_dst).await;
+        }
+        return Err(e);
     }
 
     let status = child.wait().await?;
@@ -512,6 +524,9 @@ pub async fn download_file(
             let mut buf = Vec::new();
             let _ = pipe.read_to_end(&mut buf).await;
             stderr_buf = String::from_utf8_lossy(&buf).to_string();
+        }
+        if !decision.use_append_mode {
+            let _ = tokio::fs::remove_file(local_dst).await;
         }
         return Err(BcmrError::InvalidInput(ssh_error_message(
             &stderr_buf,
@@ -563,7 +578,7 @@ pub async fn remote_file_hash(
         .ok_or_else(|| BcmrError::InvalidInput("Failed to capture SSH stdout".to_string()))?;
 
     let mut hasher = blake3::Hasher::new();
-    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut buffer = vec![0u8; 4 * 1024 * 1024];
     loop {
         let n = stdout.read(&mut buffer).await?;
         if n == 0 {
@@ -601,10 +616,17 @@ pub async fn upload_file(
 
     if let Some(parent) = remote.path.rsplit_once('/') {
         if !parent.0.is_empty() {
-            ssh_command(&remote.ssh_target())
+            let mkdir_out = ssh_command(&remote.ssh_target())
                 .arg(format!("mkdir -p '{}'", shell_escape(parent.0)))
                 .output()
                 .await?;
+            if !mkdir_out.status.success() {
+                let stderr = String::from_utf8_lossy(&mkdir_out.stderr);
+                return Err(BcmrError::InvalidInput(ssh_error_message(
+                    &stderr,
+                    &format!("Failed to create remote directory '{}'", parent.0),
+                )));
+            }
         }
     }
 
@@ -667,18 +689,28 @@ pub async fn upload_file(
             .await?;
     }
 
-    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut buffer = vec![0u8; 4 * 1024 * 1024];
 
-    loop {
-        let n = src_file.read(&mut buffer).await?;
-        if n == 0 {
-            break;
+    let io_result: Result<(), BcmrError> = async {
+        loop {
+            let n = src_file.read(&mut buffer).await?;
+            if n == 0 {
+                break;
+            }
+            stdin.write_all(&buffer[..n]).await?;
+            progress_callback(n as u64);
         }
-        stdin.write_all(&buffer[..n]).await?;
-        progress_callback(n as u64);
+        Ok(())
     }
+    .await;
 
     drop(stdin);
+
+    if let Err(e) = io_result {
+        let _ = child.kill().await;
+        return Err(e);
+    }
+
     let output = child.wait_with_output().await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -725,23 +757,45 @@ async fn preserve_remote_attrs(local_src: &Path, remote: &RemotePath) -> Result<
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    // TZ=UTC so the UTC-formatted timestamp is interpreted correctly on any remote
-    let ts = unix_to_touch_ts(mtime_secs as i64);
+    let atime_secs = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            meta.atime() as u64
+        }
+        #[cfg(not(unix))]
+        {
+            mtime_secs
+        }
+    };
+
+    let mtime_ts = unix_to_touch_ts(mtime_secs as i64);
+    let atime_ts = unix_to_touch_ts(atime_secs as i64);
+    // touch -t sets both atime+mtime; use -a/-m to set them independently
     let cmd = format!(
-        "TZ=UTC touch -t '{}' '{}'; chmod {:o} '{}'",
-        ts,
+        "TZ=UTC touch -m -t '{}' '{}'; TZ=UTC touch -a -t '{}' '{}'; chmod {:o} '{}'",
+        mtime_ts,
+        shell_escape(&remote.path),
+        atime_ts,
         shell_escape(&remote.path),
         mode,
         shell_escape(&remote.path)
     );
-    let _ = ssh_command(&remote.ssh_target()).arg(cmd).output().await?;
+    let attr_out = ssh_command(&remote.ssh_target()).arg(cmd).output().await?;
+    if !attr_out.status.success() {
+        let stderr = String::from_utf8_lossy(&attr_out.stderr);
+        return Err(BcmrError::InvalidInput(ssh_error_message(
+            &stderr,
+            &format!("Failed to set attributes on '{}'", remote),
+        )));
+    }
     Ok(())
 }
 
-async fn get_remote_attrs(remote: &RemotePath) -> Result<(i64, u32), BcmrError> {
+async fn get_remote_attrs(remote: &RemotePath) -> Result<(i64, i64, u32), BcmrError> {
     let output = ssh_command(&remote.ssh_target())
         .arg(format!(
-            "stat -c '%Y %a' '{}' 2>/dev/null || stat -f '%m %Lp' '{}'",
+            "stat -c '%X %Y %a' '{}' 2>/dev/null || stat -f '%a %m %Lp' '{}'",
             shell_escape(&remote.path),
             shell_escape(&remote.path)
         ))
@@ -757,18 +811,25 @@ async fn get_remote_attrs(remote: &RemotePath) -> Result<(i64, u32), BcmrError> 
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parts: Vec<&str> = stdout.split_whitespace().collect();
-    let mtime_secs: i64 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let atime_secs: i64 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let mtime_secs: i64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
     let mode: u32 = parts
-        .get(1)
+        .get(2)
         .and_then(|s| u32::from_str_radix(s, 8).ok())
         .unwrap_or(0o644);
 
-    Ok((mtime_secs, mode))
+    Ok((atime_secs, mtime_secs, mode))
 }
 
-fn apply_local_attrs(local_path: &Path, mtime_secs: i64, _mode: u32) -> Result<(), BcmrError> {
+fn apply_local_attrs(
+    local_path: &Path,
+    atime_secs: i64,
+    mtime_secs: i64,
+    _mode: u32,
+) -> Result<(), BcmrError> {
+    let atime = filetime::FileTime::from_unix_time(atime_secs, 0);
     let mtime = filetime::FileTime::from_unix_time(mtime_secs, 0);
-    filetime::set_file_mtime(local_path, mtime)?;
+    filetime::set_file_times(local_path, atime, mtime)?;
 
     #[cfg(unix)]
     {
@@ -783,8 +844,8 @@ async fn apply_remote_attrs_locally(
     remote: &RemotePath,
     local_path: &Path,
 ) -> Result<(), BcmrError> {
-    let (mtime_secs, mode) = get_remote_attrs(remote).await?;
-    apply_local_attrs(local_path, mtime_secs, mode)?;
+    let (atime_secs, mtime_secs, mode) = get_remote_attrs(remote).await?;
+    apply_local_attrs(local_path, atime_secs, mtime_secs, mode)?;
     Ok(())
 }
 

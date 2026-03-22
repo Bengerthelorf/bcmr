@@ -321,6 +321,10 @@ pub async fn handle_remote_copy(
             }
         }
     };
+    if args.is_sync() {
+        eprintln!("Warning: --sync has no effect on remote transfers");
+    }
+
     remote::set_ssh_compression(compress);
 
     let check_target = if let Some(ref rd) = remote_dest {

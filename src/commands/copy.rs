@@ -1348,6 +1348,7 @@ async fn verify_copy(src: &Path, dst: &Path) -> std::result::Result<(), BcmrErro
     let dst_hash = dst_hash??;
 
     if src_hash != dst_hash {
+        let _ = fs::remove_file(dst).await;
         return Err(BcmrError::VerificationError(dst.to_path_buf()));
     }
     Ok(())
