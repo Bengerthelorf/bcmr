@@ -23,12 +23,21 @@ pub enum UpdateCheck {
     Off,
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct CopyConfig {
     #[serde(default = "default_reflink")]
     pub reflink: String,
     #[serde(default = "default_sparse")]
     pub sparse: String,
+}
+
+impl Default for CopyConfig {
+    fn default() -> Self {
+        Self {
+            reflink: default_reflink(),
+            sparse: default_sparse(),
+        }
+    }
 }
 
 fn default_reflink() -> String {
@@ -43,12 +52,21 @@ fn default_parallel_transfers() -> usize {
     4
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ScpConfig {
     #[serde(default = "default_parallel_transfers")]
     pub parallel_transfers: usize,
     #[serde(default = "default_compression")]
     pub compression: String,
+}
+
+impl Default for ScpConfig {
+    fn default() -> Self {
+        Self {
+            parallel_transfers: default_parallel_transfers(),
+            compression: default_compression(),
+        }
+    }
 }
 
 fn default_compression() -> String {
@@ -175,11 +193,19 @@ impl Config {
 
         if let Some(proj_dirs) = ProjectDirs::from("com", "bcmr", "bcmr") {
             let config_dir = proj_dirs.config_dir();
-            // Avoid duplicate source
-            if !config_dir.ends_with(".config/bcmr") {
+            let user_config_dir =
+                directories::UserDirs::new().map(|u| u.home_dir().join(".config").join("bcmr"));
+            let is_duplicate = user_config_dir
+                .as_ref()
+                .is_some_and(|u| config_dir == u.as_path());
+            if !is_duplicate {
                 let config_path = config_dir.join("config.toml");
                 if config_path.exists() {
                     s = s.add_source(File::from(config_path));
+                }
+                let yaml_path = config_dir.join("config.yaml");
+                if yaml_path.exists() {
+                    s = s.add_source(File::from(yaml_path));
                 }
             }
         }

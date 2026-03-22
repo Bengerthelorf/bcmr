@@ -309,7 +309,6 @@ fn determine_dry_run_action(
     Ok(ActionType::Overwrite)
 }
 
-#[allow(dead_code)]
 pub enum PlanEntry {
     CreateDir {
         src: PathBuf,
@@ -318,6 +317,7 @@ pub enum PlanEntry {
     CopyFile {
         src: PathBuf,
         dst: PathBuf,
+        #[allow(dead_code)]
         size: u64,
     },
 }
@@ -641,6 +641,7 @@ where
         }
 
         let mut files_to_copy = Vec::new();
+        let mut dir_pairs: Vec<(PathBuf, PathBuf)> = Vec::new();
         for entry in traversal::walk(src, true, false, 1, excludes) {
             let entry = entry?;
             let path = entry.path();
@@ -653,9 +654,7 @@ where
                     if !target_path.exists() {
                         fs::create_dir_all(&target_path).await?;
                     }
-                    if preserve {
-                        preserve_attributes(path, &target_path).await?;
-                    }
+                    dir_pairs.push((path.to_path_buf(), target_path));
                 } else if !target_path.exists() {
                     print_dry_run(
                         ActionType::Add,
@@ -716,6 +715,9 @@ where
         }
 
         if preserve && !cli.is_dry_run() {
+            for (src_dir, dst_dir) in dir_pairs.iter().rev() {
+                preserve_attributes(src_dir, dst_dir).await?;
+            }
             preserve_attributes(src, &new_dst).await?;
         }
     } else if src.is_dir() {
@@ -803,7 +805,8 @@ where
         }
     } else {
         match config_reflink.to_lowercase().as_str() {
-            "never" => (false, false),
+            "disable" | "never" => (false, false),
+            "force" => (true, true),
             _ => (true, false),
         }
     };
@@ -817,8 +820,9 @@ where
         }
     } else {
         match config_sparse.to_lowercase().as_str() {
-            "auto" => SparseMode::Auto,
-            _ => SparseMode::Never,
+            "force" => SparseMode::Always,
+            "disable" | "never" => SparseMode::Never,
+            _ => SparseMode::Auto,
         }
     };
 

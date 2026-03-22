@@ -183,7 +183,7 @@ impl InlineProgress {
 
         stdout.flush()?;
 
-        self.lines_printed = 2;
+        self.lines_printed = 3;
         Ok(())
     }
 }

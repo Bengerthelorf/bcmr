@@ -104,7 +104,11 @@ pub async fn check_removes(
     .await?
 }
 
-async fn confirm_remove(path: &Path, is_dir: bool) -> std::result::Result<bool, BcmrError> {
+async fn confirm_remove(
+    path: &Path,
+    is_dir: bool,
+    restore_raw: bool,
+) -> std::result::Result<bool, BcmrError> {
     use crossterm::{
         cursor::{Hide, Show},
         execute,
@@ -113,8 +117,10 @@ async fn confirm_remove(path: &Path, is_dir: bool) -> std::result::Result<bool, 
     use std::io::{self, Write};
 
     let mut stdout = io::stdout();
-    disable_raw_mode()?;
-    execute!(stdout, Show)?; // Show cursor
+    if restore_raw {
+        let _ = disable_raw_mode();
+        let _ = execute!(stdout, Show);
+    }
 
     print!(
         "Remove {} '{}'? (y/N) ",
@@ -124,12 +130,15 @@ async fn confirm_remove(path: &Path, is_dir: bool) -> std::result::Result<bool, 
     stdout.flush()?;
 
     let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
+    let result = io::stdin().read_line(&mut input);
 
-    enable_raw_mode()?;
-    execute!(stdout, Hide)?;
+    if restore_raw {
+        let _ = enable_raw_mode();
+        let _ = execute!(stdout, Hide);
+    }
 
-    Ok(input.trim().to_lowercase() == "y" || input.trim().to_lowercase() == "yes")
+    result?;
+    Ok(input.trim().eq_ignore_ascii_case("y") || input.trim().eq_ignore_ascii_case("yes"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -147,7 +156,8 @@ pub async fn remove_path(
         return Ok(());
     }
 
-    if cli.is_interactive() && !cli.is_force() && !confirm_remove(path, is_dir).await? {
+    let is_tui = cli.is_tui_mode();
+    if cli.is_interactive() && !cli.is_force() && !confirm_remove(path, is_dir, is_tui).await? {
         return Ok(());
     }
 
@@ -173,7 +183,7 @@ pub async fn remove_path(
 
             if cli.is_interactive()
                 && !cli.is_force()
-                && !confirm_remove(entry_path, entry.file_type().is_dir()).await?
+                && !confirm_remove(entry_path, entry.file_type().is_dir(), is_tui).await?
             {
                 continue;
             }

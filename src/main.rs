@@ -22,7 +22,7 @@ fn prompt_yes_no(message: &str) -> Result<bool> {
     Ok(input.trim().eq_ignore_ascii_case("y"))
 }
 
-async fn confirm_overwrite(files: &[commands::copy::FileToOverwrite]) -> Result<bool> {
+fn confirm_overwrite(files: &[commands::copy::FileToOverwrite]) -> Result<bool> {
     println!("\nThe following items will be overwritten:");
     for file in files {
         println!(
@@ -34,7 +34,7 @@ async fn confirm_overwrite(files: &[commands::copy::FileToOverwrite]) -> Result<
     prompt_yes_no("\nDo you want to proceed?")
 }
 
-async fn confirm_removal(files: &[commands::remove::FileToRemove]) -> Result<bool> {
+fn confirm_removal(files: &[commands::remove::FileToRemove]) -> Result<bool> {
     let mut total_size = 0u64;
     let mut file_count = 0;
     let mut dir_count = 0;
@@ -110,7 +110,7 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         if args.is_force()
             && !plan.overwrites.is_empty()
             && args.should_prompt_for_overwrite()
-            && !confirm_overwrite(&plan.overwrites).await?
+            && !confirm_overwrite(&plan.overwrites)?
         {
             return Err(BcmrError::Cancelled.into());
         }
@@ -221,7 +221,7 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
 
         if !files_to_overwrite.is_empty()
             && args.should_prompt_for_overwrite()
-            && !confirm_overwrite(&files_to_overwrite).await?
+            && !confirm_overwrite(&files_to_overwrite)?
         {
             return Err(BcmrError::Cancelled.into());
         }
@@ -234,7 +234,7 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
         println!("DRY RUN MODE: No changes will be made.\n");
 
         for src in sources {
-            let _ = commands::r#move::move_path(
+            commands::r#move::move_path(
                 src,
                 dest,
                 args.is_recursive(),
@@ -245,7 +245,7 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
                 |_| {},
                 |_, _| {},
             )
-            .await;
+            .await?;
         }
 
         println!(
@@ -328,7 +328,7 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         && !args.is_force()
         && !args.is_yes()
         && (!args.is_interactive() || files_to_remove.len() > 1)
-        && !confirm_removal(&files_to_remove).await?
+        && !confirm_removal(&files_to_remove)?
     {
         return Err(BcmrError::Cancelled.into());
     }
@@ -388,9 +388,9 @@ fn handle_init_command(args: &Commands) -> Result<()> {
 
 fn validate_mode(mode: &str, name: &str) -> Result<()> {
     match mode.to_lowercase().as_str() {
-        "force" | "disable" | "auto" => Ok(()),
+        "force" | "disable" | "never" | "auto" => Ok(()),
         other => Err(BcmrError::InvalidInput(format!(
-            "Invalid {} mode '{}'. Supported modes: force, disable, auto.",
+            "Invalid {} mode '{}'. Supported modes: force, disable, never, auto.",
             name, other
         ))
         .into()),
@@ -512,7 +512,7 @@ async fn main() -> Result<()> {
             let mut cmd = build_completion_command();
             let mut buf = Vec::new();
             clap_complete::generate(*shell, &mut cmd, "bcmr", &mut buf);
-            let base = String::from_utf8(buf).unwrap();
+            let base = String::from_utf8(buf).expect("clap generated invalid UTF-8");
 
             if *shell == clap_complete::Shell::PowerShell {
                 // Inject remote path check into the clap-generated script block

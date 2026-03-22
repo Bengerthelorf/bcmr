@@ -272,7 +272,7 @@ pub async fn handle_remote_copy(
     args: &Commands,
     sources: &[std::path::PathBuf],
     dest: &std::path::Path,
-    _excludes: &[regex::Regex],
+    excludes: &[regex::Regex],
 ) -> Result<()> {
     let dest_str = dest.to_string_lossy();
     let remote_dest = parse_remote_path(&dest_str);
@@ -334,9 +334,9 @@ pub async fn handle_remote_copy(
     let parallel = args.get_parallel().unwrap_or(CONFIG.scp.parallel_transfers);
 
     if let Some(ref rdest) = remote_dest {
-        handle_remote_upload(args, sources, rdest, parallel).await
+        handle_remote_upload(args, sources, rdest, parallel, excludes).await
     } else {
-        handle_remote_download(args, sources, dest, parallel).await
+        handle_remote_download(args, sources, dest, parallel, excludes).await
     }
 }
 
@@ -345,8 +345,9 @@ async fn handle_remote_upload(
     sources: &[std::path::PathBuf],
     rdest: &RemotePath,
     parallel: usize,
+    excludes: &[regex::Regex],
 ) -> Result<()> {
-    let excludes = args.compile_excludes()?;
+    let excludes = excludes.to_vec();
     let mut total_size = 0u64;
     for src in sources {
         if parse_remote_path(&src.to_string_lossy()).is_some() {
@@ -462,8 +463,9 @@ async fn handle_remote_download(
     sources: &[std::path::PathBuf],
     dest_local: &std::path::Path,
     parallel: usize,
+    excludes: &[regex::Regex],
 ) -> Result<()> {
-    let excludes = args.compile_excludes()?;
+    let excludes = excludes.to_vec();
 
     let mut remote_sources = Vec::new();
     for src in sources {

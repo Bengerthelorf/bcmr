@@ -28,7 +28,7 @@ impl WorkerState {
         if elapsed < 0.1 {
             return self.speed;
         }
-        let bytes_per_sec = (self.progress - self.last_bytes) as f64 / elapsed;
+        let bytes_per_sec = self.progress.saturating_sub(self.last_bytes) as f64 / elapsed;
         let speed = bytes_per_sec / (1024.0 * 1024.0);
         self.speed = if self.speed > 0.0 {
             self.speed * 0.8 + speed * 0.2
@@ -99,7 +99,9 @@ impl ProgressData {
     }
 
     pub fn update_worker(&mut self, slot: usize, file_name: &str, file_size: u64, progress: u64) {
-        let w = &mut self.workers[slot];
+        let Some(w) = self.workers.get_mut(slot) else {
+            return;
+        };
         if !w.active || w.file_name != file_name {
             w.last_bytes = 0;
             w.last_update = Instant::now();
@@ -112,7 +114,9 @@ impl ProgressData {
     }
 
     pub fn finish_worker(&mut self, slot: usize) {
-        let w = &mut self.workers[slot];
+        let Some(w) = self.workers.get_mut(slot) else {
+            return;
+        };
         w.active = false;
         w.file_name.clear();
         w.progress = 0;
@@ -127,9 +131,8 @@ impl ProgressData {
             return self.last_speed;
         }
 
-        // Speed based on actually transferred bytes, not skipped
-        let transferred = self.current_bytes - self.skipped_bytes;
-        let bytes_per_sec = (transferred - self.last_transferred) as f64 / elapsed;
+        let transferred = self.current_bytes.saturating_sub(self.skipped_bytes);
+        let bytes_per_sec = transferred.saturating_sub(self.last_transferred) as f64 / elapsed;
         let speed = bytes_per_sec / (1024.0 * 1024.0);
 
         self.last_speed = if self.last_speed > 0.0 {

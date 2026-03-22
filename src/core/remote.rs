@@ -796,28 +796,14 @@ pub async fn verify_remote_file(local_src: &Path, remote: &RemotePath) -> Result
         .await
         .map_err(|e| BcmrError::InvalidInput(e.to_string()))??;
 
-    let output = ssh_command(&remote.ssh_target())
-        .arg(format!("cat '{}'", shell_escape(&remote.path)))
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        return Err(BcmrError::InvalidInput(format!(
-            "Failed to read remote file for verification: '{}'",
-            remote
-        )));
-    }
-
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&output.stdout);
-    let remote_hash = hasher.finalize().to_hex().to_string();
+    let remote_hash = remote_file_hash(remote, None).await?;
 
     Ok(local_hash == remote_hash)
 }
 
 fn unix_to_touch_ts(secs: i64) -> String {
-    let days = secs / 86400;
-    let rem = secs % 86400;
+    let days = secs.div_euclid(86400);
+    let rem = secs.rem_euclid(86400);
     let hours = rem / 3600;
     let minutes = (rem % 3600) / 60;
     let seconds = rem % 60;

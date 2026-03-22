@@ -458,7 +458,7 @@ impl Commands {
         }
     }
 
-    pub fn get_remove_paths(&self) -> std::result::Result<&Vec<PathBuf>, String> {
+    pub fn get_remove_paths(&self) -> std::result::Result<&[PathBuf], String> {
         match self {
             Commands::Remove { paths, .. } => Ok(paths),
             _ => Err("command does not support remove paths".to_string()),
@@ -471,6 +471,9 @@ pub fn parse_args() -> Cli {
 }
 
 fn parse_test_mode(s: &str) -> Result<TestMode, String> {
+    if s == "none" {
+        return Ok(TestMode::None);
+    }
     let parts: Vec<&str> = s.split(':').collect();
     if parts.len() == 2 {
         match (parts[0], parts[1].parse::<u64>()) {
@@ -479,7 +482,10 @@ fn parse_test_mode(s: &str) -> Result<TestMode, String> {
             _ => Err(format!("Invalid test mode format: {}", s)),
         }
     } else {
-        Ok(TestMode::None)
+        Err(format!(
+            "Invalid test mode '{}'. Expected: none, delay:<ms>, or speed_limit:<bps>",
+            s
+        ))
     }
 }
 

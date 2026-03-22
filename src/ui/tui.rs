@@ -42,7 +42,7 @@ impl TuiProgress {
         if self.data.parallel_total > 0 {
             5 + self.data.parallel_total as u16
         } else {
-            8
+            7
         }
     }
 
@@ -110,9 +110,11 @@ impl TuiProgress {
             }
         }
 
-        if self.data.current_file.is_empty() {
-            self.data.current_file = "File".to_string();
-        }
+        let display_file = if self.data.current_file.is_empty() {
+            "File".to_string()
+        } else {
+            self.data.current_file.clone()
+        };
 
         if event::poll(Duration::from_millis(0))? {
             if let Event::Key(key) = event::read()? {
@@ -415,7 +417,7 @@ impl TuiProgress {
             };
             draw_line_content(&mut stdout, 3, &items_line)?;
 
-            let file_info = format!("Current: {}", self.data.current_file);
+            let file_info = format!("Current: {}", display_file);
             let max_text_width = box_width.saturating_sub(4);
             let display_file_info = if file_info.len() > max_text_width {
                 let mut end_index = max_text_width.saturating_sub(3);
@@ -479,6 +481,19 @@ impl TuiProgress {
         self.last_rendered_lines = self.total_lines();
         stdout.flush()?;
         Ok(())
+    }
+}
+
+impl Drop for TuiProgress {
+    fn drop(&mut self) {
+        if self.raw_mode_enabled && !self.finished {
+            let _ = execute!(
+                stdout(),
+                Show,
+                MoveTo(0, self.start_row + self.total_lines())
+            );
+            let _ = disable_raw_mode();
+        }
     }
 }
 
