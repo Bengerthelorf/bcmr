@@ -45,7 +45,7 @@ Source ──read──> [4MB buffer] ──write──> Destination (.bcmr.tmp)
 
 The session file persists the copy state across crashes. It uses a compact binary format:
 
-![Session Layout](/bcmr/images/ablation/session_layout.png)
+![Session Layout](/images/ablation/session_layout.png)
 
 For a file of $n$ bytes with block size $b = 4\,\text{MB}$:
 
@@ -58,7 +58,7 @@ $$|\text{session}| = 256 + 32 \cdot \lceil n / b \rceil \quad \text{bytes}$$
 | 100 GB | 25,600 | 800 KB | $7.6 \times 10^{-6}$ |
 | 1 TB | 262,144 | 8 MB | $7.6 \times 10^{-6}$ |
 
-![Session Overhead](/bcmr/images/ablation/session_overhead.png)
+![Session Overhead](/images/ablation/session_overhead.png)
 
 The overhead converges to $32/b \approx 7.6 \times 10^{-6}$ as metadata becomes negligible.
 
@@ -66,7 +66,7 @@ The overhead converges to $32/b \approx 7.6 \times 10^{-6}$ as metadata becomes 
 
 The write ordering ensures a strict invariant:
 
-![Crash Safety](/bcmr/images/ablation/crash_safety.png)
+![Crash Safety](/images/ablation/crash_safety.png)
 
 Let $S$ be the session and $B_k$ the $k$-th block on disk. After each checkpoint:
 
@@ -105,7 +105,7 @@ Since the source hash is computed inline during the copy, the `-V` verification 
 | New `-V`: copy+hash src, hash dst | 2R + 1W | $3n$ |
 | Saving | 1 full read eliminated | $n$ bytes, 25% of total |
 
-![I/O Complexity](/bcmr/images/ablation/io_complexity.png)
+![I/O Complexity](/images/ablation/io_complexity.png)
 
 ### Durable Sync
 
@@ -143,7 +143,7 @@ All experiments use median of 3--5 runs. File data is pseudo-random (`(i*7+13) m
 
 **Method**: Copy files of size $n \in \{16, 64, 256, 512, 1024\}$ MB in three modes: (A) copy only, (B) copy + `hasher.update()`, (C) copy + hash + `hasher.clone()` per block.
 
-![BLAKE3 Throughput](/bcmr/images/ablation/blake3_throughput.png)
+![BLAKE3 Throughput](/images/ablation/blake3_throughput.png)
 
 | Platform | BLAKE3 Throughput | Bottleneck |
 |----------|------------------|-----------|
@@ -170,7 +170,7 @@ Warm-cache results show 5--14% savings (page cache masks the eliminated read). W
 
 **Hypothesis**: $T_{\text{tail}} = \mathcal{O}(1)$ while $T_{\text{full}} = \mathcal{O}(k)$.
 
-![Resume Verification](/bcmr/images/ablation/resume_verification.png)
+![Resume Verification](/images/ablation/resume_verification.png)
 
 | Written | Full Rehash (macOS / Linux) | Tail-Block | Speedup |
 |---------|---------------------------|------------|---------|
@@ -185,7 +185,7 @@ Tail-block verification is constant at ~5 ms (macOS) / ~1.8 ms (Linux) regardles
 
 **Hypothesis**: There exists an interval $I$ where the fsync overhead is acceptable ($<20\%$) and worst-case rework on crash is bounded.
 
-![Sync Interval](/bcmr/images/ablation/sync_interval.png)
+![Sync Interval](/images/ablation/sync_interval.png)
 
 | Interval | macOS Overhead | Linux Overhead | Max Rework |
 |----------|---------------|----------------|------------|
@@ -200,7 +200,7 @@ Tail-block verification is constant at ~5 ms (macOS) / ~1.8 ms (Linux) regardles
 
 **Hypothesis**: `F_FULLFSYNC` costs negligibly more than `fsync` on Apple Silicon.
 
-![F_FULLFSYNC Comparison](/bcmr/images/ablation/fsync_comparison.png)
+![F_FULLFSYNC Comparison](/images/ablation/fsync_comparison.png)
 
 | File Size | fsync | F_FULLFSYNC | Difference |
 |-----------|-------|-------------|-----------|
@@ -215,7 +215,7 @@ Differences are within noise. `F_FULLFSYNC` provides **correct durability guaran
 
 **Hypothesis**: The kernel fast path supports non-zero offsets for resume, avoiding userspace buffer copies.
 
-![copy_file_range Resume](/bcmr/images/ablation/cfr_resume.png)
+![copy_file_range Resume](/images/ablation/cfr_resume.png)
 
 | File Size | read/write | copy_file_range | Speedup |
 |-----------|-----------|-----------------|---------|
@@ -229,7 +229,7 @@ Differences are within noise. `F_FULLFSYNC` provides **correct durability guaran
 
 ## Comparison with Prior Art
 
-![Tool Comparison](/bcmr/images/ablation/tool_comparison.png)
+![Tool Comparison](/images/ablation/tool_comparison.png)
 
 | | cp | rsync | curl -C | aria2 | bcmr (SCC) |
 |---|---|---|---|---|---|
