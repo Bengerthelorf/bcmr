@@ -1065,7 +1065,7 @@ where
             }
         }
         TestMode::None => {
-            const SPARSE_BLOCK: usize = 4096;
+            const SPARSE_DETECT_SIZE: usize = 4096;
             let mut pending_hole = 0u64;
 
             // Streaming hash: compute source BLAKE3 inline during copy.
@@ -1074,7 +1074,7 @@ where
 
             // Block-level hash for session checkpoints
             let mut block_hasher = blake3::Hasher::new();
-            let mut block_bytes_in_current = 0u64;
+            let mut bytes_in_block = 0u64;
             let mut blocks_since_checkpoint = 0u32;
 
             loop {
@@ -1086,7 +1086,7 @@ where
                 // Inline hash — "free" since BLAKE3 > disk speed
                 src_hasher.update(&buffer[..n]);
                 block_hasher.update(&buffer[..n]);
-                block_bytes_in_current += n as u64;
+                bytes_in_block += n as u64;
 
                 match sparse_mode {
                     SparseMode::Never => {
@@ -1096,11 +1096,11 @@ where
                         let min_block = if matches!(sparse_mode, SparseMode::Always) {
                             1
                         } else {
-                            SPARSE_BLOCK
+                            SPARSE_DETECT_SIZE
                         };
                         let mut offset = 0;
                         while offset < n {
-                            let end = (offset + SPARSE_BLOCK).min(n);
+                            let end = (offset + SPARSE_DETECT_SIZE).min(n);
                             let chunk = &buffer[offset..end];
                             let chunk_len = chunk.len();
 
@@ -1122,7 +1122,7 @@ where
                 (callback.callback)(n as u64);
 
                 // Check if we've completed a 4MB block
-                if block_bytes_in_current >= crate::core::session::COPY_BLOCK_SIZE {
+                if bytes_in_block >= crate::core::session::COPY_BLOCK_SIZE {
                     let block_hash = block_hasher.finalize();
                     if let Some(ref mut s) = session {
                         s.add_block(
@@ -1131,7 +1131,7 @@ where
                         );
                     }
                     block_hasher = blake3::Hasher::new();
-                    block_bytes_in_current -= crate::core::session::COPY_BLOCK_SIZE;
+                    bytes_in_block -= crate::core::session::COPY_BLOCK_SIZE;
                     blocks_since_checkpoint += 1;
 
                     // Checkpoint: fdatasync + save session at interval
@@ -1171,10 +1171,10 @@ where
             }
 
             // Handle final partial block
-            if block_bytes_in_current > 0 {
+            if bytes_in_block > 0 {
                 let block_hash = block_hasher.finalize();
                 if let Some(ref mut s) = session {
-                    s.add_block(*block_hash.as_bytes(), block_bytes_in_current);
+                    s.add_block(*block_hash.as_bytes(), bytes_in_block);
                 }
             }
 
