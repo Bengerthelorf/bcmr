@@ -1,6 +1,7 @@
 use crate::cli::{Commands, TestMode};
 use crate::commands::copy;
 use crate::core::error::BcmrError;
+use crate::core::io as durable_io;
 use crate::core::traversal;
 use crate::ui::display::{print_dry_run, ActionType};
 
@@ -115,6 +116,9 @@ where
                 return Err(BcmrError::Io(e));
             }
         } else {
+            if let Some(parent) = dst_path.parent() {
+                durable_io::fsync_dir_async(parent).await;
+            }
             on_new_file(&file_name, file_size);
             progress_callback(file_size);
             if cli.is_verbose() {
@@ -213,6 +217,9 @@ where
                     return Err(e.into());
                 }
             } else {
+                if let Some(parent) = new_dst.parent() {
+                    durable_io::fsync_dir_async(parent).await;
+                }
                 // Rename succeeded instantly — report full progress
                 on_new_file(&dir_name, dir_size);
                 progress_callback(dir_size);

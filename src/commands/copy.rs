@@ -1,6 +1,7 @@
 use crate::cli::{Commands, SparseMode, TestMode};
 use crate::core::checksum;
 use crate::core::error::BcmrError;
+use crate::core::io as durable_io;
 use crate::core::traversal;
 use crate::ui::display::{print_dry_run, ActionType};
 
@@ -141,7 +142,7 @@ async fn try_copy_file_range(
     }
 
     if sync {
-        if let Err(e) = dst_file.sync_data() {
+        if let Err(e) = durable_io::durable_sync(&dst_file) {
             return Some(Err(BcmrError::Io(e)));
         }
     }
@@ -859,6 +860,9 @@ where
             Ok(_) => {
                 if use_atomic {
                     fs::rename(&write_target, dst).await?;
+                    if let Some(parent) = dst.parent() {
+                        durable_io::fsync_dir_async(parent).await;
+                    }
                     if let Some(ref mut g) = guard {
                         g.disarm();
                     }
@@ -868,7 +872,7 @@ where
                     preserve_attributes(src, dst).await?;
                 }
                 if verify {
-                    verify_copy(src, dst).await?;
+                    verify_copy(src, dst, None).await?;
                 }
                 return Ok(());
             }
@@ -889,6 +893,9 @@ where
         match try_copy_file_range(src, &write_target, file_size, &callback.callback, sync).await {
             Some(Ok(())) => {
                 fs::rename(&write_target, dst).await?;
+                if let Some(parent) = dst.parent() {
+                    durable_io::fsync_dir_async(parent).await;
+                }
                 if let Some(ref mut g) = guard {
                     g.disarm();
                 }
@@ -896,7 +903,7 @@ where
                     preserve_attributes(src, dst).await?;
                 }
                 if verify {
-                    verify_copy(src, dst).await?;
+                    verify_copy(src, dst, None).await?;
                 }
                 return Ok(());
             }
@@ -955,6 +962,8 @@ where
                 dst_len < file_size
             }
         } else {
+            // Resume mode: check mtime. Inode-based detection of source
+            // replacement is handled via session files when available.
             let src_mtime = src.metadata()?.modified()?;
             let dst_mtime = dst.metadata()?.modified()?;
 
@@ -1001,6 +1010,28 @@ where
 
     let mut buffer = vec![0; 4 * 1024 * 1024]; // 4MB buffer
 
+    // Session for crash-safe resume with streaming hash checkpoints.
+    // Created for resume/append/strict modes or any file > 64MB.
+    let mut session: Option<crate::core::session::Session> = if resume || append || strict
+        || file_size > 64 * 1024 * 1024
+    {
+        let src_meta = src.metadata()?;
+        let src_mtime = src_meta
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let src_inode = durable_io::get_inode(src).unwrap_or(0);
+        Some(crate::core::session::Session::new(
+            src, dst, file_size, src_mtime, src_inode,
+        ))
+    } else {
+        None
+    };
+
+    // Will hold the inline source hash computed during the copy.
+    let mut inline_src_hash: Option<blake3::Hash> = None;
+
     match test_mode {
         TestMode::Delay(ms) => loop {
             let n = src_file.read(&mut buffer).await?;
@@ -1034,14 +1065,28 @@ where
             }
         }
         TestMode::None => {
-            const BLOCK_SIZE: usize = 4096;
+            const SPARSE_BLOCK: usize = 4096;
             let mut pending_hole = 0u64;
+
+            // Streaming hash: compute source BLAKE3 inline during copy.
+            // Cost is negligible since BLAKE3 throughput exceeds disk I/O.
+            let mut src_hasher = blake3::Hasher::new();
+
+            // Block-level hash for session checkpoints
+            let mut block_hasher = blake3::Hasher::new();
+            let mut block_bytes_in_current = 0u64;
+            let mut blocks_since_checkpoint = 0u32;
 
             loop {
                 let n = src_file.read(&mut buffer).await?;
                 if n == 0 {
                     break;
                 }
+
+                // Inline hash — "free" since BLAKE3 > disk speed
+                src_hasher.update(&buffer[..n]);
+                block_hasher.update(&buffer[..n]);
+                block_bytes_in_current += n as u64;
 
                 match sparse_mode {
                     SparseMode::Never => {
@@ -1051,11 +1096,11 @@ where
                         let min_block = if matches!(sparse_mode, SparseMode::Always) {
                             1
                         } else {
-                            BLOCK_SIZE
+                            SPARSE_BLOCK
                         };
                         let mut offset = 0;
                         while offset < n {
-                            let end = (offset + BLOCK_SIZE).min(n);
+                            let end = (offset + SPARSE_BLOCK).min(n);
                             let chunk = &buffer[offset..end];
                             let chunk_len = chunk.len();
 
@@ -1075,17 +1120,85 @@ where
                     }
                 }
                 (callback.callback)(n as u64);
+
+                // Check if we've completed a 4MB block
+                if block_bytes_in_current >= crate::core::session::COPY_BLOCK_SIZE {
+                    let block_hash = block_hasher.finalize();
+                    if let Some(ref mut s) = session {
+                        s.add_block(
+                            *block_hash.as_bytes(),
+                            crate::core::session::COPY_BLOCK_SIZE,
+                        );
+                    }
+                    block_hasher = blake3::Hasher::new();
+                    block_bytes_in_current -= crate::core::session::COPY_BLOCK_SIZE;
+                    blocks_since_checkpoint += 1;
+
+                    // Checkpoint: fdatasync + save session at interval
+                    if blocks_since_checkpoint
+                        >= crate::core::session::CHECKPOINT_INTERVAL_BLOCKS
+                    {
+                        durable_io::durable_sync_async(&dst_file).await?;
+                        if let Some(ref s) = session {
+                            let _ = s.save();
+                        }
+                        blocks_since_checkpoint = 0;
+
+                        // Evict already-copied pages from cache to avoid
+                        // polluting the page cache during large copies.
+                        #[cfg(target_os = "linux")]
+                        {
+                            use std::os::unix::io::AsRawFd;
+                            let pos = src_file.stream_position().await.unwrap_or(0);
+                            let evict_end = pos as libc::off_t;
+                            unsafe {
+                                libc::posix_fadvise(
+                                    src_file.as_raw_fd(),
+                                    0,
+                                    evict_end,
+                                    libc::POSIX_FADV_DONTNEED,
+                                );
+                                libc::posix_fadvise(
+                                    dst_file.as_raw_fd(),
+                                    0,
+                                    evict_end,
+                                    libc::POSIX_FADV_DONTNEED,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Handle final partial block
+            if block_bytes_in_current > 0 {
+                let block_hash = block_hasher.finalize();
+                if let Some(ref mut s) = session {
+                    s.add_block(*block_hash.as_bytes(), block_bytes_in_current);
+                }
             }
 
             if pending_hole > 0 {
                 let current_pos = dst_file.stream_position().await?;
                 dst_file.set_len(current_pos + pending_hole).await?;
             }
+
+            // Store the inline source hash for 2-pass verification.
+            // Only valid when we copied the entire file (start_offset == 0),
+            // because the hasher only saw bytes from start_offset onward.
+            let final_src_hash = src_hasher.finalize();
+            if start_offset == 0 {
+                if let Some(ref mut s) = session {
+                    s.set_src_hash(*final_src_hash.as_bytes());
+                    let _ = s.save();
+                }
+                inline_src_hash = Some(final_src_hash);
+            }
         }
     }
 
     if sync {
-        dst_file.sync_data().await?;
+        durable_io::durable_sync_async(&dst_file).await?;
     }
 
     // Close file before rename
@@ -1093,6 +1206,9 @@ where
 
     if use_atomic {
         fs::rename(&write_target, dst).await?;
+        if let Some(parent) = dst.parent() {
+            durable_io::fsync_dir_async(parent).await;
+        }
         if let Some(ref mut g) = guard {
             g.disarm();
         }
@@ -1103,8 +1219,11 @@ where
     }
 
     if verify {
-        verify_copy(src, dst).await?;
+        verify_copy(src, dst, inline_src_hash).await?;
     }
+
+    // Clean up session on successful completion
+    crate::core::session::Session::remove(src, dst);
 
     Ok(())
 }
@@ -1337,17 +1456,26 @@ where
     Ok(())
 }
 
-async fn verify_copy(src: &Path, dst: &Path) -> std::result::Result<(), BcmrError> {
-    let src_path = src.to_path_buf();
-    let dst_path = dst.to_path_buf();
-    let (src_hash, dst_hash) = tokio::join!(
-        tokio::task::spawn_blocking(move || checksum::calculate_hash(&src_path)),
-        tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)),
-    );
-    let src_hash = src_hash??;
-    let dst_hash = dst_hash??;
+async fn verify_copy(
+    src: &Path,
+    dst: &Path,
+    inline_src_hash: Option<blake3::Hash>,
+) -> std::result::Result<(), BcmrError> {
+    // 2-pass verification: if we have an inline source hash (computed during copy),
+    // we only need to re-read the destination — saving one full file read.
+    let src_hash_str = if let Some(h) = inline_src_hash {
+        h.to_hex().to_string()
+    } else {
+        // Fallback: no inline hash available (reflink/copy_file_range path)
+        let src_path = src.to_path_buf();
+        tokio::task::spawn_blocking(move || checksum::calculate_hash(&src_path)).await??
+    };
 
-    if src_hash != dst_hash {
+    let dst_path = dst.to_path_buf();
+    let dst_hash_str =
+        tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)).await??;
+
+    if src_hash_str != dst_hash_str {
         let _ = fs::remove_file(dst).await;
         return Err(BcmrError::VerificationError(dst.to_path_buf()));
     }

@@ -194,6 +194,7 @@ async fn run_parallel_transfers(
                     &skip_cb,
                     &noop_file_cb,
                     &task_opts,
+                    Some(slot),
                 )
                 .await
             } else {
@@ -205,6 +206,7 @@ async fn run_parallel_transfers(
                     &noop_file_cb,
                     item.size,
                     &task_opts,
+                    Some(slot),
                 )
                 .await
             };
@@ -441,6 +443,7 @@ async fn handle_remote_upload(
                     &runner.skip_callback(),
                     &runner.file_callback(),
                     &opts,
+                    None,
                 )
                 .await?;
             } else if src.is_dir() && args.is_recursive() {
@@ -629,7 +632,7 @@ async fn handle_remote_download(
                 } else {
                     dest_local.to_path_buf()
                 };
-                remote::download_file(rsrc, &local_path, &inc, &skip, &file_cb, info.size, &opts)
+                remote::download_file(rsrc, &local_path, &inc, &skip, &file_cb, info.size, &opts, None)
                     .await?;
             }
         }

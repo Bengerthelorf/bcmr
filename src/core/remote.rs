@@ -236,6 +236,66 @@ fn ssh_base_args(target: &str) -> Vec<String> {
     args
 }
 
+/// Per-worker SSH args with separate ControlPath for true parallel TCP connections.
+///
+/// The default ControlMaster multiplexing serializes all SSH channels through
+/// one TCP connection and one encryption context, bottlenecking parallel throughput.
+/// By giving each worker its own control socket, each gets an independent TCP stream.
+/// mscp (https://github.com/upa/mscp) demonstrated 5.98x speedup with 8 connections.
+fn ssh_base_args_for_worker(target: &str, worker_id: usize) -> Vec<String> {
+    let dir = std::env::temp_dir().join("bcmr-ssh");
+    let _ = std::fs::create_dir_all(&dir);
+    let cp = dir
+        .join(format!(
+            "w{}_{}.sock",
+            worker_id,
+            target.replace(['@', ':', '/'], "_")
+        ))
+        .to_string_lossy()
+        .to_string();
+
+    let mut args = vec![
+        "-o".into(),
+        format!("ControlPath={}", cp),
+        "-o".into(),
+        "ControlMaster=auto".into(),
+        "-o".into(),
+        "ControlPersist=60".into(), // shorter persist for worker sockets
+        "-o".into(),
+        "ConnectTimeout=10".into(),
+    ];
+    if !is_interactive() {
+        args.extend(["-o".into(), "BatchMode=yes".into()]);
+    }
+    if SSH_COMPRESS.load(Ordering::Relaxed) {
+        args.extend(["-o".into(), "Compression=yes".into()]);
+    }
+    args
+}
+
+/// Create an SSH command that uses a per-worker control socket for true
+/// parallel TCP connections. Use this in parallel transfer workers.
+fn ssh_command_for_worker(target: &str, worker_id: usize) -> Command {
+    let args = ssh_base_args_for_worker(target, worker_id);
+    let mut cmd = Command::new("ssh");
+    for arg in &args {
+        cmd.arg(arg);
+    }
+    cmd.arg(target);
+    cmd
+}
+
+/// Create an SSH command with optional worker isolation.
+/// When worker_id is Some, uses a per-worker control socket for independent
+/// TCP connections (5-6x throughput improvement for parallel transfers).
+/// When None, uses the shared ControlMaster connection.
+fn make_ssh_cmd(target: &str, worker_id: Option<usize>) -> Command {
+    match worker_id {
+        Some(id) => ssh_command_for_worker(target, id),
+        None => ssh_command(target),
+    }
+}
+
 fn ssh_command(target: &str) -> Command {
     let args = ssh_base_args(target);
     let mut cmd = Command::new("ssh");
@@ -419,6 +479,7 @@ pub async fn download_file(
     on_new_file: &impl Fn(&str, u64),
     file_size: u64,
     opts: &RemoteTransferOptions,
+    worker_id: Option<usize>,
 ) -> Result<(), BcmrError> {
     let file_name = remote.path.rsplit('/').next().unwrap_or(&remote.path);
     on_new_file(file_name, file_size);
@@ -474,7 +535,7 @@ pub async fn download_file(
         format!("cat '{}'", shell_escape(&remote.path))
     };
 
-    let mut child = ssh_command(&remote.ssh_target())
+    let mut child = make_ssh_cmd(&remote.ssh_target(), worker_id)
         .arg(ssh_cmd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -605,6 +666,7 @@ pub async fn upload_file(
     skip_callback: &impl Fn(u64),
     on_new_file: &impl Fn(&str, u64),
     opts: &RemoteTransferOptions,
+    worker_id: Option<usize>,
 ) -> Result<(), BcmrError> {
     let file_size = local_src.metadata()?.len();
     let file_name = local_src
@@ -616,7 +678,7 @@ pub async fn upload_file(
 
     if let Some(parent) = remote.path.rsplit_once('/') {
         if !parent.0.is_empty() {
-            let mkdir_out = ssh_command(&remote.ssh_target())
+            let mkdir_out = make_ssh_cmd(&remote.ssh_target(), worker_id)
                 .arg(format!("mkdir -p '{}'", shell_escape(parent.0)))
                 .output()
                 .await?;
@@ -669,7 +731,7 @@ pub async fn upload_file(
     }
 
     let cat_op = if decision.use_append_mode { ">>" } else { ">" };
-    let mut child = ssh_command(&remote.ssh_target())
+    let mut child = make_ssh_cmd(&remote.ssh_target(), worker_id)
         .arg(format!("cat {} '{}'", cat_op, shell_escape(&remote.path)))
         .stdin(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -932,6 +994,7 @@ pub async fn download_directory(
             on_new_file,
             *size,
             opts,
+            None,
         )
         .await?;
     }
@@ -1051,6 +1114,7 @@ pub async fn upload_directory(
             skip_callback,
             on_new_file,
             opts,
+            None,
         )
         .await?;
     }
