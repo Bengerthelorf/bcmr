@@ -9,6 +9,10 @@ export default defineConfig({
     ['link', { rel: 'icon', type: 'image/svg+xml', href: '/bcmr/images/icon.svg' }],
   ],
 
+  markdown: {
+    math: true,
+  },
+
   locales: {
     root: {
       label: 'English',
@@ -17,6 +21,7 @@ export default defineConfig({
         nav: [
           { text: 'Guide', link: '/guide/getting-started' },
           { text: 'CLI', link: '/cli/' },
+          { text: 'Internals', link: '/ablation/' },
           {
             text: 'Download',
             link: 'https://github.com/Bengerthelorf/bcmr/releases/latest',
@@ -46,6 +51,14 @@ export default defineConfig({
               items: [
                 { text: 'Overview', link: '/cli/' },
                 { text: 'Command Reference', link: '/cli/commands' },
+              ],
+            },
+          ],
+          '/ablation/': [
+            {
+              text: 'Internals',
+              items: [
+                { text: 'Streaming Checkpoint Copy', link: '/ablation/' },
               ],
             },
           ],
