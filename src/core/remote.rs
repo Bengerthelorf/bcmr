@@ -471,6 +471,7 @@ pub async fn remote_list_files(remote: &RemotePath) -> Result<Vec<(String, u64, 
     Ok(entries)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn download_file(
     remote: &RemotePath,
     local_dst: &Path,

@@ -37,7 +37,7 @@ pub async fn durable_sync_async(file: &tokio::fs::File) -> io::Result<()> {
         .into_std()
         .await;
     tokio::task::spawn_blocking(move || durable_sync(&std_file)).await
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+        .map_err(io::Error::other)?
 }
 
 /// Fsync a directory to ensure that directory entry changes (renames, creates)
