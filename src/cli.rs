@@ -220,6 +220,10 @@ pub enum Commands {
         shell: clap_complete::Shell,
     },
 
+    /// Run as a remote helper (called via SSH, not directly by users)
+    #[command(hide = true)]
+    Serve,
+
     /// Remove files or directories
     Remove {
         /// Files or directories to remove
@@ -320,7 +324,8 @@ impl Commands {
             Commands::Init { .. }
             | Commands::Update
             | Commands::Completions { .. }
-            | Commands::CompleteRemote { .. } => false,
+            | Commands::CompleteRemote { .. }
+            | Commands::Serve => false,
         }
     }
 

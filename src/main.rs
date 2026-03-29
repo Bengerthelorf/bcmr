@@ -480,7 +480,10 @@ complete -c bcmr -n '__fish_seen_subcommand_from copy move; and string match -q 
 fn background_update_check(command: &Commands) -> Option<mpsc::Receiver<Option<String>>> {
     if matches!(
         command,
-        Commands::Update | Commands::Completions { .. } | Commands::CompleteRemote { .. }
+        Commands::Update
+            | Commands::Completions { .. }
+            | Commands::CompleteRemote { .. }
+            | Commands::Serve
     ) {
         return None;
     }
@@ -507,6 +510,9 @@ async fn main() -> Result<()> {
         Commands::Remove { .. } => handle_remove_command(&cli.command).await?,
         Commands::Init { .. } => handle_init_command(&cli.command)?,
         Commands::Update => commands::update::run()?,
+        Commands::Serve => {
+            commands::serve::run().await?;
+        }
         Commands::CompleteRemote { partial } => {
             for entry in crate::core::remote::complete_remote_path(partial).await {
                 println!("{}", entry);
