@@ -2,8 +2,9 @@
 
 .DS_Store
 
-# Test files and logs
-tests/
+# Test shell scripts and logs (keep Rust integration tests)
+tests/*.sh
+tests/*.log
 *.log
 
 # Docs

@@ -8,9 +8,6 @@ use super::io as durable_io;
 const SESSION_MAGIC: &[u8; 4] = b"BCMR";
 const SESSION_VERSION: u8 = 1;
 const BLOCK_SIZE: u64 = 4 * 1024 * 1024; // 4MB, matches copy buffer
-                                         // Session resume integration is phased: write support is implemented,
-                                         // read/load will be wired into the resume decision path in a follow-up.
-#[allow(dead_code)]
 const SESSION_MAX_AGE_SECS: u64 = 7 * 24 * 3600; // 7 days
 
 /// Persistent session state for crash-safe resume.
@@ -70,7 +67,6 @@ impl Session {
     }
 
     /// Load an existing session, if valid.
-    #[allow(dead_code)]
     pub fn load(src: &Path, dst: &Path) -> Option<Self> {
         let path = Self::session_path(src, dst);
         let data = fs::read(&path).ok()?;
@@ -92,7 +88,6 @@ impl Session {
     }
 
     /// Validate that the source file hasn't changed since this session was created.
-    #[allow(dead_code)]
     pub fn source_matches(&self, src_size: u64, src_mtime: u64, src_inode: u64) -> bool {
         self.src_size == src_size && self.src_mtime == src_mtime && self.src_inode == src_inode
     }
@@ -123,20 +118,80 @@ impl Session {
         let _ = fs::remove_file(path);
     }
 
-    /// Get the hash of the last completed block (for tail-block verification).
-    #[allow(dead_code)]
+    /// Get the hash of the last completed block.
+    #[cfg(test)]
     pub fn last_block_hash(&self) -> Option<&[u8; 32]> {
         self.block_hashes.last()
     }
 
     /// Get the byte offset where the last completed block starts.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn last_block_offset(&self) -> u64 {
         if self.block_hashes.is_empty() {
             0
         } else {
             (self.block_hashes.len() as u64 - 1) * BLOCK_SIZE
         }
+    }
+
+    /// Find the safe resume offset by verifying the tail block of the destination.
+    ///
+    /// Walks backward from the last recorded block, checking each block's hash
+    /// against the destination file. Returns the byte offset from which copying
+    /// can safely resume, or 0 if no blocks are verified.
+    ///
+    /// Complexity: O(1) in the common case (only tail block needs checking),
+    /// O(k) in the worst case where k is the number of corrupt trailing blocks.
+    pub fn find_resume_offset(&self, dst: &Path) -> u64 {
+        use std::io::Read;
+
+        let mut file = match fs::File::open(dst) {
+            Ok(f) => f,
+            Err(_) => return 0,
+        };
+
+        let dst_len = match file.metadata() {
+            Ok(m) => m.len(),
+            Err(_) => return 0,
+        };
+
+        // Walk backward from the last block to find the last verified one
+        let mut buf = vec![0u8; BLOCK_SIZE as usize];
+        for i in (0..self.block_hashes.len()).rev() {
+            let block_offset = i as u64 * BLOCK_SIZE;
+
+            // Block must be fully within the destination file
+            let block_end = block_offset + BLOCK_SIZE;
+            if block_end > dst_len {
+                continue;
+            }
+
+            // Read and hash this block
+            use std::io::Seek;
+            if file.seek(std::io::SeekFrom::Start(block_offset)).is_err() {
+                continue;
+            }
+            let mut read = 0;
+            while read < BLOCK_SIZE as usize {
+                match file.read(&mut buf[read..BLOCK_SIZE as usize]) {
+                    Ok(0) => break,
+                    Ok(n) => read += n,
+                    Err(_) => return 0,
+                }
+            }
+            if read != BLOCK_SIZE as usize {
+                continue;
+            }
+
+            let hash = blake3::hash(&buf[..read]);
+            if hash.as_bytes() == &self.block_hashes[i] {
+                // This block is verified — resume after it
+                return block_end;
+            }
+            // Block doesn't match — continue walking backward
+        }
+
+        0
     }
 
     /// Binary format serialization.
@@ -190,7 +245,6 @@ impl Session {
     }
 
     /// Binary format deserialization.
-    #[allow(dead_code)]
     fn deserialize(data: &[u8]) -> Option<Self> {
         let mut r = Reader::new(data);
 
@@ -276,7 +330,6 @@ fn now_secs() -> u64 {
 }
 
 /// Minimal binary reader for deserialization.
-#[allow(dead_code)]
 struct Reader<'a> {
     data: &'a [u8],
     pos: usize,

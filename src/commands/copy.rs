@@ -918,6 +918,33 @@ where
     let mut file_flags = fs::OpenOptions::new();
     file_flags.write(true);
 
+    // Try to load an existing session for session-based resume.
+    // This provides O(1) tail-block verification instead of O(n) full rehash.
+    let loaded_session = if (resume || append || strict) && dst.exists() {
+        use crate::core::session::Session;
+        if let Some(session) = Session::load(src, dst) {
+            let src_meta = src.metadata()?;
+            let src_mtime = src_meta
+                .modified()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let src_inode = durable_io::get_inode(src).unwrap_or(0);
+
+            if session.source_matches(file_size, src_mtime, src_inode) {
+                Some(session)
+            } else {
+                // Source changed since session was created — discard session
+                Session::remove(src, dst);
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     if (resume || append || strict) && dst.exists() {
         let dst_len = dst.metadata()?.len();
 
@@ -961,9 +988,16 @@ where
             } else {
                 dst_len < file_size
             }
+        } else if let Some(ref session) = loaded_session {
+            // Session-based resume: use tail-block verification O(1).
+            if dst_len == file_size {
+                (callback.callback)(file_size);
+                return Ok(());
+            } else {
+                dst_len < file_size && !session.block_hashes.is_empty()
+            }
         } else {
-            // Resume mode: check mtime. Inode-based detection of source
-            // replacement is handled via session files when available.
+            // Fallback resume: check mtime + size (no session available).
             let src_mtime = src.metadata()?.modified()?;
             let dst_mtime = dst.metadata()?.modified()?;
 
@@ -978,9 +1012,26 @@ where
         };
 
         if should_resume {
-            start_offset = dst_len;
-            file_flags.append(true);
-            (callback.callback)(start_offset);
+            // Use session tail-block verification if available,
+            // otherwise fall back to appending from dst size.
+            if let Some(ref session) = loaded_session {
+                let verified_offset = session.find_resume_offset(dst);
+                if verified_offset > 0 {
+                    start_offset = verified_offset;
+                } else {
+                    // No blocks verified — start over
+                    start_offset = 0;
+                }
+            } else {
+                start_offset = dst_len;
+            }
+
+            if start_offset > 0 {
+                file_flags.write(true).create(true);
+                (callback.callback)(start_offset);
+            } else {
+                file_flags.create(true).truncate(true);
+            }
         } else {
             start_offset = 0;
             file_flags.create(true).truncate(true);
@@ -994,6 +1045,7 @@ where
 
     if start_offset > 0 {
         src_file.seek(SeekFrom::Start(start_offset)).await?;
+        dst_file.seek(SeekFrom::Start(start_offset)).await?;
     }
 
     #[cfg(target_os = "linux")]

@@ -57,9 +57,7 @@ pub async fn fsync_dir_async(dir: &Path) {
 
 /// Get the inode number of a file (Unix only).
 /// Returns 0 on non-Unix platforms.
-/// Used by session creation for source identity tracking.
 #[cfg(unix)]
-#[allow(dead_code)]
 pub fn get_inode(path: &Path) -> io::Result<u64> {
     use std::os::unix::fs::MetadataExt;
     Ok(path.metadata()?.ino())
