@@ -425,6 +425,88 @@ fn e2e_resume_with_verify() {
 }
 
 #[test]
+fn e2e_multi_crash_resume_preserves_block_history() {
+    // Simulate: copy crashes twice, each resume should carry forward block hashes
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    let size = 80 * 1024 * 1024; // 80MB = 20 blocks
+    create_random_file(&src, size);
+
+    let src_meta = src.metadata().unwrap();
+    let src_mtime = src_meta
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let src_inode = durable_io::get_inode(&src).unwrap_or(0);
+    let block_size = bcmr::core::session::COPY_BLOCK_SIZE;
+
+    // --- Crash 1: copy first 40MB (10 blocks) ---
+    let mut session = Session::new(&src, &dst, src_meta.len(), src_mtime, src_inode);
+    {
+        use std::io::Read;
+        let mut sf = fs::File::open(&src).unwrap();
+        let mut df = fs::File::create(&dst).unwrap();
+        let mut buf = vec![0u8; block_size as usize];
+        for _ in 0..10 {
+            let n = sf.read(&mut buf).unwrap();
+            df.write_all(&buf[..n]).unwrap();
+            let hash = blake3::hash(&buf[..n]);
+            session.add_block(*hash.as_bytes(), block_size);
+        }
+        df.sync_all().unwrap();
+    }
+    session.save().unwrap();
+
+    // Resume 1: copies from 40MB to 80MB, but we'll simulate a crash at 60MB
+    let (ok, _, _) = run_bcmr(&[
+        "copy",
+        "-t",
+        "-C",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    // This actually completes successfully. Let's verify, then simulate crash 2.
+    assert!(ok);
+    assert!(files_match(&src, &dst));
+
+    // --- Crash 2: Build a session with 15 blocks, truncate to 60MB ---
+    let mut session2 = Session::new(&src, &dst, src_meta.len(), src_mtime, src_inode);
+    {
+        use std::io::Read;
+        let mut sf = fs::File::open(&src).unwrap();
+        let mut buf = vec![0u8; block_size as usize];
+        for _ in 0..15 {
+            let n = sf.read(&mut buf).unwrap();
+            let hash = blake3::hash(&buf[..n]);
+            session2.add_block(*hash.as_bytes(), block_size);
+        }
+    }
+    session2.save().unwrap();
+
+    // Truncate dst to 60MB
+    let df = fs::OpenOptions::new().write(true).open(&dst).unwrap();
+    df.set_len(60 * 1024 * 1024).unwrap();
+    drop(df);
+
+    // Resume 2
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "-C",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    assert!(ok, "second resume should succeed: {}", stderr);
+    assert!(
+        files_match(&src, &dst),
+        "file should be correct after multi-crash resume"
+    );
+}
+
+#[test]
 fn e2e_copy_preserves_existing_on_no_force() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.bin");

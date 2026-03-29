@@ -1064,6 +1064,8 @@ where
 
     // Session for crash-safe resume with streaming hash checkpoints.
     // Created for resume/append/strict modes or any file > 64MB.
+    // When resuming with a loaded session, carry forward verified block hashes
+    // so multi-crash scenarios maintain full block history.
     let mut session: Option<crate::core::session::Session> =
         if resume || append || strict || file_size > 64 * 1024 * 1024 {
             let src_meta = src.metadata()?;
@@ -1073,9 +1075,18 @@ where
                 .unwrap_or_default()
                 .as_secs();
             let src_inode = durable_io::get_inode(src).unwrap_or(0);
-            Some(crate::core::session::Session::new(
-                src, dst, file_size, src_mtime, src_inode,
-            ))
+            let mut s =
+                crate::core::session::Session::new(src, dst, file_size, src_mtime, src_inode);
+            // Carry forward block hashes from loaded session up to resume point
+            if start_offset > 0 {
+                if let Some(ref loaded) = loaded_session {
+                    let keep = (start_offset / crate::core::session::COPY_BLOCK_SIZE) as usize;
+                    let keep = keep.min(loaded.block_hashes.len());
+                    s.block_hashes = loaded.block_hashes[..keep].to_vec();
+                    s.bytes_written = keep as u64 * crate::core::session::COPY_BLOCK_SIZE;
+                }
+            }
+            Some(s)
         } else {
             None
         };
