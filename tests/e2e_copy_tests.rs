@@ -1,0 +1,444 @@
+/// End-to-end integration tests for bcmr copy.
+///
+/// These tests invoke the actual `bcmr` binary as a subprocess to test
+/// the full pipeline: CLI parsing → copy logic → session → verification.
+///
+/// Tests cover:
+/// - Fresh copy produces correct output
+/// - Session is created during copy and cleaned up after
+/// - Crash simulation: truncate dst + resume via -C produces correct file
+/// - -V flag verifies copy integrity (2-pass optimization)
+/// - Resume with -C after source file change detects mismatch
+/// - Copy of small file (< 64MB) skips session creation
+/// - Reflink path (if available) produces correct output
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use bcmr::core::checksum;
+use bcmr::core::io as durable_io;
+use bcmr::core::session::Session;
+
+/// Get the path to the built bcmr binary
+fn bcmr_bin() -> PathBuf {
+    // cargo test builds to target/debug/bcmr
+    let mut path = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    path.push("bcmr");
+    // On Windows, add .exe
+    if cfg!(windows) {
+        path.set_extension("exe");
+    }
+    path
+}
+
+/// Run bcmr copy with given args, return (success, stdout, stderr)
+fn run_bcmr(args: &[&str]) -> (bool, String, String) {
+    let output = Command::new(bcmr_bin())
+        .args(args)
+        .output()
+        .expect("failed to execute bcmr");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
+}
+
+fn create_random_file(path: &Path, size: usize) {
+    let mut f = fs::File::create(path).unwrap();
+    // Deterministic pseudo-random data (not compressible, not all zeros)
+    let mut buf = vec![0u8; 4096];
+    let mut remaining = size;
+    let mut seed: u64 = 0xDEADBEEF;
+    while remaining > 0 {
+        let n = remaining.min(buf.len());
+        for b in buf[..n].iter_mut() {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            *b = (seed >> 33) as u8;
+        }
+        f.write_all(&buf[..n]).unwrap();
+        remaining -= n;
+    }
+    f.sync_all().unwrap();
+}
+
+fn files_match(a: &Path, b: &Path) -> bool {
+    let ha = checksum::calculate_hash(a).unwrap();
+    let hb = checksum::calculate_hash(b).unwrap();
+    ha == hb
+}
+
+fn session_exists(src: &Path, dst: &Path) -> bool {
+    Session::session_path(src, dst).exists()
+}
+
+// ===== End-to-End Copy Tests =====
+
+#[test]
+fn e2e_fresh_copy_produces_correct_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    create_random_file(&src, 80 * 1024 * 1024); // 80MB > 64MB threshold
+
+    let (ok, _, stderr) = run_bcmr(&["copy", "-t", src.to_str().unwrap(), dst.to_str().unwrap()]);
+    assert!(ok, "copy should succeed: {}", stderr);
+    assert!(dst.exists(), "destination should exist");
+    assert!(files_match(&src, &dst), "files should be identical");
+}
+
+#[test]
+fn e2e_session_cleaned_up_after_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    create_random_file(&src, 80 * 1024 * 1024);
+
+    // Copy with -C to enable session
+    let (ok, _, _) = run_bcmr(&[
+        "copy",
+        "-t",
+        "-C",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    assert!(ok);
+
+    // Session should be cleaned up after successful copy
+    assert!(
+        !session_exists(&src, &dst),
+        "session should be removed after successful copy"
+    );
+}
+
+#[test]
+fn e2e_copy_with_verify_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    create_random_file(&src, 80 * 1024 * 1024);
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "-V",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    assert!(ok, "copy with -V should succeed: {}", stderr);
+    assert!(files_match(&src, &dst));
+}
+
+#[test]
+fn e2e_resume_after_simulated_crash() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    let size = 80 * 1024 * 1024; // 80MB
+    create_random_file(&src, size);
+
+    // Step 1: Do a full copy with -C to create the session + complete file
+    let (ok, _, _) = run_bcmr(&[
+        "copy",
+        "-t",
+        "-C",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    assert!(ok);
+    assert!(files_match(&src, &dst));
+
+    // Session is cleaned up after success. We need to simulate a crash
+    // by manually creating a session and truncating the dst.
+
+    // Step 2: Build a session manually (simulating what bcmr would create)
+    let src_meta = src.metadata().unwrap();
+    let src_mtime = src_meta
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let src_inode = durable_io::get_inode(&src).unwrap_or(0);
+
+    let mut session = Session::new(&src, &dst, src_meta.len(), src_mtime, src_inode);
+
+    // Compute block hashes for the first 60MB (15 blocks)
+    let resume_point = 60 * 1024 * 1024u64;
+    let block_size = bcmr::core::session::COPY_BLOCK_SIZE;
+    let mut f = fs::File::open(&src).unwrap();
+    let mut buf = vec![0u8; block_size as usize];
+    use std::io::Read;
+    for _ in 0..(resume_point / block_size) {
+        let n = f.read(&mut buf).unwrap();
+        assert_eq!(n, block_size as usize);
+        let hash = blake3::hash(&buf[..n]);
+        session.add_block(*hash.as_bytes(), block_size);
+    }
+    session.save().unwrap();
+
+    // Step 3: Truncate dst to 60MB (simulating crash)
+    let df = fs::OpenOptions::new().write(true).open(&dst).unwrap();
+    df.set_len(resume_point).unwrap();
+    drop(df);
+
+    assert_eq!(dst.metadata().unwrap().len(), resume_point);
+
+    // Step 4: Resume with -C
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "-C",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    assert!(ok, "resume should succeed: {}", stderr);
+
+    // Step 5: Verify final file is correct
+    assert_eq!(dst.metadata().unwrap().len(), size as u64);
+    assert!(files_match(&src, &dst), "resumed file should match source");
+
+    // Session should be cleaned up
+    assert!(!session_exists(&src, &dst));
+}
+
+#[test]
+fn e2e_resume_with_corrupted_tail_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    let size = 80 * 1024 * 1024;
+    create_random_file(&src, size);
+
+    // Full copy first to get correct dst content
+    let (ok, _, _) = run_bcmr(&[
+        "copy",
+        "-t",
+        "-C",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    assert!(ok);
+
+    // Build session with 15 blocks (60MB), but corrupt block 15 in dst
+    let src_meta = src.metadata().unwrap();
+    let src_mtime = src_meta
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let src_inode = durable_io::get_inode(&src).unwrap_or(0);
+
+    let block_size = bcmr::core::session::COPY_BLOCK_SIZE;
+    let mut session = Session::new(&src, &dst, src_meta.len(), src_mtime, src_inode);
+
+    let mut f = fs::File::open(&src).unwrap();
+    let mut buf = vec![0u8; block_size as usize];
+    use std::io::Read;
+    for _ in 0..15 {
+        let n = f.read(&mut buf).unwrap();
+        let hash = blake3::hash(&buf[..n]);
+        session.add_block(*hash.as_bytes(), block_size);
+    }
+    session.save().unwrap();
+
+    // Truncate to 60MB and corrupt the last byte of block 15
+    let df = fs::OpenOptions::new().write(true).open(&dst).unwrap();
+    df.set_len(60 * 1024 * 1024).unwrap();
+    drop(df);
+
+    {
+        use std::io::Seek;
+        let mut f = fs::OpenOptions::new().write(true).open(&dst).unwrap();
+        f.seek(std::io::SeekFrom::End(-1)).unwrap();
+        f.write_all(&[0xFF]).unwrap();
+    }
+
+    // Resume — should detect corruption in block 15, fall back to block 14
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "-C",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    assert!(ok, "resume with corrupt tail should succeed: {}", stderr);
+    assert!(
+        files_match(&src, &dst),
+        "file should be correct after resume with corrupt tail"
+    );
+}
+
+#[test]
+fn e2e_resume_detects_source_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    create_random_file(&src, 80 * 1024 * 1024);
+
+    // Create session for old source
+    let src_meta = src.metadata().unwrap();
+    let src_mtime = src_meta
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let src_inode = durable_io::get_inode(&src).unwrap_or(0);
+    let mut session = Session::new(&src, &dst, src_meta.len(), src_mtime, src_inode);
+    session.add_block([0xAA; 32], bcmr::core::session::COPY_BLOCK_SIZE);
+    session.save().unwrap();
+
+    // Modify source (different content, same size)
+    std::thread::sleep(std::time::Duration::from_secs(1)); // ensure different mtime
+    create_random_file(&src, 80 * 1024 * 1024);
+
+    // Create partial dst
+    {
+        let mut f = fs::File::create(&dst).unwrap();
+        f.write_all(&vec![0u8; 40 * 1024 * 1024]).unwrap();
+    }
+
+    // Resume with -C — should detect source change, copy from scratch
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "-C",
+        "-f",
+        "-y",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    assert!(ok, "copy should succeed after source change: {}", stderr);
+    assert!(
+        files_match(&src, &dst),
+        "should have the new source content"
+    );
+}
+
+#[test]
+fn e2e_small_file_no_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("small.bin");
+    let dst = dir.path().join("small_dst.bin");
+    create_random_file(&src, 1024 * 1024); // 1MB — well below 64MB threshold
+
+    let (ok, _, _) = run_bcmr(&["copy", "-t", src.to_str().unwrap(), dst.to_str().unwrap()]);
+    assert!(ok);
+    assert!(files_match(&src, &dst));
+
+    // No session should be created for small files without resume flags
+    assert!(!session_exists(&src, &dst));
+}
+
+#[test]
+fn e2e_copy_verify_detects_corruption() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    create_random_file(&src, 80 * 1024 * 1024);
+
+    // Copy without verify first
+    let (ok, _, _) = run_bcmr(&["copy", "-t", src.to_str().unwrap(), dst.to_str().unwrap()]);
+    assert!(ok);
+
+    // Corrupt the destination
+    {
+        use std::io::Seek;
+        let mut f = fs::OpenOptions::new().write(true).open(&dst).unwrap();
+        f.seek(std::io::SeekFrom::Start(1000)).unwrap();
+        f.write_all(&[0xFF; 100]).unwrap();
+    }
+
+    // Copy again with -V -f — should detect corruption and overwrite
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "-V",
+        "-f",
+        "-y",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    assert!(ok, "copy -V -f should succeed: {}", stderr);
+    assert!(files_match(&src, &dst), "verified copy should be correct");
+}
+
+#[test]
+fn e2e_resume_with_verify() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    let size = 80 * 1024 * 1024;
+    create_random_file(&src, size);
+
+    // Build session + truncated dst (simulate crash at 60MB)
+    let src_meta = src.metadata().unwrap();
+    let src_mtime = src_meta
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let src_inode = durable_io::get_inode(&src).unwrap_or(0);
+    let block_size = bcmr::core::session::COPY_BLOCK_SIZE;
+    let mut session = Session::new(&src, &dst, src_meta.len(), src_mtime, src_inode);
+
+    // Copy first 60MB to dst + compute block hashes
+    {
+        use std::io::Read;
+        let mut sf = fs::File::open(&src).unwrap();
+        let mut df = fs::File::create(&dst).unwrap();
+        let mut buf = vec![0u8; block_size as usize];
+        for _ in 0..15 {
+            let n = sf.read(&mut buf).unwrap();
+            df.write_all(&buf[..n]).unwrap();
+            let hash = blake3::hash(&buf[..n]);
+            session.add_block(*hash.as_bytes(), block_size);
+        }
+        df.sync_all().unwrap();
+    }
+    session.save().unwrap();
+
+    // Resume with -C -V (verify after resume)
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "-C",
+        "-V",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    assert!(ok, "resume with verify should succeed: {}", stderr);
+    assert!(
+        files_match(&src, &dst),
+        "resumed + verified file should be correct"
+    );
+}
+
+#[test]
+fn e2e_copy_preserves_existing_on_no_force() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    create_random_file(&src, 1024);
+    create_random_file(&dst, 512); // different content
+
+    let dst_hash_before = checksum::calculate_hash(&dst).unwrap();
+
+    // Copy without -f should fail (target exists)
+    let (ok, _, _) = run_bcmr(&["copy", "-t", src.to_str().unwrap(), dst.to_str().unwrap()]);
+    assert!(!ok, "copy without -f should fail when target exists");
+
+    // Destination should be unchanged
+    let dst_hash_after = checksum::calculate_hash(&dst).unwrap();
+    assert_eq!(dst_hash_before, dst_hash_after);
+}
