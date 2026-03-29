@@ -8,8 +8,8 @@ use super::io as durable_io;
 const SESSION_MAGIC: &[u8; 4] = b"BCMR";
 const SESSION_VERSION: u8 = 1;
 const BLOCK_SIZE: u64 = 4 * 1024 * 1024; // 4MB, matches copy buffer
-// Session resume integration is phased: write support is implemented,
-// read/load will be wired into the resume decision path in a follow-up.
+                                         // Session resume integration is phased: write support is implemented,
+                                         // read/load will be wired into the resume decision path in a follow-up.
 #[allow(dead_code)]
 const SESSION_MAX_AGE_SECS: u64 = 7 * 24 * 3600; // 7 days
 
@@ -362,13 +362,7 @@ mod tests {
 
     #[test]
     fn test_session_source_matches() {
-        let session = Session::new(
-            Path::new("/a"),
-            Path::new("/b"),
-            1000,
-            2000,
-            3000,
-        );
+        let session = Session::new(Path::new("/a"), Path::new("/b"), 1000, 2000, 3000);
         assert!(session.source_matches(1000, 2000, 3000));
         assert!(!session.source_matches(999, 2000, 3000));
         assert!(!session.source_matches(1000, 2001, 3000));

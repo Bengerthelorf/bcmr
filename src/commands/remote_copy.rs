@@ -632,8 +632,17 @@ async fn handle_remote_download(
                 } else {
                     dest_local.to_path_buf()
                 };
-                remote::download_file(rsrc, &local_path, &inc, &skip, &file_cb, info.size, &opts, None)
-                    .await?;
+                remote::download_file(
+                    rsrc,
+                    &local_path,
+                    &inc,
+                    &skip,
+                    &file_cb,
+                    info.size,
+                    &opts,
+                    None,
+                )
+                .await?;
             }
         }
     }

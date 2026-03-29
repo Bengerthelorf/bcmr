@@ -31,12 +31,9 @@ pub fn durable_sync(file: &std::fs::File) -> io::Result<()> {
 /// Extracts the std::fs::File via `try_into_std()`, performs the sync on a
 /// blocking thread, then converts back.
 pub async fn durable_sync_async(file: &tokio::fs::File) -> io::Result<()> {
-    let std_file = file
-        .try_clone()
-        .await?
-        .into_std()
-        .await;
-    tokio::task::spawn_blocking(move || durable_sync(&std_file)).await
+    let std_file = file.try_clone().await?.into_std().await;
+    tokio::task::spawn_blocking(move || durable_sync(&std_file))
+        .await
         .map_err(io::Error::other)?
 }
 

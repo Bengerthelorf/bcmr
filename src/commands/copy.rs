@@ -1012,22 +1012,21 @@ where
 
     // Session for crash-safe resume with streaming hash checkpoints.
     // Created for resume/append/strict modes or any file > 64MB.
-    let mut session: Option<crate::core::session::Session> = if resume || append || strict
-        || file_size > 64 * 1024 * 1024
-    {
-        let src_meta = src.metadata()?;
-        let src_mtime = src_meta
-            .modified()?
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let src_inode = durable_io::get_inode(src).unwrap_or(0);
-        Some(crate::core::session::Session::new(
-            src, dst, file_size, src_mtime, src_inode,
-        ))
-    } else {
-        None
-    };
+    let mut session: Option<crate::core::session::Session> =
+        if resume || append || strict || file_size > 64 * 1024 * 1024 {
+            let src_meta = src.metadata()?;
+            let src_mtime = src_meta
+                .modified()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let src_inode = durable_io::get_inode(src).unwrap_or(0);
+            Some(crate::core::session::Session::new(
+                src, dst, file_size, src_mtime, src_inode,
+            ))
+        } else {
+            None
+        };
 
     // Will hold the inline source hash computed during the copy.
     let mut inline_src_hash: Option<blake3::Hash> = None;
@@ -1135,9 +1134,7 @@ where
                     blocks_since_checkpoint += 1;
 
                     // Checkpoint: fdatasync + save session at interval
-                    if blocks_since_checkpoint
-                        >= crate::core::session::CHECKPOINT_INTERVAL_BLOCKS
-                    {
+                    if blocks_since_checkpoint >= crate::core::session::CHECKPOINT_INTERVAL_BLOCKS {
                         durable_io::durable_sync_async(&dst_file).await?;
                         if let Some(ref s) = session {
                             let _ = s.save();
