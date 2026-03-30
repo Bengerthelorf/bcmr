@@ -51,8 +51,33 @@ impl ServeClient {
     }
 
     pub async fn connect_local() -> Result<Self, BcmrError> {
+        // Find the bcmr binary in the same directory as the test binary.
+        // current_exe() returns the test binary itself, not bcmr.
         let exe = std::env::current_exe()?;
-        let mut child = Command::new(exe)
+        let bin_dir = exe
+            .parent()
+            .ok_or_else(|| BcmrError::InvalidInput("cannot find binary directory".into()))?;
+        let bcmr_bin = bin_dir.join("bcmr");
+        if !bcmr_bin.exists() {
+            // In cargo test, the binary is one directory up from deps/
+            let alt = bin_dir.parent().map(|p| p.join("bcmr"));
+            if let Some(ref alt_path) = alt {
+                if !alt_path.exists() {
+                    return Err(BcmrError::InvalidInput(format!(
+                        "bcmr binary not found at {} or {}",
+                        bcmr_bin.display(),
+                        alt_path.display()
+                    )));
+                }
+            }
+        }
+        let bcmr_path = if bcmr_bin.exists() {
+            bcmr_bin
+        } else {
+            bin_dir.parent().unwrap().join("bcmr")
+        };
+
+        let mut child = Command::new(&bcmr_path)
             .arg("serve")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -244,9 +269,16 @@ impl ServeClient {
         }
     }
 
-    pub async fn close(mut self) -> Result<(), BcmrError> {
-        drop(self.stdin);
-        self.child.wait().await?;
+    pub async fn close(self) -> Result<(), BcmrError> {
+        // Use ManuallyDrop to prevent the Drop impl from killing the child
+        // after we've already cleanly shut it down.
+        let mut this = std::mem::ManuallyDrop::new(self);
+        // Close stdin to signal EOF → server exits cleanly
+        // Safety: we won't use this.stdin again
+        unsafe {
+            std::ptr::drop_in_place(&mut this.stdin);
+        }
+        this.child.wait().await?;
         Ok(())
     }
 
@@ -259,6 +291,13 @@ impl ServeClient {
         protocol::read_message(&mut self.stdout)
             .await?
             .ok_or_else(|| BcmrError::InvalidInput("server closed connection unexpectedly".into()))
+    }
+}
+
+/// Kill child process on drop to prevent orphaned bcmr serve processes.
+impl Drop for ServeClient {
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
     }
 }
 
