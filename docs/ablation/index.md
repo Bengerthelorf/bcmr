@@ -127,6 +127,18 @@ The [mscp project](https://github.com/upa/mscp) measured 5.98x speedup with 8 in
 
 Large copies pollute the page cache, evicting unrelated cached data. On Linux, bcmr calls `posix_fadvise(FADV_DONTNEED)` at each checkpoint interval to evict already-copied pages from both source and destination file descriptors.
 
+### Serve Protocol (Remote Transfers)
+
+For remote transfers, bcmr implements a binary frame protocol (`bcmr serve`) that replaces per-file SSH process spawning with a persistent connection over stdin/stdout. The protocol uses length-prefixed frames (`[4B length][1B type][payload]`) and supports: `Stat`, `List`, `Hash`, `Get`, `Put`, `Mkdir`, `Resume`.
+
+Key properties:
+- **Single connection**: all operations multiplexed over one SSH session, eliminating $\mathcal{O}(n)$ process spawns for $n$ files
+- **Server-side hashing**: the remote bcmr computes BLAKE3 hashes locally, avoiding data round-trips for verification
+- **Automatic fallback**: if the remote does not have bcmr installed, transfers silently fall back to legacy SCP
+- **Frame size limit**: `read_message` rejects frames $> 16\,\text{MiB}$ to prevent memory exhaustion from malicious peers
+
+See the [Remote Copy guide](/guide/remote-copy#serve-protocol-accelerated-transfers) for usage details.
+
 ---
 
 ## Ablation Experiments
@@ -260,3 +272,4 @@ Key differentiators:
 | `F_FULLFSYNC` | ~0% | Correct macOS durability |
 | `copy_file_range` offset | 0% (saves I/O) | 8--24% faster resume |
 | Per-worker SSH | 0% (additive) | Up to ~6x parallel throughput |
+| Serve protocol | 0% (replaces SSH spawns) | Eliminates per-file process overhead |
