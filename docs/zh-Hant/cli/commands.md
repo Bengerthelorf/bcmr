@@ -222,3 +222,25 @@ bcmr update
 下載當前平台的最新版本並原地替換二進位檔案。
 
 BCMR 也會在每次命令執行時在背景檢查更新（可透過 [設定](/zh-Hant/guide/configuration) 中的 `update_check` 控制）。
+
+---
+
+## deploy
+
+將 bcmr 部署到遠端主機以支援 [serve 協定](/zh-Hant/guide/remote-copy#serve-協定-加速傳輸)。
+
+```
+bcmr deploy <TARGET> [--path <PATH>]
+```
+
+| 選項 | 預設值 | 說明 |
+|------|--------|------|
+| `<TARGET>` | 必要 | 遠端目標（`user@host`） |
+| `--path` | `~/.local/bin/bcmr` | 遠端安裝路徑 |
+
+自動偵測遠端 OS 與架構。相同平台直接傳輸本機二進位檔，跨平台從 GitHub Releases 下載。
+
+```bash
+bcmr deploy user@server
+bcmr deploy root@10.0.0.1 --path /usr/local/bin/bcmr
+```

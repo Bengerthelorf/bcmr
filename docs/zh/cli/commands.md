@@ -222,3 +222,25 @@ bcmr update
 下载当前平台的最新版本并原地替换二进制文件。
 
 BCMR 也会在每次命令运行时在后台检查更新（可通过 [配置](/zh/guide/configuration) 中的 `update_check` 控制）。
+
+---
+
+## deploy
+
+将 bcmr 部署到远程主机以支持 [serve 协议](/zh/guide/remote-copy#serve-协议-加速传输)。
+
+```
+bcmr deploy <TARGET> [--path <PATH>]
+```
+
+| 选项 | 默认值 | 说明 |
+|------|--------|------|
+| `<TARGET>` | 必需 | 远程目标（`user@host`） |
+| `--path` | `~/.local/bin/bcmr` | 远程安装路径 |
+
+自动检测远端 OS 和架构。相同平台直接传输本地二进制文件，跨平台从 GitHub Releases 下载。
+
+```bash
+bcmr deploy user@server
+bcmr deploy root@10.0.0.1 --path /usr/local/bin/bcmr
+```

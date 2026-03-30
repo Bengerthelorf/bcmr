@@ -229,3 +229,25 @@ bcmr update
 Downloads the latest release for your platform and replaces the current binary in place.
 
 BCMR also checks for updates in the background on every command run (configurable via `update_check` in [Configuration](/guide/configuration)).
+
+---
+
+## deploy
+
+Deploy bcmr to a remote host for [serve protocol](/guide/remote-copy#serve-protocol-accelerated-transfers) support.
+
+```
+bcmr deploy <TARGET> [--path <PATH>]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `<TARGET>` | required | Remote target (`user@host`) |
+| `--path` | `~/.local/bin/bcmr` | Installation path on remote |
+
+Detects remote OS and architecture automatically. Same platform: transfers local binary. Cross-platform: downloads from GitHub Releases.
+
+```bash
+bcmr deploy user@server
+bcmr deploy root@10.0.0.1 --path /usr/local/bin/bcmr
+```
