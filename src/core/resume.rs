@@ -4,6 +4,12 @@ use crate::core::io as durable_io;
 use crate::core::session::Session;
 use std::path::Path;
 
+enum Decision {
+    Resume,
+    AlreadyComplete,
+    Overwrite,
+}
+
 pub struct ResumeState {
     pub start_offset: u64,
     pub already_complete: bool,
@@ -32,7 +38,6 @@ pub async fn resolve(
     let dst_len = dst.metadata()?.len();
     let loaded_session = load_and_validate_session(src, dst, file_size)?;
 
-    // Some(true)=resume, Some(false)=already complete, None=overwrite
     let decision = if strict {
         resolve_strict(src, dst, file_size, dst_len).await?
     } else if append {
@@ -44,7 +49,7 @@ pub async fn resolve(
     };
 
     match decision {
-        Some(false) => {
+        Decision::AlreadyComplete => {
             callback(file_size);
             return Ok(ResumeState {
                 start_offset: 0,
@@ -52,14 +57,14 @@ pub async fn resolve(
                 loaded_session,
             });
         }
-        None => {
+        Decision::Overwrite => {
             return Ok(ResumeState {
                 start_offset: 0,
                 already_complete: false,
                 loaded_session,
             });
         }
-        Some(true) => {}
+        Decision::Resume => {}
     }
 
     let start_offset = if let Some(ref session) = loaded_session {
@@ -115,7 +120,7 @@ async fn resolve_strict(
     dst: &Path,
     file_size: u64,
     dst_len: u64,
-) -> Result<Option<bool>, BcmrError> {
+) -> Result<Decision, BcmrError> {
     if dst_len == file_size {
         let src_path = src.to_path_buf();
         let dst_path = dst.to_path_buf();
@@ -124,9 +129,9 @@ async fn resolve_strict(
             tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)),
         );
         if src_hash?? == dst_hash?? {
-            return Ok(Some(false));
+            return Ok(Decision::AlreadyComplete);
         }
-        Ok(None)
+        Ok(Decision::Overwrite)
     } else if dst_len < file_size {
         let src_path = src.to_path_buf();
         let dst_path = dst.to_path_buf();
@@ -136,32 +141,32 @@ async fn resolve_strict(
             tokio::task::spawn_blocking(move || checksum::calculate_partial_hash(&src_path, limit)),
         );
         Ok(if dst_hash?? == src_partial?? {
-            Some(true)
+            Decision::Resume
         } else {
-            None
+            Decision::Overwrite
         })
     } else {
-        Ok(None)
+        Ok(Decision::Overwrite)
     }
 }
 
-fn resolve_append(file_size: u64, dst_len: u64) -> Option<bool> {
+fn resolve_append(file_size: u64, dst_len: u64) -> Decision {
     if dst_len == file_size {
-        Some(false)
+        Decision::AlreadyComplete
     } else if dst_len < file_size {
-        Some(true)
+        Decision::Resume
     } else {
-        None
+        Decision::Overwrite
     }
 }
 
-fn resolve_with_session(file_size: u64, dst_len: u64, session: &Session) -> Option<bool> {
+fn resolve_with_session(file_size: u64, dst_len: u64, session: &Session) -> Decision {
     if dst_len == file_size {
-        Some(false)
+        Decision::AlreadyComplete
     } else if dst_len < file_size && !session.block_hashes.is_empty() {
-        Some(true)
+        Decision::Resume
     } else {
-        None
+        Decision::Overwrite
     }
 }
 
@@ -170,17 +175,17 @@ fn resolve_mtime(
     dst: &Path,
     file_size: u64,
     dst_len: u64,
-) -> Result<Option<bool>, BcmrError> {
+) -> Result<Decision, BcmrError> {
     let src_mtime = src.metadata()?.modified()?;
     let dst_mtime = dst.metadata()?.modified()?;
 
     if src_mtime != dst_mtime {
-        Ok(None)
+        Ok(Decision::Overwrite)
     } else if dst_len == file_size {
-        Ok(Some(false))
+        Ok(Decision::AlreadyComplete)
     } else if dst_len < file_size {
-        Ok(Some(true))
+        Ok(Decision::Resume)
     } else {
-        Ok(None)
+        Ok(Decision::Overwrite)
     }
 }

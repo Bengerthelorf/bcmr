@@ -22,7 +22,14 @@ fn validate_path(raw: &str) -> Result<PathBuf> {
         return Ok(std::fs::canonicalize(path)?);
     }
 
-    // For new files (put/mkdir), canonicalize the parent
+    // Reject any path containing ".." components — even if parent doesn't exist yet
+    for component in path.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            bail!("path contains '..'");
+        }
+    }
+
+    // For new files (put/mkdir), canonicalize the parent if it exists
     if let Some(parent) = path.parent() {
         if parent.exists() {
             let canonical_parent = std::fs::canonicalize(parent)?;
@@ -32,8 +39,6 @@ fn validate_path(raw: &str) -> Result<PathBuf> {
         }
     }
 
-    // If neither path nor parent exists, use the path as-is
-    // (mkdir -p will create it, and it's within the SSH user's permissions)
     Ok(path.to_path_buf())
 }
 

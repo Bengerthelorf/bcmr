@@ -1,8 +1,6 @@
 use crate::cli::{Commands, SparseMode, TestMode};
 use crate::core::checksum;
 use crate::core::error::BcmrError;
-#[cfg(target_os = "linux")]
-use crate::core::io as durable_io;
 use crate::core::traversal;
 use crate::ui::display::{print_dry_run, ActionType};
 
@@ -68,7 +66,6 @@ async fn try_copy_file_range(
     dst: &Path,
     file_size: u64,
     callback: &impl Fn(u64),
-    sync: bool,
 ) -> Option<Result<(), BcmrError>> {
     use std::os::unix::io::AsRawFd;
 
@@ -137,12 +134,6 @@ async fn try_copy_file_range(
                 remaining -= n;
                 callback(n);
             }
-        }
-    }
-
-    if sync {
-        if let Err(e) = durable_io::durable_sync(&dst_file) {
-            return Some(Err(BcmrError::Io(e)));
         }
     }
 
@@ -876,7 +867,7 @@ where
     #[cfg(target_os = "linux")]
     if use_atomic && matches!(test_mode, TestMode::None) && matches!(sparse_mode, SparseMode::Never)
     {
-        match try_copy_file_range(src, &write_target, file_size, &callback.callback, sync).await {
+        match try_copy_file_range(src, &write_target, file_size, &callback.callback).await {
             Some(Ok(())) => {
                 return super::copy_strategies::finalize(
                     fs::File::open(&write_target).await?,
@@ -885,7 +876,7 @@ where
                     src,
                     use_atomic,
                     &mut guard,
-                    false,
+                    sync,
                     preserve,
                     verify,
                     None,
