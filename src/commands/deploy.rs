@@ -56,32 +56,47 @@ pub async fn run(target: &str, remote_path: &str) -> Result<()> {
             "https://github.com/Bengerthelorf/bcmr/releases/latest/download/{}",
             asset_name
         );
-        // Download on remote directly (avoids transferring through local)
+        // Download and extract tar.gz on remote directly
         let download_cmd = format!(
-            "curl -fsSL '{}' -o {} && chmod +x {}",
+            "curl -fsSL '{}' | tar xz -C {} bcmr && mv {}/bcmr {}",
             url,
-            shell_escape(remote_path),
+            shell_escape(dir),
+            shell_escape(dir),
             shell_escape(remote_path)
         );
         let output = ssh(target, &download_cmd).await;
         if output.is_err() {
-            // Fallback: download locally, then scp
+            // Fallback: download locally, extract, then scp
             eprintln!("  Direct download failed. Downloading locally...");
-            let tmp = std::env::temp_dir().join("bcmr-deploy-tmp");
+            let tmp_dir = std::env::temp_dir().join("bcmr-deploy-tmp");
+            let _ = tokio::fs::create_dir_all(&tmp_dir).await;
+            let tmp_archive = tmp_dir.join(&asset_name);
             let status = Command::new("curl")
                 .args(["-fsSL", &url, "-o"])
-                .arg(&tmp)
+                .arg(&tmp_archive)
                 .status()
                 .await?;
             if !status.success() {
                 bail!(
-                    "Failed to download {} binary from GitHub Releases.\n\
-                     You can install manually: cargo install bcmr",
+                    "Failed to download {} from GitHub Releases.\n\
+                     Install manually: cargo install bcmr",
                     asset_name
                 );
             }
-            scp_to(target, &tmp, remote_path).await?;
-            let _ = tokio::fs::remove_file(&tmp).await;
+            // Extract locally
+            let status = Command::new("tar")
+                .args(["xzf"])
+                .arg(&tmp_archive)
+                .args(["-C"])
+                .arg(&tmp_dir)
+                .status()
+                .await?;
+            if !status.success() {
+                bail!("Failed to extract {}", asset_name);
+            }
+            let extracted = tmp_dir.join("bcmr");
+            scp_to(target, &extracted, remote_path).await?;
+            let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
         }
     }
 
@@ -142,12 +157,13 @@ fn parse_uname(info: &str) -> Result<(&str, &str)> {
 }
 
 fn release_asset_name(os: &str, arch: &str) -> Result<String> {
+    // Must match actual GitHub Release asset names
     let name = match (os, arch) {
-        ("linux", "x86_64") => "bcmr-x86_64-unknown-linux-gnu.tar.gz",
-        ("linux", "aarch64") => "bcmr-aarch64-unknown-linux-gnu.tar.gz",
-        ("macos", "x86_64") => "bcmr-x86_64-apple-darwin.tar.gz",
-        ("macos", "aarch64") => "bcmr-aarch64-apple-darwin.tar.gz",
-        ("freebsd", "x86_64") => "bcmr-x86_64-unknown-freebsd.tar.gz",
+        ("linux", "x86_64") => "bcmr-x86_64-linux.tar.gz",
+        ("linux", "aarch64") => "bcmr-aarch64-linux.tar.gz",
+        ("macos", "x86_64") => "bcmr-x86_64-macos.tar.gz",
+        ("macos", "aarch64") => "bcmr-aarch64-macos.tar.gz",
+        ("freebsd", "x86_64") => "bcmr-x86_64-freebsd.tar.gz",
         _ => bail!("no pre-built binary for {} {}", os, arch),
     };
     Ok(name.to_string())
@@ -206,13 +222,13 @@ mod tests {
     #[test]
     fn test_release_asset_linux_x86() {
         let name = release_asset_name("linux", "x86_64").unwrap();
-        assert!(name.contains("x86_64-unknown-linux"));
+        assert_eq!(name, "bcmr-x86_64-linux.tar.gz");
     }
 
     #[test]
     fn test_release_asset_macos_arm() {
         let name = release_asset_name("macos", "aarch64").unwrap();
-        assert!(name.contains("aarch64-apple-darwin"));
+        assert_eq!(name, "bcmr-aarch64-macos.tar.gz");
     }
 
     #[test]

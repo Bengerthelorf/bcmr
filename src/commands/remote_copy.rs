@@ -878,14 +878,26 @@ async fn handle_serve_download(
         (runner.file_callback())(&fname, item.size);
 
         let dst_file = std::cell::RefCell::new(std::fs::File::create(&item.local_path)?);
+        let write_err: std::cell::Cell<Option<std::io::Error>> = std::cell::Cell::new(None);
         let inc = runner.inc_callback();
         client
             .get(&item.remote_path, 0, |chunk| {
                 use std::io::Write;
-                let _ = dst_file.borrow_mut().write_all(chunk);
+                if write_err.take().is_some() {
+                    return; // already failed
+                }
+                if let Err(e) = dst_file.borrow_mut().write_all(chunk) {
+                    write_err.set(Some(e));
+                    return;
+                }
                 inc(chunk.len() as u64);
             })
             .await?;
+        if let Some(e) = write_err.into_inner() {
+            bail!("write failed for {}: {}", item.local_path.display(), e);
+        }
+        // Fsync destination for crash safety
+        dst_file.into_inner().sync_all()?;
     }
 
     client.close().await?;

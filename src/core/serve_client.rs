@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::path::Path;
 
 use tokio::fs::File;
@@ -50,6 +48,7 @@ impl ServeClient {
         Ok(client)
     }
 
+    #[allow(dead_code)] // used by integration tests
     pub async fn connect_local() -> Result<Self, BcmrError> {
         // Find the bcmr binary in the same directory as the test binary.
         // current_exe() returns the test binary itself, not bcmr.
@@ -152,6 +151,7 @@ impl ServeClient {
         }
     }
 
+    #[allow(dead_code)] // used by integration tests
     pub async fn hash(
         &mut self,
         path: &str,
@@ -253,6 +253,7 @@ impl ServeClient {
         }
     }
 
+    #[allow(dead_code)] // used by integration tests
     pub async fn resume_check(&mut self, path: &str) -> Result<(u64, Option<[u8; 32]>), BcmrError> {
         self.send(&Message::Resume {
             path: path.to_owned(),
