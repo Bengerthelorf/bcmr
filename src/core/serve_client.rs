@@ -57,25 +57,29 @@ impl ServeClient {
         let bin_dir = exe
             .parent()
             .ok_or_else(|| BcmrError::InvalidInput("cannot find binary directory".into()))?;
-        let bcmr_bin = bin_dir.join("bcmr");
-        if !bcmr_bin.exists() {
-            // In cargo test, the binary is one directory up from deps/
-            let alt = bin_dir.parent().map(|p| p.join("bcmr"));
-            if let Some(ref alt_path) = alt {
-                if !alt_path.exists() {
-                    return Err(BcmrError::InvalidInput(format!(
-                        "bcmr binary not found at {} or {}",
-                        bcmr_bin.display(),
-                        alt_path.display()
-                    )));
-                }
-            }
-        }
-        let bcmr_path = if bcmr_bin.exists() {
-            bcmr_bin
-        } else {
-            bin_dir.parent().unwrap().join("bcmr")
-        };
+
+        let bin_name = if cfg!(windows) { "bcmr.exe" } else { "bcmr" };
+
+        // Try: same directory (release builds), then parent (cargo test puts
+        // test binaries in deps/ while the main binary is one level up).
+        let candidates = [
+            bin_dir.join(bin_name),
+            bin_dir
+                .parent()
+                .map(|p| p.join(bin_name))
+                .unwrap_or_default(),
+        ];
+        let bcmr_path = candidates
+            .iter()
+            .find(|p| p.exists())
+            .ok_or_else(|| {
+                BcmrError::InvalidInput(format!(
+                    "bcmr binary not found at {} or {}",
+                    candidates[0].display(),
+                    candidates[1].display()
+                ))
+            })?
+            .clone();
 
         let mut child = Command::new(&bcmr_path)
             .arg("serve")

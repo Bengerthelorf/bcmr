@@ -3,6 +3,7 @@ use crate::commands;
 use crate::config::CONFIG;
 use crate::core::error::BcmrError;
 use crate::core::remote::{self, parse_remote_path, RemotePath};
+use crate::core::serve_client::ServeClient;
 use crate::ui::progress::{self, ProgressRenderer};
 use crate::ui::utils::format_bytes;
 use anyhow::{bail, Result};
@@ -339,6 +340,22 @@ pub async fn handle_remote_copy(
 
     let parallel = args.get_parallel().unwrap_or(CONFIG.scp.parallel_transfers);
 
+    // Try bcmr serve protocol first — much faster than per-file SSH.
+    // Falls back silently to legacy SSH if remote doesn't have bcmr.
+    let ssh_target = check_target.ssh_target();
+    let serve_result = if let Some(ref rdest) = remote_dest {
+        handle_serve_upload(args, sources, rdest, &ssh_target, excludes).await
+    } else {
+        handle_serve_download(args, sources, dest, &ssh_target, excludes).await
+    };
+
+    match serve_result {
+        Ok(()) => return Ok(()),
+        Err(_) => {
+            // Serve not available — fall back to legacy SSH
+        }
+    }
+
     if let Some(ref rdest) = remote_dest {
         handle_remote_upload(args, sources, rdest, parallel, excludes).await
     } else {
@@ -647,5 +664,230 @@ async fn handle_remote_download(
         }
     }
 
+    runner.finish_ok()
+}
+
+// ===== Serve-based transfers =====
+
+/// Upload files via bcmr serve protocol. Returns Err if serve is unavailable.
+async fn handle_serve_upload(
+    args: &Commands,
+    sources: &[PathBuf],
+    rdest: &RemotePath,
+    ssh_target: &str,
+    excludes: &[regex::Regex],
+) -> Result<()> {
+    let mut client = ServeClient::connect(ssh_target)
+        .await
+        .map_err(|e| anyhow::anyhow!("serve unavailable: {}", e))?;
+
+    if args.is_dry_run() {
+        client.close().await?;
+        return Err(anyhow::anyhow!("serve: dry-run fallback to legacy"));
+    }
+
+    let mut total_size = 0u64;
+    for src in sources {
+        if src.is_file() {
+            total_size += src.metadata()?.len();
+        } else if src.is_dir() && args.is_recursive() {
+            total_size +=
+                commands::copy::get_total_size(std::slice::from_ref(src), true, args, &[]).await?;
+        }
+    }
+
+    let runner = ProgressRunner::new(total_size, is_plain_mode(args), false)?;
+    runner
+        .progress()
+        .lock()
+        .set_operation_type("Uploading (serve)");
+
+    let multi_source = sources.len() > 1;
+    for src in sources {
+        if crate::core::traversal::is_excluded(src, excludes) {
+            continue;
+        }
+        if src.is_file() {
+            let remote_path = if multi_source || rdest.path.ends_with('/') {
+                format!(
+                    "{}/{}",
+                    rdest.path,
+                    src.file_name().unwrap_or_default().to_string_lossy()
+                )
+            } else {
+                rdest.path.clone()
+            };
+            let size = src.metadata()?.len();
+            (runner.file_callback())(&src.file_name().unwrap_or_default().to_string_lossy(), size);
+            let server_hash = client.put(&remote_path, src).await?;
+            if args.is_verify() {
+                let p = src.to_path_buf();
+                let local_hash =
+                    tokio::task::spawn_blocking(move || crate::core::checksum::calculate_hash(&p))
+                        .await??;
+                let server_hex: String = server_hash.iter().map(|b| format!("{:02x}", b)).collect();
+                if server_hex != local_hash {
+                    client.close().await?;
+                    return runner.finish_err(format!("hash mismatch for {}", src.display()));
+                }
+            }
+            (runner.inc_callback())(size);
+        } else if src.is_dir() && args.is_recursive() {
+            serve_upload_dir(&mut client, src, rdest, &runner, excludes).await?;
+        }
+    }
+
+    client.close().await?;
+    runner.finish_ok()
+}
+
+async fn serve_upload_dir(
+    client: &mut ServeClient,
+    local_dir: &std::path::Path,
+    remote_base: &RemotePath,
+    runner: &ProgressRunner,
+    excludes: &[regex::Regex],
+) -> Result<()> {
+    let dir_name = local_dir.file_name().unwrap_or_default().to_string_lossy();
+    let remote_dir = format!("{}/{}", remote_base.path, dir_name);
+    client.mkdir(&remote_dir).await?;
+
+    for entry in crate::core::traversal::walk(local_dir, true, false, 1, excludes) {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = path.strip_prefix(local_dir)?;
+        let remote_path = format!("{}/{}", remote_dir, rel.to_string_lossy());
+        if path.is_dir() {
+            client.mkdir(&remote_path).await?;
+        } else if path.is_file() {
+            let size = entry.metadata()?.len();
+            (runner.file_callback())(
+                &path.file_name().unwrap_or_default().to_string_lossy(),
+                size,
+            );
+            client.put(&remote_path, path).await?;
+            (runner.inc_callback())(size);
+        }
+    }
+    Ok(())
+}
+
+/// Download files via bcmr serve protocol. Returns Err if serve is unavailable.
+async fn handle_serve_download(
+    args: &Commands,
+    sources: &[PathBuf],
+    dest: &std::path::Path,
+    ssh_target: &str,
+    excludes: &[regex::Regex],
+) -> Result<()> {
+    let mut client = ServeClient::connect(ssh_target)
+        .await
+        .map_err(|e| anyhow::anyhow!("serve unavailable: {}", e))?;
+
+    if args.is_dry_run() {
+        client.close().await?;
+        return Err(anyhow::anyhow!("serve: dry-run fallback to legacy"));
+    }
+
+    struct DownloadItem {
+        remote_path: String,
+        local_path: PathBuf,
+        size: u64,
+        is_dir: bool,
+    }
+
+    let mut total_size = 0u64;
+    let mut items: Vec<DownloadItem> = Vec::new();
+
+    for src in sources {
+        if crate::core::traversal::is_excluded(src, excludes) {
+            continue;
+        }
+        let src_str = src.to_string_lossy();
+        if let Some(rp) = parse_remote_path(&src_str) {
+            let (size, _mtime, is_dir) = client.stat(&rp.path).await?;
+            if is_dir && args.is_recursive() {
+                let entries = client.list(&rp.path).await?;
+                let dir_name = rp.path.rsplit('/').next().unwrap_or(&rp.path);
+                let local_base = dest.join(dir_name);
+                items.push(DownloadItem {
+                    remote_path: String::new(),
+                    local_path: local_base.clone(),
+                    size: 0,
+                    is_dir: true,
+                });
+                for entry in &entries {
+                    let local = local_base.join(&entry.path);
+                    let remote = format!("{}/{}", rp.path, entry.path);
+                    if entry.is_dir {
+                        items.push(DownloadItem {
+                            remote_path: remote,
+                            local_path: local,
+                            size: 0,
+                            is_dir: true,
+                        });
+                    } else {
+                        total_size += entry.size;
+                        items.push(DownloadItem {
+                            remote_path: remote,
+                            local_path: local,
+                            size: entry.size,
+                            is_dir: false,
+                        });
+                    }
+                }
+            } else if !is_dir {
+                total_size += size;
+                let local = if dest.is_dir() {
+                    dest.join(rp.path.rsplit('/').next().unwrap_or(&rp.path))
+                } else {
+                    dest.to_path_buf()
+                };
+                items.push(DownloadItem {
+                    remote_path: rp.path.clone(),
+                    local_path: local,
+                    size,
+                    is_dir: false,
+                });
+            }
+        }
+    }
+
+    let runner = ProgressRunner::new(total_size, is_plain_mode(args), false)?;
+    runner
+        .progress()
+        .lock()
+        .set_operation_type("Downloading (serve)");
+
+    for item in &items {
+        if item.is_dir {
+            tokio::fs::create_dir_all(&item.local_path).await?;
+            continue;
+        }
+        if let Some(parent) = item.local_path.parent() {
+            if !parent.exists() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+        }
+        let fname = item
+            .local_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        (runner.file_callback())(&fname, item.size);
+
+        let dst_file = std::cell::RefCell::new(std::fs::File::create(&item.local_path)?);
+        let inc = runner.inc_callback();
+        client
+            .get(&item.remote_path, 0, |chunk| {
+                use std::io::Write;
+                let _ = dst_file.borrow_mut().write_all(chunk);
+                inc(chunk.len() as u64);
+            })
+            .await?;
+    }
+
+    client.close().await?;
     runner.finish_ok()
 }
