@@ -361,3 +361,50 @@ fn test_resume_offset_single_block_intact() {
 
     Session::remove(&src, &dst);
 }
+
+// ===== Session Integrity (CRC) Tests =====
+
+#[test]
+fn test_session_corrupted_file_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    create_test_file(&src, 8 * 1024 * 1024);
+
+    let session = simulate_copy_with_session(&src, &dst);
+    let session_path = Session::session_path(&src, &dst);
+    assert!(session_path.exists());
+    drop(session);
+
+    // Corrupt the session file by flipping a byte in the middle
+    let mut data = fs::read(&session_path).unwrap();
+    let mid = data.len() / 2;
+    data[mid] ^= 0xFF;
+    fs::write(&session_path, &data).unwrap();
+
+    // Load should return None (checksum mismatch)
+    let loaded = Session::load(&src, &dst);
+    assert!(loaded.is_none(), "corrupted session should not load");
+
+    Session::remove(&src, &dst);
+}
+
+#[test]
+fn test_session_truncated_file_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    create_test_file(&src, 8 * 1024 * 1024);
+
+    simulate_copy_with_session(&src, &dst);
+    let session_path = Session::session_path(&src, &dst);
+
+    // Truncate session file (simulates partial write)
+    let data = fs::read(&session_path).unwrap();
+    fs::write(&session_path, &data[..data.len() / 2]).unwrap();
+
+    let loaded = Session::load(&src, &dst);
+    assert!(loaded.is_none(), "truncated session should not load");
+
+    Session::remove(&src, &dst);
+}

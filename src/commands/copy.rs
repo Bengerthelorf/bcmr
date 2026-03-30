@@ -1060,7 +1060,12 @@ where
         }
     }
 
-    let mut buffer = vec![0; 4 * 1024 * 1024]; // 4MB buffer
+    let mut buffer = vec![0; crate::core::session::COPY_BLOCK_SIZE as usize];
+    debug_assert_eq!(
+        buffer.len(),
+        crate::core::session::COPY_BLOCK_SIZE as usize,
+        "buffer size must equal COPY_BLOCK_SIZE for block hash correctness"
+    );
 
     // Session for crash-safe resume with streaming hash checkpoints.
     // Created for resume/append/strict modes or any file > 64MB.

@@ -194,7 +194,7 @@ impl Session {
         0
     }
 
-    /// Binary format serialization.
+    /// Binary format serialization with trailing integrity checksum.
     fn serialize(&self) -> Vec<u8> {
         let mut buf = Vec::new();
 
@@ -241,12 +241,29 @@ impl Session {
         buf.extend_from_slice(&self.created_at.to_le_bytes());
         buf.extend_from_slice(&self.updated_at.to_le_bytes());
 
+        // Integrity checksum: BLAKE3 of the payload, truncated to 8 bytes.
+        // Detects corrupted session files (bad sectors, partial writes).
+        let checksum = blake3::hash(&buf);
+        buf.extend_from_slice(&checksum.as_bytes()[..8]);
+
         buf
     }
 
-    /// Binary format deserialization.
+    /// Binary format deserialization with integrity verification.
     fn deserialize(data: &[u8]) -> Option<Self> {
-        let mut r = Reader::new(data);
+        // Need at least 8 bytes for the trailing checksum
+        if data.len() < 8 {
+            return None;
+        }
+
+        // Verify integrity checksum before parsing
+        let (payload, stored_checksum) = data.split_at(data.len() - 8);
+        let computed = blake3::hash(payload);
+        if &computed.as_bytes()[..8] != stored_checksum {
+            return None; // corrupted session file
+        }
+
+        let mut r = Reader::new(payload);
 
         // Header
         let magic = r.read_bytes(4)?;

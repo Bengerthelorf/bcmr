@@ -1,6 +1,10 @@
 # Streaming Checkpoint Copy
 
-bcmr implements a **Streaming Checkpoint Copy (SCC)** algorithm that unifies three capabilities no existing `cp`-class tool provides together: always-on integrity hashing at zero extra I/O, crash-safe resumable state, and constant-time resume verification.
+bcmr implements a **Streaming Checkpoint Copy (SCC)** algorithm that unifies three capabilities no existing `cp`-class tool provides together: inline integrity hashing at zero extra I/O, crash-safe resumable state, and constant-time resume verification.
+
+::: info Note
+SCC applies to the buffered read/write copy path. When reflink (CoW) or `copy_file_range` succeeds, bcmr uses those kernel fast paths instead — these bypass userspace entirely, so inline hashing is not available. Verification with `-V` in those cases falls back to a separate hash pass.
+:::
 
 This document describes the algorithm design with formal analysis, presents ablation experiments across macOS and Linux validating each design decision, and compares with prior art.
 
