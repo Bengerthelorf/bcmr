@@ -432,6 +432,19 @@ pub async fn read_message<R: AsyncReadExt + Unpin>(reader: &mut R) -> io::Result
     }
 
     let payload_len = u32::from_le_bytes(len_buf) as usize;
+
+    // Guard against malicious/corrupt peers sending huge frame sizes.
+    const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
+    if payload_len > MAX_FRAME_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "frame too large: {} bytes (max {})",
+                payload_len, MAX_FRAME_SIZE
+            ),
+        ));
+    }
+
     let mut payload = vec![0u8; payload_len];
     reader.read_exact(&mut payload).await?;
 

@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use tokio::fs::File;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 use crate::core::error::BcmrError;
@@ -11,7 +11,7 @@ use crate::core::protocol::{self, ListEntry, Message, PROTOCOL_VERSION};
 
 pub struct ServeClient {
     child: Child,
-    stdin: ChildStdin,
+    stdin: Option<ChildStdin>,
     stdout: ChildStdout,
 }
 
@@ -43,7 +43,7 @@ impl ServeClient {
 
         let mut client = Self {
             child,
-            stdin,
+            stdin: Some(stdin),
             stdout,
         };
         client.handshake().await?;
@@ -99,7 +99,7 @@ impl ServeClient {
 
         let mut client = Self {
             child,
-            stdin,
+            stdin: Some(stdin),
             stdout,
         };
         client.handshake().await?;
@@ -273,21 +273,22 @@ impl ServeClient {
         }
     }
 
-    pub async fn close(self) -> Result<(), BcmrError> {
-        // Use ManuallyDrop to prevent the Drop impl from killing the child
-        // after we've already cleanly shut it down.
-        let mut this = std::mem::ManuallyDrop::new(self);
-        // Close stdin to signal EOF → server exits cleanly
-        // Safety: we won't use this.stdin again
-        unsafe {
-            std::ptr::drop_in_place(&mut this.stdin);
-        }
-        this.child.wait().await?;
+    pub async fn close(mut self) -> Result<(), BcmrError> {
+        // Drop stdin to send EOF → server exits cleanly.
+        // After wait(), the Drop impl's start_kill() is a harmless no-op
+        // on an already-exited child.
+        self.stdin.take();
+        let _ = self.child.wait().await;
         Ok(())
     }
 
     async fn send(&mut self, msg: &Message) -> Result<(), BcmrError> {
-        protocol::write_message(&mut self.stdin, msg).await?;
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| BcmrError::InvalidInput("connection closed".into()))?;
+        protocol::write_message(stdin, msg).await?;
+        stdin.flush().await?;
         Ok(())
     }
 

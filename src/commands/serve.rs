@@ -57,7 +57,24 @@ pub async fn run() -> Result<()> {
             None => break, // clean EOF
         };
 
+        // Get writes Data+Ok directly to stdout (streaming), so it bypasses
+        // the normal dispatch-loop write. All other handlers return a message
+        // for the dispatch loop to write.
         let response = match msg {
+            Message::Get { path, offset } => {
+                if let Err(e) = handle_get(&path, offset, &mut stdout).await {
+                    eprintln!("serve: handler error: {e}");
+                    protocol::write_message(
+                        &mut stdout,
+                        &Message::Error {
+                            message: e.to_string(),
+                        },
+                    )
+                    .await?;
+                }
+                stdout.flush().await?;
+                continue; // skip the normal reply write below
+            }
             Message::Stat { path } => handle_stat(&path).await,
             Message::List { path } => handle_list(&path).await,
             Message::Hash {
@@ -65,7 +82,6 @@ pub async fn run() -> Result<()> {
                 offset,
                 limit,
             } => handle_hash(&path, offset, limit).await,
-            Message::Get { path, offset } => handle_get(&path, offset, &mut stdout).await,
             Message::Put { path, size } => handle_put(&path, size, &mut stdin).await,
             Message::Mkdir { path } => handle_mkdir(&path).await,
             Message::Resume { path } => handle_resume(&path).await,
@@ -169,7 +185,10 @@ async fn handle_hash(path: &str, offset: u64, limit: Option<u64>) -> Result<Mess
 
 /// Stream file data in 4 MiB chunks. Sends Data messages then Ok { hash }.
 /// Returns Ok(Message::Ok{..}) but writes Data messages directly to `out`.
-async fn handle_get<W>(path: &str, offset: u64, out: &mut W) -> Result<Message>
+/// Streams file data as Data messages, then writes Ok with hash directly.
+/// Returns Result<()> because it writes responses directly to the output —
+/// the dispatch loop must NOT write another response for Get commands.
+async fn handle_get<W>(path: &str, offset: u64, out: &mut W) -> Result<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
@@ -196,11 +215,11 @@ where
             },
         )
         .await?;
-        out.flush().await?;
     }
 
     let hash = hasher.finalize().to_hex().to_string();
-    Ok(Message::Ok { hash: Some(hash) })
+    protocol::write_message(out, &Message::Ok { hash: Some(hash) }).await?;
+    Ok(())
 }
 
 /// Receive Data messages until Done, write to file, fsync, compute hash.
