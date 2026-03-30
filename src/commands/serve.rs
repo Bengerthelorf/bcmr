@@ -1,10 +1,41 @@
 use crate::core::protocol::{self, ListEntry, Message, PROTOCOL_VERSION};
-use anyhow::Result;
-use std::path::Path;
+use anyhow::{bail, Result};
+use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::{self, AsyncWriteExt};
 
 const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
+
+/// Validate and canonicalize a path from the client.
+/// Prevents directory traversal attacks (e.g. "../../../etc/shadow").
+/// All paths must be absolute after canonicalization.
+fn validate_path(raw: &str) -> Result<PathBuf> {
+    let path = Path::new(raw);
+
+    // Reject obviously malicious patterns before touching the filesystem
+    if raw.contains('\0') {
+        bail!("path contains null byte");
+    }
+
+    // For existing paths, canonicalize resolves symlinks and ..
+    if path.exists() {
+        return Ok(std::fs::canonicalize(path)?);
+    }
+
+    // For new files (put/mkdir), canonicalize the parent
+    if let Some(parent) = path.parent() {
+        if parent.exists() {
+            let canonical_parent = std::fs::canonicalize(parent)?;
+            if let Some(name) = path.file_name() {
+                return Ok(canonical_parent.join(name));
+            }
+        }
+    }
+
+    // If neither path nor parent exists, use the path as-is
+    // (mkdir -p will create it, and it's within the SSH user's permissions)
+    Ok(path.to_path_buf())
+}
 
 pub async fn run() -> Result<()> {
     let mut stdin = io::stdin();
@@ -62,29 +93,62 @@ pub async fn run() -> Result<()> {
         // for the dispatch loop to write.
         let response = match msg {
             Message::Get { path, offset } => {
-                if let Err(e) = handle_get(&path, offset, &mut stdout).await {
-                    eprintln!("serve: handler error: {e}");
-                    protocol::write_message(
-                        &mut stdout,
-                        &Message::Error {
-                            message: e.to_string(),
-                        },
-                    )
-                    .await?;
+                match validate_path(&path) {
+                    Ok(p) => {
+                        if let Err(e) =
+                            handle_get(p.to_str().unwrap_or(&path), offset, &mut stdout).await
+                        {
+                            eprintln!("serve: handler error: {e}");
+                            protocol::write_message(
+                                &mut stdout,
+                                &Message::Error {
+                                    message: e.to_string(),
+                                },
+                            )
+                            .await?;
+                        }
+                    }
+                    Err(e) => {
+                        protocol::write_message(
+                            &mut stdout,
+                            &Message::Error {
+                                message: e.to_string(),
+                            },
+                        )
+                        .await?;
+                    }
                 }
                 stdout.flush().await?;
-                continue; // skip the normal reply write below
+                continue;
             }
-            Message::Stat { path } => handle_stat(&path).await,
-            Message::List { path } => handle_list(&path).await,
+            Message::Stat { path } => match validate_path(&path) {
+                Ok(p) => handle_stat(p.to_str().unwrap_or(&path)).await,
+                Err(e) => Err(e),
+            },
+            Message::List { path } => match validate_path(&path) {
+                Ok(p) => handle_list(p.to_str().unwrap_or(&path)).await,
+                Err(e) => Err(e),
+            },
             Message::Hash {
                 path,
                 offset,
                 limit,
-            } => handle_hash(&path, offset, limit).await,
-            Message::Put { path, size } => handle_put(&path, size, &mut stdin).await,
-            Message::Mkdir { path } => handle_mkdir(&path).await,
-            Message::Resume { path } => handle_resume(&path).await,
+            } => match validate_path(&path) {
+                Ok(p) => handle_hash(p.to_str().unwrap_or(&path), offset, limit).await,
+                Err(e) => Err(e),
+            },
+            Message::Put { path, size } => match validate_path(&path) {
+                Ok(p) => handle_put(p.to_str().unwrap_or(&path), size, &mut stdin).await,
+                Err(e) => Err(e),
+            },
+            Message::Mkdir { path } => match validate_path(&path) {
+                Ok(p) => handle_mkdir(p.to_str().unwrap_or(&path)).await,
+                Err(e) => Err(e),
+            },
+            Message::Resume { path } => match validate_path(&path) {
+                Ok(p) => handle_resume(p.to_str().unwrap_or(&path)).await,
+                Err(e) => Err(e),
+            },
             other => Err(anyhow::anyhow!("unexpected message: {other:?}")),
         };
 

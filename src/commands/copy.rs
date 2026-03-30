@@ -84,8 +84,9 @@ async fn try_copy_file_range(
     let dst_fd = dst_file.as_raw_fd();
 
     if file_size > 0 {
+        // Best-effort preallocation; ignore ENOTSUP on filesystems that don't support it
         unsafe {
-            libc::fallocate(dst_fd, 0, 0, file_size as libc::off_t);
+            let _ = libc::fallocate(dst_fd, 0, 0, file_size as libc::off_t);
         }
     }
 
@@ -936,7 +937,8 @@ where
         if remaining > 0 {
             let fd = dst_file.as_raw_fd();
             unsafe {
-                libc::fallocate(fd, 0, start_offset as libc::off_t, remaining as libc::off_t);
+                let _ =
+                    libc::fallocate(fd, 0, start_offset as libc::off_t, remaining as libc::off_t);
             }
         }
     }

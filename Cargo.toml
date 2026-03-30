@@ -48,5 +48,5 @@ tempfile = "3"
 [profile.release]
 codegen-units = 1
 lto = true
-opt-level = "s"
+opt-level = 3
 strip = true
