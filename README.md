@@ -31,10 +31,10 @@ Installation, shell integration, CLI reference, configuration, and more.
 ## Highlights
 
 - 📊 **Progress Display** — Fancy TUI box with gradient bar, ETA, speed, per-file tracking. Plain text mode for logs and pipes
-- 🔄 **Resume & Verify** — Resume interrupted transfers with mtime, size, or strict BLAKE3 hash. Verify integrity after copy
-- 🌐 **Remote Copy (SSH)** — Upload and download via SSH with SCP-like syntax
-- ⚡ **Fast by Default** — Reflink (CoW), `copy_file_range` on Linux, sparse file detection, pipeline scan+copy
-- 🛡️ **Safe Operations** — Dry-run preview, overwrite prompts, regex exclusions, atomic writes
+- 🔄 **Resume & Verify** — Crash-safe resume with session files and O(1) tail-block verification. Always-on BLAKE3 inline hashing for 2-pass verified copy
+- 🌐 **Remote Copy (SSH)** — Upload and download via SSH. Binary `bcmr serve` protocol for fast transfers when both sides have bcmr, automatic fallback to legacy SCP
+- ⚡ **Fast by Default** — Reflink (CoW), `copy_file_range` on Linux, sparse file detection, pipeline scan+copy, per-worker SSH connections for parallel transfers
+- 🛡️ **Safe Operations** — Dry-run preview, overwrite prompts, regex exclusions, atomic writes with durable fsync (`F_FULLFSYNC` on macOS)
 - 🔄 **Self-Update** — `bcmr update` to update in place; background update check on every run
 - 🎨 **Configurable** — Custom color gradients, bar characters, border styles via TOML config
 

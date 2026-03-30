@@ -72,6 +72,7 @@ export default defineConfig({
         nav: [
           { text: '指南', link: '/zh/guide/getting-started' },
           { text: 'CLI', link: '/zh/cli/' },
+          { text: '技术内幕', link: '/ablation/' },
           {
             text: '下载',
             link: 'https://github.com/Bengerthelorf/bcmr/releases/latest',
@@ -114,6 +115,7 @@ export default defineConfig({
         nav: [
           { text: '指南', link: '/zh-Hant/guide/getting-started' },
           { text: 'CLI', link: '/zh-Hant/cli/' },
+          { text: '技術內幕', link: '/ablation/' },
           {
             text: '下載',
             link: 'https://github.com/Bengerthelorf/bcmr/releases/latest',
