@@ -224,6 +224,16 @@ pub enum Commands {
     #[command(hide = true)]
     Serve,
 
+    /// Deploy bcmr to a remote host for serve protocol support
+    Deploy {
+        /// Remote target (user@host)
+        target: String,
+
+        /// Installation path on remote host
+        #[arg(long, default_value = "~/.local/bin/bcmr")]
+        path: Option<String>,
+    },
+
     /// Remove files or directories
     Remove {
         /// Files or directories to remove
@@ -325,7 +335,8 @@ impl Commands {
             | Commands::Update
             | Commands::Completions { .. }
             | Commands::CompleteRemote { .. }
-            | Commands::Serve => false,
+            | Commands::Serve
+            | Commands::Deploy { .. } => false,
         }
     }
 

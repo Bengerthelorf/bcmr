@@ -484,6 +484,7 @@ fn background_update_check(command: &Commands) -> Option<mpsc::Receiver<Option<S
             | Commands::Completions { .. }
             | Commands::CompleteRemote { .. }
             | Commands::Serve
+            | Commands::Deploy { .. }
     ) {
         return None;
     }
@@ -512,6 +513,10 @@ async fn main() -> Result<()> {
         Commands::Update => commands::update::run()?,
         Commands::Serve => {
             commands::serve::run().await?;
+        }
+        Commands::Deploy { target, path } => {
+            let remote_path = path.as_deref().unwrap_or("~/.local/bin/bcmr");
+            commands::deploy::run(target, remote_path).await?;
         }
         Commands::CompleteRemote { partial } => {
             for entry in crate::core::remote::complete_remote_path(partial).await {
