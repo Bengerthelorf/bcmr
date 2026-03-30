@@ -160,3 +160,73 @@ fn shell_escape(s: &str) -> String {
         format!("'{}'", s)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_uname_linux_x86() {
+        let (os, arch) = parse_uname("Linux x86_64").unwrap();
+        assert_eq!(os, "linux");
+        assert_eq!(arch, "x86_64");
+    }
+
+    #[test]
+    fn test_parse_uname_darwin_arm() {
+        let (os, arch) = parse_uname("Darwin arm64").unwrap();
+        assert_eq!(os, "macos");
+        assert_eq!(arch, "aarch64");
+    }
+
+    #[test]
+    fn test_parse_uname_linux_aarch64() {
+        let (os, arch) = parse_uname("Linux aarch64").unwrap();
+        assert_eq!(os, "linux");
+        assert_eq!(arch, "aarch64");
+    }
+
+    #[test]
+    fn test_parse_uname_freebsd() {
+        let (os, arch) = parse_uname("FreeBSD amd64").unwrap();
+        assert_eq!(os, "freebsd");
+        assert_eq!(arch, "x86_64");
+    }
+
+    #[test]
+    fn test_parse_uname_unsupported_os() {
+        assert!(parse_uname("SunOS sparc64").is_err());
+    }
+
+    #[test]
+    fn test_parse_uname_empty() {
+        assert!(parse_uname("").is_err());
+    }
+
+    #[test]
+    fn test_release_asset_linux_x86() {
+        let name = release_asset_name("linux", "x86_64").unwrap();
+        assert!(name.contains("x86_64-unknown-linux"));
+    }
+
+    #[test]
+    fn test_release_asset_macos_arm() {
+        let name = release_asset_name("macos", "aarch64").unwrap();
+        assert!(name.contains("aarch64-apple-darwin"));
+    }
+
+    #[test]
+    fn test_release_asset_unsupported() {
+        assert!(release_asset_name("windows", "x86_64").is_err());
+    }
+
+    #[test]
+    fn test_shell_escape_simple() {
+        assert_eq!(shell_escape("/usr/bin/bcmr"), "'/usr/bin/bcmr'");
+    }
+
+    #[test]
+    fn test_shell_escape_with_single_quote() {
+        assert_eq!(shell_escape("it's"), "\"it's\"");
+    }
+}
