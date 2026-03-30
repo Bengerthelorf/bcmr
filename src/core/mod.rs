@@ -3,6 +3,7 @@ pub mod error;
 pub mod io;
 pub mod protocol;
 pub mod remote;
+pub mod resume;
 pub mod serve_client;
 pub mod session;
 pub mod traversal;

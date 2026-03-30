@@ -95,8 +95,6 @@ async fn try_copy_file_range(
         let to_copy = (remaining as usize).min(CHUNK);
         let sfd = src_fd;
         let dfd = dst_fd;
-
-        // Capture errno inside the blocking thread (errno is thread-local)
         let result = tokio::task::spawn_blocking(move || {
             let ret = unsafe {
                 libc::copy_file_range(
@@ -120,7 +118,6 @@ async fn try_copy_file_range(
         match result {
             Err(err) => {
                 let errno = err.raw_os_error().unwrap_or(0);
-                // Not available or not supported — fall back to buffer copy
                 if errno == libc::ENOSYS
                     || errno == libc::EXDEV
                     || errno == libc::EINVAL
@@ -596,7 +593,6 @@ where
         if dst_path.exists() && cli.is_force() && !is_normal_write(cli) {
             fs::remove_file(&dst_path).await?;
         }
-        // For normal writes: atomic rename handles overwrite, no pre-deletion needed
 
         copy_file(
             src,
@@ -839,7 +835,6 @@ where
 
     if use_atomic {
         let temp = temp_path_for(dst);
-        // Clean up stale temp file from previous crash
         if temp.exists() {
             let _ = fs::remove_file(&temp).await;
         }
@@ -913,129 +908,28 @@ where
             None => {}
         }
     }
+    let resume_state = crate::core::resume::resolve(
+        src,
+        dst,
+        file_size,
+        resume,
+        strict,
+        append,
+        &callback.callback,
+    )
+    .await?;
 
-    let mut start_offset = 0;
+    if resume_state.already_complete {
+        return Ok(());
+    }
+
+    let start_offset = resume_state.start_offset;
+    let loaded_session = resume_state.loaded_session;
+
     let mut file_flags = fs::OpenOptions::new();
     file_flags.write(true);
-
-    // Try to load an existing session for session-based resume.
-    // This provides O(1) tail-block verification instead of O(n) full rehash.
-    let loaded_session = if (resume || append || strict) && dst.exists() {
-        use crate::core::session::Session;
-        if let Some(session) = Session::load(src, dst) {
-            let src_meta = src.metadata()?;
-            let src_mtime = src_meta
-                .modified()?
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let src_inode = durable_io::get_inode(src).unwrap_or(0);
-
-            if session.source_matches(file_size, src_mtime, src_inode) {
-                Some(session)
-            } else {
-                // Source changed since session was created — discard session
-                Session::remove(src, dst);
-                None
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    if (resume || append || strict) && dst.exists() {
-        let dst_len = dst.metadata()?.len();
-
-        let should_resume = if strict {
-            if dst_len == file_size {
-                let src_path = src.to_path_buf();
-                let dst_path = dst.to_path_buf();
-                let (src_hash, dst_hash) = tokio::join!(
-                    tokio::task::spawn_blocking(move || checksum::calculate_hash(&src_path)),
-                    tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)),
-                );
-                let src_hash = src_hash??;
-                let dst_hash = dst_hash??;
-
-                if src_hash == dst_hash {
-                    (callback.callback)(file_size);
-                    return Ok(());
-                }
-                false
-            } else if dst_len < file_size {
-                let src_path = src.to_path_buf();
-                let dst_path = dst.to_path_buf();
-                let limit = dst_len;
-                let (dst_hash, src_partial_hash) = tokio::join!(
-                    tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)),
-                    tokio::task::spawn_blocking(move || checksum::calculate_partial_hash(
-                        &src_path, limit
-                    )),
-                );
-                let dst_hash = dst_hash??;
-                let src_partial_hash = src_partial_hash??;
-
-                dst_hash == src_partial_hash
-            } else {
-                false
-            }
-        } else if append {
-            if dst_len == file_size {
-                (callback.callback)(file_size);
-                return Ok(());
-            } else {
-                dst_len < file_size
-            }
-        } else if let Some(ref session) = loaded_session {
-            // Session-based resume: use tail-block verification O(1).
-            if dst_len == file_size {
-                (callback.callback)(file_size);
-                return Ok(());
-            } else {
-                dst_len < file_size && !session.block_hashes.is_empty()
-            }
-        } else {
-            // Fallback resume: check mtime + size (no session available).
-            let src_mtime = src.metadata()?.modified()?;
-            let dst_mtime = dst.metadata()?.modified()?;
-
-            if src_mtime != dst_mtime {
-                false
-            } else if dst_len == file_size {
-                (callback.callback)(file_size);
-                return Ok(());
-            } else {
-                dst_len < file_size
-            }
-        };
-
-        if should_resume {
-            // Use session tail-block verification if available,
-            // otherwise fall back to appending from dst size.
-            if let Some(ref session) = loaded_session {
-                let verified_offset = session.find_resume_offset(dst);
-                if verified_offset > 0 {
-                    start_offset = verified_offset;
-                } else {
-                    // No blocks verified — start over
-                    start_offset = 0;
-                }
-            } else {
-                start_offset = dst_len;
-            }
-
-            if start_offset > 0 {
-                file_flags.write(true).create(true);
-                (callback.callback)(start_offset);
-            } else {
-                file_flags.create(true).truncate(true);
-            }
-        } else {
-            start_offset = 0;
-            file_flags.create(true).truncate(true);
-        }
+    if start_offset > 0 {
+        file_flags.create(true);
     } else {
         file_flags.create(true).truncate(true);
     }
@@ -1095,8 +989,6 @@ where
         } else {
             None
         };
-
-    // Will hold the inline source hash computed during the copy.
     let mut inline_src_hash: Option<blake3::Hash> = None;
 
     match test_mode {
@@ -1149,8 +1041,6 @@ where
                 if n == 0 {
                     break;
                 }
-
-                // Inline hash — "free" since BLAKE3 > disk speed
                 src_hasher.update(&buffer[..n]);
                 block_hasher.update(&buffer[..n]);
                 bytes_in_block += n as u64;
@@ -1187,8 +1077,6 @@ where
                     }
                 }
                 (callback.callback)(n as u64);
-
-                // Check if we've completed a 4MB block
                 if bytes_in_block >= crate::core::session::COPY_BLOCK_SIZE {
                     let block_hash = block_hasher.finalize();
                     if let Some(ref mut s) = session {
@@ -1234,8 +1122,6 @@ where
                     }
                 }
             }
-
-            // Handle final partial block
             if bytes_in_block > 0 {
                 let block_hash = block_hasher.finalize();
                 if let Some(ref mut s) = session {
@@ -1265,8 +1151,6 @@ where
     if sync {
         durable_io::durable_sync_async(&dst_file).await?;
     }
-
-    // Close file before rename
     drop(dst_file);
 
     if use_atomic {
@@ -1286,8 +1170,6 @@ where
     if verify {
         verify_copy(src, dst, inline_src_hash).await?;
     }
-
-    // Clean up session on successful completion
     crate::core::session::Session::remove(src, dst);
 
     Ok(())
