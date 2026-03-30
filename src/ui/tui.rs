@@ -420,12 +420,9 @@ impl TuiProgress {
             let file_info = format!("Current: {}", display_file);
             let max_text_width = box_width.saturating_sub(4);
             let display_file_info = if file_info.len() > max_text_width {
-                let mut end_index = max_text_width.saturating_sub(3);
-                if !file_info.is_char_boundary(end_index) {
-                    end_index = file_info.floor_char_boundary(end_index)
-                }
-
-                format!("{}...", &file_info[..end_index])
+                let truncated =
+                    &file_info[..file_info.floor_char_boundary(max_text_width.saturating_sub(3))];
+                format!("{truncated}...")
             } else {
                 file_info
             };

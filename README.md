@@ -146,4 +146,4 @@ Issues and PRs welcome! See [GitHub Issues](https://github.com/Bengerthelorf/bcm
 
 ## License
 
-GPL-3.0 © [Zane Leong](https://github.com/Bengerthelorf)
+Apache-2.0 © [Zane Leong](https://github.com/Bengerthelorf)

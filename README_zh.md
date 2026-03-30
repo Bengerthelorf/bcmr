@@ -146,4 +146,4 @@ update_check = "notify"  # "notify"、"quiet" 或 "off"
 
 ## 许可证
 
-GPL-3.0 © [Zane Leong](https://github.com/Bengerthelorf)
+Apache-2.0 © [Zane Leong](https://github.com/Bengerthelorf)
