@@ -118,6 +118,7 @@ mod tests {
         assert_ne!(ia, ib);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_get_inode_nonexistent() {
         assert!(get_inode(Path::new("/nonexistent/file")).is_err());
