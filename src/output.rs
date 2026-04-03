@@ -148,6 +148,59 @@ fn error_kind_from(err: &dyn std::error::Error) -> String {
     }
 }
 
+pub fn print_check_human(r: &CheckResult) {
+    use crossterm::style::{Color, ResetColor, SetForegroundColor};
+    use crate::ui::utils::format_bytes;
+
+    if r.in_sync {
+        println!(
+            "{}In sync.{}",
+            SetForegroundColor(Color::Green),
+            ResetColor
+        );
+        return;
+    }
+
+    for d in &r.added {
+        println!(
+            "{}  + {}{}{}",
+            SetForegroundColor(Color::Green),
+            d.path.display(),
+            if d.is_dir { " (dir)" } else { "" },
+            ResetColor
+        );
+    }
+    for d in &r.modified {
+        let detail = match (d.src_size, d.dst_size) {
+            (Some(s), Some(d)) => {
+                format!(" ({} -> {})", format_bytes(s as f64), format_bytes(d as f64))
+            }
+            _ => String::new(),
+        };
+        println!(
+            "{}  ~ {}{}{}",
+            SetForegroundColor(Color::Yellow),
+            d.path.display(),
+            detail,
+            ResetColor
+        );
+    }
+    for d in &r.missing {
+        println!(
+            "{}  - {}{}{}",
+            SetForegroundColor(Color::Red),
+            d.path.display(),
+            if d.is_dir { " (dir)" } else { "" },
+            ResetColor
+        );
+    }
+
+    println!(
+        "\nSummary: {} added, {} modified, {} missing",
+        r.summary.added, r.summary.modified, r.summary.missing
+    );
+}
+
 pub fn error_output(command: &str, err: &anyhow::Error) -> CommandOutput {
     let kind = error_kind_from(err.as_ref());
     let msg = format!("{:#}", err);

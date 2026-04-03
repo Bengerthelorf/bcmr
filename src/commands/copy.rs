@@ -329,46 +329,40 @@ pub struct CopyPlan {
     pub overwrites: Vec<FileToOverwrite>,
 }
 
-fn plan_copy_sync(
-    sources: Vec<PathBuf>,
-    dst: PathBuf,
+/// Walk sources and emit PlanEntry items via callback.
+/// Core scanning logic shared between plan_copy and pipeline_copy.
+fn scan_sources(
+    sources: &[PathBuf],
+    dst: &Path,
     recursive: bool,
-    excludes: Vec<regex::Regex>,
-) -> std::result::Result<CopyPlan, BcmrError> {
-    let mut entries = Vec::new();
-    let mut total_size = 0u64;
-    let mut overwrites = Vec::new();
+    excludes: &[regex::Regex],
+    mut on_entry: impl FnMut(PlanEntry, u64) -> std::result::Result<(), BcmrError>,
+) -> std::result::Result<(), BcmrError> {
     let dst_is_dir = dst.exists() && dst.is_dir();
 
-    for src in &sources {
-        if traversal::is_excluded(src, &excludes) {
+    for src in sources {
+        if traversal::is_excluded(src, excludes) {
             continue;
         }
 
         if src.is_file() {
-            let dst_path =
-                if dst_is_dir {
-                    dst.join(src.file_name().ok_or_else(|| {
-                        BcmrError::InvalidInput("Invalid source file name".into())
-                    })?)
-                } else {
-                    dst.clone()
-                };
+            let dst_path = if dst_is_dir {
+                dst.join(
+                    src.file_name()
+                        .ok_or_else(|| BcmrError::InvalidInput("Invalid source file name".into()))?,
+                )
+            } else {
+                dst.to_path_buf()
+            };
 
             let size = src.metadata()?.len();
-            total_size += size;
-
-            if dst_path.exists() && !traversal::is_excluded(&dst_path, &excludes) {
-                overwrites.push(FileToOverwrite {
-                    path: dst_path.clone(),
-                    is_dir: false,
-                });
-            }
-
-            entries.push(PlanEntry::CopyFile {
-                src: src.clone(),
-                dst: dst_path,
-            });
+            on_entry(
+                PlanEntry::CopyFile {
+                    src: src.clone(),
+                    dst: dst_path,
+                },
+                size,
+            )?;
         } else if recursive && src.is_dir() {
             let src_name = src
                 .file_name()
@@ -376,44 +370,40 @@ fn plan_copy_sync(
             let new_dst = if dst_is_dir {
                 dst.join(src_name)
             } else {
-                dst.clone()
+                dst.to_path_buf()
             };
 
-            entries.push(PlanEntry::CreateDir {
-                src: src.clone(),
-                dst: new_dst.clone(),
-            });
+            on_entry(
+                PlanEntry::CreateDir {
+                    src: src.clone(),
+                    dst: new_dst.clone(),
+                },
+                0,
+            )?;
 
-            for entry in traversal::walk(src, true, false, 1, &excludes) {
+            for entry in traversal::walk(src, true, false, 1, excludes) {
                 let entry = entry?;
                 let path = entry.path();
                 let relative = path.strip_prefix(src)?;
                 let target = new_dst.join(relative);
 
                 if path.is_dir() {
-                    if target.exists() && !traversal::is_excluded(&target, &excludes) {
-                        overwrites.push(FileToOverwrite {
-                            path: target.clone(),
-                            is_dir: true,
-                        });
-                    }
-                    entries.push(PlanEntry::CreateDir {
-                        src: path.to_path_buf(),
-                        dst: target,
-                    });
+                    on_entry(
+                        PlanEntry::CreateDir {
+                            src: path.to_path_buf(),
+                            dst: target,
+                        },
+                        0,
+                    )?;
                 } else if path.is_file() {
                     let size = entry.metadata()?.len();
-                    total_size += size;
-                    if target.exists() && !traversal::is_excluded(&target, &excludes) {
-                        overwrites.push(FileToOverwrite {
-                            path: target.clone(),
-                            is_dir: false,
-                        });
-                    }
-                    entries.push(PlanEntry::CopyFile {
-                        src: path.to_path_buf(),
-                        dst: target,
-                    });
+                    on_entry(
+                        PlanEntry::CopyFile {
+                            src: path.to_path_buf(),
+                            dst: target,
+                        },
+                        size,
+                    )?;
                 }
             }
         } else if src.is_dir() {
@@ -425,6 +415,43 @@ fn plan_copy_sync(
             return Err(BcmrError::SourceNotFound(src.clone()));
         }
     }
+
+    Ok(())
+}
+
+fn plan_copy_sync(
+    sources: Vec<PathBuf>,
+    dst: PathBuf,
+    recursive: bool,
+    excludes: Vec<regex::Regex>,
+) -> std::result::Result<CopyPlan, BcmrError> {
+    let mut entries = Vec::new();
+    let mut total_size = 0u64;
+    let mut overwrites = Vec::new();
+
+    scan_sources(&sources, &dst, recursive, &excludes, |entry, size| {
+        total_size += size;
+
+        // Track overwrites
+        let target = match &entry {
+            PlanEntry::CopyFile { dst, .. } => Some((dst.clone(), false)),
+            PlanEntry::CreateDir { dst, .. } => {
+                if dst.exists() {
+                    Some((dst.clone(), true))
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some((path, is_dir)) = target {
+            if path.exists() && !traversal::is_excluded(&path, &excludes) {
+                overwrites.push(FileToOverwrite { path, is_dir });
+            }
+        }
+
+        entries.push(entry);
+        Ok(())
+    })?;
 
     Ok(CopyPlan {
         entries,
@@ -1000,133 +1027,24 @@ where
     let dst = dst.to_path_buf();
     let excludes = excludes.to_vec();
     let scanner = tokio::task::spawn_blocking(move || {
-        let dst_is_dir = dst.exists() && dst.is_dir();
         let mut total_size = 0u64;
         let mut files_found = 0u64;
 
-        for src in &sources {
-            if traversal::is_excluded(src, &excludes) {
-                continue;
-            }
-
-            if src.is_file() {
-                let dst_path = if dst_is_dir {
-                    dst.join(match src.file_name() {
-                        Some(n) => n,
-                        None => continue,
-                    })
-                } else {
-                    dst.clone()
-                };
-
-                let size = match src.metadata() {
-                    Ok(m) => m.len(),
-                    Err(e) => {
-                        let _ = tx.blocking_send(ScanMessage::Done);
-                        return Err(BcmrError::Io(e));
-                    }
-                };
-                total_size += size;
+        let result = scan_sources(&sources, &dst, recursive, &excludes, |entry, size| {
+            total_size += size;
+            if size > 0 {
                 files_found += 1;
                 on_total_update(total_size);
                 on_file_found(files_found);
-
-                if tx
-                    .blocking_send(ScanMessage::Entry(PlanEntry::CopyFile {
-                        src: src.clone(),
-                        dst: dst_path,
-                    }))
-                    .is_err()
-                {
-                    return Ok(()); // receiver dropped, abort
-                }
-            } else if recursive && src.is_dir() {
-                let src_name = match src.file_name() {
-                    Some(n) => n,
-                    None => continue,
-                };
-                let new_dst = if dst_is_dir {
-                    dst.join(src_name)
-                } else {
-                    dst.clone()
-                };
-
-                if tx
-                    .blocking_send(ScanMessage::Entry(PlanEntry::CreateDir {
-                        src: src.clone(),
-                        dst: new_dst.clone(),
-                    }))
-                    .is_err()
-                {
-                    return Ok(());
-                }
-
-                for entry in traversal::walk(src, true, false, 1, &excludes) {
-                    let entry = match entry {
-                        Ok(e) => e,
-                        Err(e) => {
-                            let _ = tx.blocking_send(ScanMessage::Done);
-                            return Err(BcmrError::WalkDir(e));
-                        }
-                    };
-                    let path = entry.path();
-                    let relative = match path.strip_prefix(src) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            let _ = tx.blocking_send(ScanMessage::Done);
-                            return Err(BcmrError::StripPrefix(e));
-                        }
-                    };
-                    let target = new_dst.join(relative);
-
-                    if path.is_dir() {
-                        if tx
-                            .blocking_send(ScanMessage::Entry(PlanEntry::CreateDir {
-                                src: path.to_path_buf(),
-                                dst: target,
-                            }))
-                            .is_err()
-                        {
-                            return Ok(());
-                        }
-                    } else if path.is_file() {
-                        let size = match entry.metadata() {
-                            Ok(m) => m.len(),
-                            Err(e) => {
-                                let _ = tx.blocking_send(ScanMessage::Done);
-                                return Err(BcmrError::WalkDir(e));
-                            }
-                        };
-                        total_size += size;
-                        files_found += 1;
-                        on_total_update(total_size);
-                        on_file_found(files_found);
-
-                        if tx
-                            .blocking_send(ScanMessage::Entry(PlanEntry::CopyFile {
-                                src: path.to_path_buf(),
-                                dst: target,
-                            }))
-                            .is_err()
-                        {
-                            return Ok(());
-                        }
-                    }
-                }
-            } else if src.is_dir() {
-                let _ = tx.blocking_send(ScanMessage::Done);
-                return Err(BcmrError::InvalidInput(format!(
-                    "Source '{}' is a directory. Use -r flag for recursive copy.",
-                    src.display()
-                )));
-            } else {
-                let _ = tx.blocking_send(ScanMessage::Done);
-                return Err(BcmrError::SourceNotFound(src.clone()));
             }
-        }
+            if tx.blocking_send(ScanMessage::Entry(entry)).is_err() {
+                return Ok(()); // receiver dropped
+            }
+            Ok(())
+        });
 
         let _ = tx.blocking_send(ScanMessage::Done);
-        Ok(())
+        result
     });
 
     let mut dir_entries: Vec<(PathBuf, PathBuf)> = Vec::new(); // (src, dst) for preserve
