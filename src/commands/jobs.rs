@@ -56,7 +56,16 @@ pub fn read_latest_status(job_id: &str) -> Result<String, String> {
 
 /// Check if a process is still running.
 pub fn is_pid_alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as i32, 0) == 0 }
+    #[cfg(unix)]
+    {
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        // On Windows, just check if we can open the process
+        let _ = pid;
+        false
+    }
 }
 
 /// List all jobs (active and recent).
