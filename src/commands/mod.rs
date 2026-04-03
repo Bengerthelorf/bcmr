@@ -1,3 +1,4 @@
+pub mod check;
 pub mod copy;
 mod copy_strategies;
 pub mod deploy;

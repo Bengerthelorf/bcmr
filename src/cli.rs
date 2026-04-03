@@ -11,6 +11,10 @@ use std::path::PathBuf;
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
+
+    /// Output results as JSON (for programmatic / AI-agent consumption)
+    #[arg(long, global = true)]
+    pub json: bool,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -234,6 +238,22 @@ pub enum Commands {
         path: Option<String>,
     },
 
+    /// Compare source and destination without making changes
+    Check {
+        /// Source and destination directories
+        /// Last argument is the destination
+        #[arg(required = true, num_args = 2..)]
+        paths: Vec<PathBuf>,
+
+        /// Recursively compare directories
+        #[arg(short, long)]
+        recursive: bool,
+
+        /// Exclude paths matching regex pattern
+        #[arg(short = 'e', long)]
+        exclude: Option<Vec<String>>,
+    },
+
     /// Remove files or directories
     Remove {
         /// Files or directories to remove
@@ -303,7 +323,8 @@ impl Commands {
         let patterns = match self {
             Commands::Copy { exclude, .. }
             | Commands::Move { exclude, .. }
-            | Commands::Remove { exclude, .. } => exclude.as_ref(),
+            | Commands::Remove { exclude, .. }
+            | Commands::Check { exclude, .. } => exclude.as_ref(),
             _ => None,
         };
 
@@ -336,7 +357,8 @@ impl Commands {
             | Commands::Completions { .. }
             | Commands::CompleteRemote { .. }
             | Commands::Serve
-            | Commands::Deploy { .. } => false,
+            | Commands::Deploy { .. }
+            | Commands::Check { .. } => false,
         }
     }
 
@@ -360,7 +382,9 @@ impl Commands {
 
     pub fn get_sources_and_dest(&self) -> std::result::Result<(&[PathBuf], &PathBuf), String> {
         match self {
-            Commands::Copy { paths, .. } | Commands::Move { paths, .. } => {
+            Commands::Copy { paths, .. }
+            | Commands::Move { paths, .. }
+            | Commands::Check { paths, .. } => {
                 let (dest, sources) = paths
                     .split_last()
                     .ok_or_else(|| "missing source/destination arguments".to_string())?;
@@ -430,7 +454,8 @@ impl Commands {
         match self {
             Commands::Copy { recursive, .. }
             | Commands::Move { recursive, .. }
-            | Commands::Remove { recursive, .. } => *recursive,
+            | Commands::Remove { recursive, .. }
+            | Commands::Check { recursive, .. } => *recursive,
             _ => false,
         }
     }

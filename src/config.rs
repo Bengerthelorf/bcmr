@@ -2,6 +2,18 @@ use config::{Config as ConfigLoader, ConfigError, File};
 use directories::ProjectDirs;
 use once_cell::sync::Lazy;
 use serde::Deserialize;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// Set once at startup, read thereafter.
+static JSON_MODE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_json_mode(enabled: bool) {
+    JSON_MODE.store(enabled, Ordering::Relaxed);
+}
+
+pub fn is_json_mode() -> bool {
+    JSON_MODE.load(Ordering::Relaxed)
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {

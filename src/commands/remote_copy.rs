@@ -24,8 +24,8 @@ pub struct ProgressRunner {
 }
 
 impl ProgressRunner {
-    pub fn new(total_size: u64, plain: bool, silent: bool) -> std::io::Result<Self> {
-        let renderer = progress::create_renderer(total_size, plain, silent)?;
+    pub fn new(total_size: u64, plain: bool, silent: bool, json: bool) -> std::io::Result<Self> {
+        let renderer = progress::create_renderer(total_size, plain, silent, json)?;
         let progress = Arc::new(Mutex::new(renderer));
 
         let ticker = Arc::clone(&progress);
@@ -422,7 +422,7 @@ async fn handle_remote_upload(
         append: args.is_append(),
     };
 
-    let runner = ProgressRunner::new(total_size, is_plain_mode(args), false)?;
+    let runner = ProgressRunner::new(total_size, is_plain_mode(args), false, crate::config::is_json_mode())?;
     runner.progress().lock().set_operation_type("Uploading");
     let multi_source = sources.len() > 1;
 
@@ -554,7 +554,7 @@ async fn handle_remote_download(
         append: args.is_append(),
     };
 
-    let runner = ProgressRunner::new(total_size, is_plain_mode(args), false)?;
+    let runner = ProgressRunner::new(total_size, is_plain_mode(args), false, crate::config::is_json_mode())?;
     runner.progress().lock().set_operation_type("Downloading");
 
     if parallel > 1 {
@@ -696,7 +696,7 @@ async fn handle_serve_upload(
         }
     }
 
-    let runner = ProgressRunner::new(total_size, is_plain_mode(args), false)?;
+    let runner = ProgressRunner::new(total_size, is_plain_mode(args), false, crate::config::is_json_mode())?;
     runner
         .progress()
         .lock()
@@ -853,7 +853,7 @@ async fn handle_serve_download(
         }
     }
 
-    let runner = ProgressRunner::new(total_size, is_plain_mode(args), false)?;
+    let runner = ProgressRunner::new(total_size, is_plain_mode(args), false, crate::config::is_json_mode())?;
     runner
         .progress()
         .lock()

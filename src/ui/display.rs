@@ -24,6 +24,9 @@ impl fmt::Display for ActionType {
 }
 
 pub fn print_dry_run(action: ActionType, path: &str, details: Option<&str>) {
+    if crate::config::is_json_mode() {
+        return;
+    }
     let color = match action {
         ActionType::Remove => Color::Red,
         ActionType::Add => Color::Green,

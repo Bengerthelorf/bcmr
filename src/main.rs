@@ -2,10 +2,11 @@ mod cli;
 mod commands;
 mod config;
 mod core;
+mod output;
 mod ui;
 
 use crate::commands::remote_copy::{handle_remote_copy, is_plain_mode, ProgressRunner};
-use crate::config::{UpdateCheck, CONFIG};
+use crate::config::{is_json_mode, set_json_mode, UpdateCheck, CONFIG};
 use crate::core::error::BcmrError;
 use anyhow::{bail, Result};
 use cli::Commands;
@@ -15,6 +16,9 @@ use std::sync::Arc;
 use ui::utils::format_bytes;
 
 fn prompt_yes_no(message: &str) -> Result<bool> {
+    if is_json_mode() {
+        return Ok(true);
+    }
     print!("{} [y/N] ", message);
     io::stdout().flush()?;
     let mut input = String::new();
@@ -23,6 +27,9 @@ fn prompt_yes_no(message: &str) -> Result<bool> {
 }
 
 fn confirm_overwrite(files: &[commands::copy::FileToOverwrite]) -> Result<bool> {
+    if is_json_mode() {
+        return Ok(true);
+    }
     println!("\nThe following items will be overwritten:");
     for file in files {
         println!(
@@ -35,6 +42,9 @@ fn confirm_overwrite(files: &[commands::copy::FileToOverwrite]) -> Result<bool> 
 }
 
 fn confirm_removal(files: &[commands::remove::FileToRemove]) -> Result<bool> {
+    if is_json_mode() {
+        return Ok(true);
+    }
     let mut total_size = 0u64;
     let mut file_count = 0;
     let mut dir_count = 0;
@@ -116,17 +126,20 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         }
 
         if args.is_dry_run() {
-            println!("DRY RUN MODE: No changes will be made.\n");
-            commands::copy::dry_run_plan(&plan, args)?;
-            println!(
-                "\nSummary: {} sources, {}",
-                sources.len(),
-                format_bytes(plan.total_size as f64)
-            );
+            if !is_json_mode() {
+                println!("DRY RUN MODE: No changes will be made.\n");
+                commands::copy::dry_run_plan(&plan, args)?;
+                println!(
+                    "\nSummary: {} sources, {}",
+                    sources.len(),
+                    format_bytes(plan.total_size as f64)
+                );
+            }
             return Ok(());
         }
 
-        let runner = ProgressRunner::new(plan.total_size, is_plain_mode(args), false)?;
+        let runner =
+            ProgressRunner::new(plan.total_size, is_plain_mode(args), false, is_json_mode())?;
 
         {
             let mut p = runner.progress().lock();
@@ -153,7 +166,7 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
 
         runner.finish_ok()
     } else {
-        let runner = ProgressRunner::new(0, is_plain_mode(args), false)?;
+        let runner = ProgressRunner::new(0, is_plain_mode(args), false, is_json_mode())?;
 
         {
             let mut p = runner.progress().lock();
@@ -231,7 +244,9 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
         commands::r#move::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
 
     if args.is_dry_run() {
-        println!("DRY RUN MODE: No changes will be made.\n");
+        if !is_json_mode() {
+            println!("DRY RUN MODE: No changes will be made.\n");
+        }
 
         for src in sources {
             commands::r#move::move_path(
@@ -248,15 +263,17 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
             .await?;
         }
 
-        println!(
-            "\nSummary: {} sources, {}",
-            sources.len(),
-            format_bytes(total_size as f64)
-        );
+        if !is_json_mode() {
+            println!(
+                "\nSummary: {} sources, {}",
+                sources.len(),
+                format_bytes(total_size as f64)
+            );
+        }
         return Ok(());
     }
 
-    let runner = ProgressRunner::new(total_size, is_plain_mode(args), false)?;
+    let runner = ProgressRunner::new(total_size, is_plain_mode(args), false, is_json_mode())?;
 
     if let Some(first) = sources.first() {
         let display_name = first.file_name().unwrap_or_default().to_string_lossy();
@@ -280,7 +297,9 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
         .await;
 
         if let Err(e) = result {
-            eprintln!("Error moving '{}': {}", src.display(), e);
+            if !is_json_mode() {
+                eprintln!("Error moving '{}': {}", src.display(), e);
+            }
             return runner.finish_err("Move operation encountered errors.".into());
         }
     }
@@ -297,13 +316,16 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         commands::remove::check_removes(paths, args.is_recursive(), args, &excludes).await?;
 
     if args.is_dry_run() {
-        println!("DRY RUN MODE: No changes will be made.\n");
+        if !is_json_mode() {
+            println!("DRY RUN MODE: No changes will be made.\n");
+        }
 
         let total_size: u64 = files_to_remove.iter().map(|f| f.size).sum();
         let file_count = files_to_remove.iter().filter(|f| !f.is_dir).count();
         let dir_count = files_to_remove.iter().filter(|f| f.is_dir).count();
 
-        let runner = ProgressRunner::new(total_size, is_plain_mode(args), true)?;
+        let runner =
+            ProgressRunner::new(total_size, is_plain_mode(args), true, is_json_mode())?;
         let result = commands::remove::remove_paths(
             paths,
             test_mode,
@@ -320,11 +342,13 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
 
         result?;
 
-        print!("\nSummary: {} files", file_count);
-        if dir_count > 0 {
-            print!(", {} directories", dir_count);
+        if !is_json_mode() {
+            print!("\nSummary: {} files", file_count);
+            if dir_count > 0 {
+                print!(", {} directories", dir_count);
+            }
+            println!(", {}", format_bytes(total_size as f64));
         }
-        println!(", {}", format_bytes(total_size as f64));
         return Ok(());
     }
 
@@ -338,7 +362,12 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
     }
 
     let total_size = files_to_remove.iter().map(|f| f.size).sum();
-    let runner = ProgressRunner::new(total_size, is_plain_mode(args), args.is_dry_run())?;
+    let runner = ProgressRunner::new(
+        total_size,
+        is_plain_mode(args),
+        args.is_dry_run(),
+        is_json_mode(),
+    )?;
 
     runner.progress().lock().set_operation_type("Removing");
 
@@ -363,6 +392,12 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
     .await?;
 
     runner.finish_ok()
+}
+
+async fn handle_check_command(args: &Commands) -> Result<output::CheckResult> {
+    let excludes = args.compile_excludes()?;
+    let (sources, dest) = args.get_sources_and_dest().map_err(anyhow::Error::msg)?;
+    Ok(commands::check::run(sources, dest, args.is_recursive(), &excludes).await?)
 }
 
 fn handle_init_command(args: &Commands) -> Result<()> {
@@ -503,12 +538,44 @@ fn background_update_check(command: &Commands) -> Option<mpsc::Receiver<Option<S
 async fn main() -> Result<()> {
     let cli = cli::parse_args();
 
+    set_json_mode(cli.json);
+
     let update_rx = background_update_check(&cli.command);
 
     match &cli.command {
         Commands::Copy { .. } => handle_copy_command(&cli.command).await?,
         Commands::Move { .. } => handle_move_command(&cli.command).await?,
         Commands::Remove { .. } => handle_remove_command(&cli.command).await?,
+        Commands::Check { .. } => {
+            let result = handle_check_command(&cli.command).await;
+            match result {
+                Ok(r) => {
+                    if is_json_mode() {
+                        let out = output::CommandOutput::Check(r);
+                        println!("{}", out.to_json());
+                        let code = out.exit_code();
+                        if code != 0 {
+                            std::process::exit(code);
+                        }
+                    } else {
+                        let in_sync = r.in_sync;
+                        print_check_human(&r);
+                        if !in_sync {
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                Err(e) => {
+                    if is_json_mode() {
+                        let out = output::error_output("check", &e);
+                        println!("{}", out.to_json());
+                        std::process::exit(2);
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
         Commands::Init { .. } => handle_init_command(&cli.command)?,
         Commands::Update => commands::update::run()?,
         Commands::Serve => {
@@ -530,8 +597,6 @@ async fn main() -> Result<()> {
             let base = String::from_utf8(buf).expect("clap generated invalid UTF-8");
 
             if *shell == clap_complete::Shell::PowerShell {
-                // Inject remote path check into the clap-generated script block
-                // so there's only ONE Register-ArgumentCompleter
                 let injected = base.replacen(
                     "param($wordToComplete, $commandAst, $cursorPosition)\n",
                     &format!(
@@ -548,6 +613,66 @@ async fn main() -> Result<()> {
         }
     }
 
+    if !is_json_mode() {
+        show_update_hint(update_rx);
+    }
+
+    Ok(())
+}
+
+fn print_check_human(r: &output::CheckResult) {
+    use crossterm::style::{Color, ResetColor, SetForegroundColor};
+
+    if r.in_sync {
+        println!(
+            "{}In sync.{}",
+            SetForegroundColor(Color::Green),
+            ResetColor
+        );
+        return;
+    }
+
+    for d in &r.added {
+        println!(
+            "{}  + {}{}{}",
+            SetForegroundColor(Color::Green),
+            d.path.display(),
+            if d.is_dir { " (dir)" } else { "" },
+            ResetColor
+        );
+    }
+    for d in &r.modified {
+        let detail = match (d.src_size, d.dst_size) {
+            (Some(s), Some(d)) => {
+                format!(" ({} -> {})", format_bytes(s as f64), format_bytes(d as f64))
+            }
+            _ => String::new(),
+        };
+        println!(
+            "{}  ~ {}{}{}",
+            SetForegroundColor(Color::Yellow),
+            d.path.display(),
+            detail,
+            ResetColor
+        );
+    }
+    for d in &r.missing {
+        println!(
+            "{}  - {}{}{}",
+            SetForegroundColor(Color::Red),
+            d.path.display(),
+            if d.is_dir { " (dir)" } else { "" },
+            ResetColor
+        );
+    }
+
+    println!(
+        "\nSummary: {} added, {} modified, {} missing",
+        r.summary.added, r.summary.modified, r.summary.missing
+    );
+}
+
+fn show_update_hint(update_rx: Option<mpsc::Receiver<Option<String>>>) {
     if let Some(rx) = update_rx {
         if let Ok(Some(version)) = rx.try_recv() {
             eprintln!(
@@ -557,6 +682,4 @@ async fn main() -> Result<()> {
             );
         }
     }
-
-    Ok(())
 }

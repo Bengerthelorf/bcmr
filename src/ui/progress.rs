@@ -1,4 +1,5 @@
 use crate::ui::inline::InlineProgress;
+use crate::ui::json::JsonProgress;
 use crate::ui::tui::TuiProgress;
 use std::io;
 
@@ -45,8 +46,11 @@ pub fn create_renderer(
     total_bytes: u64,
     plain: bool,
     silent: bool,
+    json: bool,
 ) -> io::Result<Box<dyn ProgressRenderer>> {
-    if silent {
+    if json {
+        Ok(Box::new(JsonProgress::new(total_bytes)))
+    } else if silent {
         Ok(Box::new(SilentProgress))
     } else if plain {
         Ok(Box::new(InlineProgress::new(total_bytes)?))
