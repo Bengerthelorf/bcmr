@@ -1,5 +1,5 @@
 use crate::core::error::BcmrError;
-use crate::core::remote::{self, parse_remote_path};
+use crate::core::remote::{self, parse_remote_path, RemotePath};
 use crate::core::serve_client::ServeClient;
 use crate::core::traversal;
 use crate::output::{CheckResult, CheckSummary, FileDiff, Status};
@@ -7,7 +7,6 @@ use crate::output::{CheckResult, CheckSummary, FileDiff, Status};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// A single file/directory entry with metadata, used for diff comparison.
 struct Entry {
     rel_path: String,
     size: u64,
@@ -33,6 +32,23 @@ pub async fn run(
         ));
     }
 
+    // Determine the remote host (if any) and open ONE connection for all operations
+    let remote_host = if let Some(ref rd) = remote_dest {
+        Some(rd.ssh_target())
+    } else if any_remote_source {
+        let src_str = sources[0].to_string_lossy();
+        parse_remote_path(&src_str).map(|rp| rp.ssh_target())
+    } else {
+        None
+    };
+
+    let mut serve_client = if let Some(ref host) = remote_host {
+        emit_connecting(host);
+        ServeClient::connect(host).await.ok()
+    } else {
+        None
+    };
+
     let mut all_added = Vec::new();
     let mut all_modified = Vec::new();
     let mut all_missing = Vec::new();
@@ -52,6 +68,7 @@ pub async fn run(
             excludes,
             is_remote_src,
             remote_dest.is_some(),
+            &mut serve_client,
         )
         .await?;
 
@@ -61,10 +78,13 @@ pub async fn run(
         all_missing.extend(missing);
     }
 
+    if let Some(client) = serve_client {
+        let _ = client.close().await;
+    }
+
     Ok(build_result(all_added, all_modified, all_missing))
 }
 
-/// Collect entries from both source and destination, handling local/remote dispatch.
 async fn collect_both(
     src: &Path,
     dest: &Path,
@@ -72,6 +92,7 @@ async fn collect_both(
     excludes: &[regex::Regex],
     is_remote_src: bool,
     is_remote_dest: bool,
+    serve: &mut Option<ServeClient>,
 ) -> Result<(Vec<Entry>, Vec<Entry>), BcmrError> {
     let src_str = src.to_string_lossy();
     let dest_str = dest.to_string_lossy();
@@ -86,10 +107,10 @@ async fn collect_both(
             .to_string()
     };
 
+    // Stat source — use serve if available, else SSH
     let src_is_dir = if is_remote_src {
         let rp = parse_remote_path(&src_str).unwrap();
-        let info = remote::remote_stat(&rp).await?;
-        info.is_dir
+        remote_is_dir(&rp, serve).await?
     } else {
         src.is_dir()
     };
@@ -106,12 +127,14 @@ async fn collect_both(
         let rp = parse_remote_path(&src_str).unwrap();
         if src_is_dir {
             emit_scanning(&rp.display());
-            collect_remote_entries(&rp).await?
+            let entries = collect_remote_entries(&rp, serve).await?;
+            emit_scanning_done(entries.len());
+            entries
         } else {
-            let info = remote::remote_stat(&rp).await?;
+            let size = remote_size(&rp, serve).await?;
             vec![Entry {
                 rel_path: src_name.clone(),
-                size: info.size,
+                size,
                 is_dir: false,
             }]
         }
@@ -135,7 +158,11 @@ async fn collect_both(
             rdest
         };
         emit_scanning(&rdest_sub.display());
-        collect_remote_entries(&rdest_sub).await.unwrap_or_default()
+        let entries = collect_remote_entries(&rdest_sub, serve)
+            .await
+            .unwrap_or_default();
+        emit_scanning_done(entries.len());
+        entries
     } else {
         let dest_is_dir = dest.exists() && dest.is_dir();
         let resolved_dest = if src_is_dir && dest_is_dir {
@@ -165,23 +192,62 @@ async fn collect_both(
     Ok((src_entries, dst_entries))
 }
 
-fn emit_scanning(target: &str) {
-    if crate::config::is_json_mode() {
-        let line = serde_json::json!({"type": "scanning", "target": target});
-        println!("{}", line);
-    } else {
-        eprint!("Scanning {}...", target);
+// ---------------------------------------------------------------------------
+// Remote helpers — single connection for stat + list
+// ---------------------------------------------------------------------------
+
+async fn remote_is_dir(
+    rp: &RemotePath,
+    serve: &mut Option<ServeClient>,
+) -> Result<bool, BcmrError> {
+    if let Some(ref mut client) = serve {
+        let (_, _, is_dir) = client.stat(&rp.path).await?;
+        return Ok(is_dir);
     }
+    let info = remote::remote_stat(rp).await?;
+    Ok(info.is_dir)
 }
 
-fn emit_scanning_done(count: usize) {
-    if crate::config::is_json_mode() {
-        return; // JSON result will contain the data
+async fn remote_size(rp: &RemotePath, serve: &mut Option<ServeClient>) -> Result<u64, BcmrError> {
+    if let Some(ref mut client) = serve {
+        let (size, _, _) = client.stat(&rp.path).await?;
+        return Ok(size);
     }
-    eprintln!(" {} entries", count);
+    let info = remote::remote_stat(rp).await?;
+    Ok(info.size)
 }
 
-/// Collect entries from a local directory.
+async fn collect_remote_entries(
+    rp: &RemotePath,
+    serve: &mut Option<ServeClient>,
+) -> Result<Vec<Entry>, BcmrError> {
+    if let Some(ref mut client) = serve {
+        let entries = client.list(&rp.path).await?;
+        return Ok(entries
+            .into_iter()
+            .map(|e| Entry {
+                rel_path: e.path,
+                size: e.size,
+                is_dir: e.is_dir,
+            })
+            .collect());
+    }
+    // Fallback: SSH find
+    let files = remote::remote_list_files(rp).await?;
+    Ok(files
+        .into_iter()
+        .map(|(rel_path, size, is_dir)| Entry {
+            rel_path,
+            size,
+            is_dir,
+        })
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
+// Local
+// ---------------------------------------------------------------------------
+
 fn collect_local_entries(root: &Path, excludes: &[regex::Regex]) -> Result<Vec<Entry>, BcmrError> {
     let mut entries = Vec::new();
     for entry in traversal::walk(root, true, false, 1, excludes) {
@@ -198,47 +264,37 @@ fn collect_local_entries(root: &Path, excludes: &[regex::Regex]) -> Result<Vec<E
     Ok(entries)
 }
 
-/// Collect entries from a remote directory.
-/// Tries bcmr serve protocol first (fast binary listing), falls back to SSH find.
-async fn collect_remote_entries(remote: &remote::RemotePath) -> Result<Vec<Entry>, BcmrError> {
-    // Try serve protocol first
-    if let Ok(entries) = collect_via_serve(remote).await {
-        emit_scanning_done(entries.len());
-        return Ok(entries);
+// ---------------------------------------------------------------------------
+// Output helpers
+// ---------------------------------------------------------------------------
+
+fn emit_connecting(host: &str) {
+    if crate::config::is_json_mode() {
+        return;
     }
-
-    // Fallback: SSH find
-    let files = remote::remote_list_files(remote).await?;
-    let entries: Vec<Entry> = files
-        .into_iter()
-        .map(|(rel_path, size, is_dir)| Entry {
-            rel_path,
-            size,
-            is_dir,
-        })
-        .collect();
-    emit_scanning_done(entries.len());
-    Ok(entries)
+    eprint!("Connecting to {}... ", host);
 }
 
-/// Collect entries using the bcmr serve binary protocol (much faster than SSH find).
-async fn collect_via_serve(remote: &remote::RemotePath) -> Result<Vec<Entry>, BcmrError> {
-    let ssh_target = remote.ssh_target();
-    let mut client = ServeClient::connect(&ssh_target).await?;
-    let entries = client.list(&remote.path).await?;
-    client.close().await?;
-
-    Ok(entries
-        .into_iter()
-        .map(|e| Entry {
-            rel_path: e.path,
-            size: e.size,
-            is_dir: e.is_dir,
-        })
-        .collect())
+fn emit_scanning(target: &str) {
+    if crate::config::is_json_mode() {
+        let line = serde_json::json!({"type": "scanning", "target": target});
+        println!("{}", line);
+    } else {
+        eprint!("\rScanning {}...", target);
+    }
 }
 
-/// Diff two entry lists. Returns (added, modified, missing).
+fn emit_scanning_done(count: usize) {
+    if crate::config::is_json_mode() {
+        return;
+    }
+    eprintln!(" {} entries", count);
+}
+
+// ---------------------------------------------------------------------------
+// Diff
+// ---------------------------------------------------------------------------
+
 fn diff_entries(src: Vec<Entry>, dst: Vec<Entry>) -> (Vec<FileDiff>, Vec<FileDiff>, Vec<FileDiff>) {
     let dst_map: HashMap<&str, &Entry> = dst.iter().map(|e| (e.rel_path.as_str(), e)).collect();
     let src_map: HashMap<&str, &Entry> = src.iter().map(|e| (e.rel_path.as_str(), e)).collect();
