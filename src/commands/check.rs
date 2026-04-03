@@ -3,7 +3,15 @@ use crate::core::remote::{self, parse_remote_path};
 use crate::core::traversal;
 use crate::output::{CheckResult, CheckSummary, FileDiff, Status};
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+/// A single file/directory entry with metadata, used for diff comparison.
+struct Entry {
+    rel_path: String,
+    size: u64,
+    is_dir: bool,
+}
 
 /// Compare source(s) against a destination and return a structured diff.
 pub async fn run(
@@ -24,413 +32,219 @@ pub async fn run(
         ));
     }
 
-    if remote_dest.is_some() {
-        // local source → remote destination
-        return check_local_vs_remote(sources, dest, recursive, excludes).await;
+    let mut all_added = Vec::new();
+    let mut all_modified = Vec::new();
+    let mut all_missing = Vec::new();
+
+    for src in sources {
+        let src_str = src.to_string_lossy();
+        let is_remote_src = parse_remote_path(&src_str).is_some();
+
+        if !is_remote_src && !src.exists() {
+            return Err(BcmrError::SourceNotFound(src.clone()));
+        }
+
+        // Determine the resolved destination subdirectory
+        let (src_entries, dst_entries) = collect_both(
+            src,
+            dest,
+            recursive,
+            excludes,
+            is_remote_src,
+            remote_dest.is_some(),
+        )
+        .await?;
+
+        let (added, modified, missing) = diff_entries(src_entries, dst_entries);
+        all_added.extend(added);
+        all_modified.extend(modified);
+        all_missing.extend(missing);
     }
 
-    if any_remote_source {
-        // remote source → local destination
-        return check_remote_vs_local(sources, dest, recursive, excludes).await;
-    }
-
-    // local source → local destination
-    let sources = sources.to_vec();
-    let dest = dest.to_path_buf();
-    let excludes = excludes.to_vec();
-    tokio::task::spawn_blocking(move || check_local(&sources, &dest, recursive, &excludes)).await?
+    Ok(build_result(all_added, all_modified, all_missing))
 }
 
-// ---------------------------------------------------------------------------
-// Local vs Local
-// ---------------------------------------------------------------------------
-
-fn check_local(
-    sources: &[PathBuf],
+/// Collect entries from both source and destination, handling local/remote dispatch.
+async fn collect_both(
+    src: &Path,
     dest: &Path,
     recursive: bool,
     excludes: &[regex::Regex],
-) -> Result<CheckResult, BcmrError> {
+    is_remote_src: bool,
+    is_remote_dest: bool,
+) -> Result<(Vec<Entry>, Vec<Entry>), BcmrError> {
+    let src_str = src.to_string_lossy();
+    let dest_str = dest.to_string_lossy();
+
+    // Resolve source name for destination subdirectory
+    let src_name = if is_remote_src {
+        let rp = parse_remote_path(&src_str).unwrap();
+        rp.path.rsplit('/').next().unwrap_or(&rp.path).to_string()
+    } else {
+        src.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
+    };
+
+    // Check if source is a directory
+    let src_is_dir = if is_remote_src {
+        let rp = parse_remote_path(&src_str).unwrap();
+        let info = remote::remote_stat(&rp).await?;
+        info.is_dir
+    } else {
+        src.is_dir()
+    };
+
+    if src_is_dir && !recursive {
+        return Err(BcmrError::InvalidInput(format!(
+            "Source '{}' is a directory. Use -r flag for recursive check.",
+            src.display()
+        )));
+    }
+
+    // Collect source entries
+    let src_entries = if is_remote_src {
+        let rp = parse_remote_path(&src_str).unwrap();
+        if src_is_dir {
+            collect_remote_entries(&rp).await?
+        } else {
+            let info = remote::remote_stat(&rp).await?;
+            vec![Entry {
+                rel_path: src_name.clone(),
+                size: info.size,
+                is_dir: false,
+            }]
+        }
+    } else if src_is_dir {
+        collect_local_entries(src, excludes)?
+    } else {
+        let size = src.metadata()?.len();
+        vec![Entry {
+            rel_path: src_name.clone(),
+            size,
+            is_dir: false,
+        }]
+    };
+
+    // Resolve destination path (append source dir name if dest is a directory)
+    let dst_entries = if is_remote_dest {
+        let rdest = parse_remote_path(&dest_str).unwrap();
+        let rdest_sub = if src_is_dir {
+            rdest.join(&src_name)
+        } else {
+            rdest
+        };
+        collect_remote_entries(&rdest_sub).await.unwrap_or_default()
+    } else {
+        let dest_is_dir = dest.exists() && dest.is_dir();
+        let resolved_dest = if src_is_dir && dest_is_dir {
+            dest.join(&src_name)
+        } else {
+            dest.to_path_buf()
+        };
+        if resolved_dest.exists() && resolved_dest.is_dir() {
+            collect_local_entries(&resolved_dest, excludes).unwrap_or_default()
+        } else if resolved_dest.exists() {
+            let size = resolved_dest.metadata()?.len();
+            let fname = resolved_dest
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            vec![Entry {
+                rel_path: fname,
+                size,
+                is_dir: false,
+            }]
+        } else {
+            Vec::new()
+        }
+    };
+
+    Ok((src_entries, dst_entries))
+}
+
+/// Collect entries from a local directory.
+fn collect_local_entries(root: &Path, excludes: &[regex::Regex]) -> Result<Vec<Entry>, BcmrError> {
+    let mut entries = Vec::new();
+    for entry in traversal::walk(root, true, false, 1, excludes) {
+        let entry = entry?;
+        let path = entry.path();
+        let relative = path.strip_prefix(root)?;
+        let meta = entry.metadata()?;
+        entries.push(Entry {
+            rel_path: relative.to_string_lossy().to_string(),
+            size: if meta.is_dir() { 0 } else { meta.len() },
+            is_dir: meta.is_dir(),
+        });
+    }
+    Ok(entries)
+}
+
+/// Collect entries from a remote directory via SSH.
+async fn collect_remote_entries(remote: &remote::RemotePath) -> Result<Vec<Entry>, BcmrError> {
+    let files = remote::remote_list_files(remote).await?;
+    Ok(files
+        .into_iter()
+        .map(|(rel_path, size, is_dir)| Entry {
+            rel_path,
+            size,
+            is_dir,
+        })
+        .collect())
+}
+
+/// Diff two entry lists. Returns (added, modified, missing).
+fn diff_entries(src: Vec<Entry>, dst: Vec<Entry>) -> (Vec<FileDiff>, Vec<FileDiff>, Vec<FileDiff>) {
+    let dst_map: HashMap<&str, &Entry> = dst.iter().map(|e| (e.rel_path.as_str(), e)).collect();
+    let src_map: HashMap<&str, &Entry> = src.iter().map(|e| (e.rel_path.as_str(), e)).collect();
+
     let mut added = Vec::new();
     let mut modified = Vec::new();
     let mut missing = Vec::new();
 
-    let dest_is_dir = dest.exists() && dest.is_dir();
-
-    for src in sources {
-        if traversal::is_excluded(src, excludes) {
-            continue;
-        }
-
-        if src.is_file() {
-            let dst_path =
-                if dest_is_dir {
-                    dest.join(src.file_name().ok_or_else(|| {
-                        BcmrError::InvalidInput("Invalid source file name".into())
-                    })?)
-                } else {
-                    dest.to_path_buf()
-                };
-
-            compare_local_file(src, &dst_path, src, &mut added, &mut modified)?;
-        } else if src.is_dir() {
-            if !recursive {
-                return Err(BcmrError::InvalidInput(format!(
-                    "Source '{}' is a directory. Use -r flag for recursive check.",
-                    src.display()
-                )));
-            }
-
-            let src_name = src
-                .file_name()
-                .ok_or_else(|| BcmrError::InvalidInput("Invalid source directory name".into()))?;
-
-            let new_dst = if dest_is_dir {
-                dest.join(src_name)
-            } else {
-                dest.to_path_buf()
-            };
-
-            for entry in traversal::walk(src, true, false, 1, excludes) {
-                let entry = entry?;
-                let path = entry.path();
-                let relative = path.strip_prefix(src)?;
-                let target = new_dst.join(relative);
-
-                if path.is_dir() {
-                    if !target.exists() {
-                        added.push(FileDiff {
-                            path: relative.to_path_buf(),
-                            size: None,
-                            src_size: None,
-                            dst_size: None,
-                            is_dir: true,
-                        });
-                    }
-                } else if path.is_file() {
-                    compare_local_file(path, &target, src, &mut added, &mut modified)?;
-                }
-            }
-
-            // Walk destination: find files missing from source
-            if new_dst.exists() {
-                for entry in traversal::walk(&new_dst, true, false, 1, excludes) {
-                    let entry = entry?;
-                    let path = entry.path();
-                    let relative = path.strip_prefix(&new_dst)?;
-                    let src_counterpart = src.join(relative);
-
-                    if !src_counterpart.exists() {
-                        let meta = entry.metadata().ok();
-                        let size = meta.as_ref().map(|m| m.len());
-                        missing.push(FileDiff {
-                            path: relative.to_path_buf(),
-                            size,
-                            src_size: None,
-                            dst_size: size,
-                            is_dir: path.is_dir(),
-                        });
-                    }
-                }
-            }
-        } else {
-            return Err(BcmrError::SourceNotFound(src.clone()));
-        }
-    }
-
-    Ok(build_result(added, modified, missing))
-}
-
-fn compare_local_file(
-    src_path: &Path,
-    dst_path: &Path,
-    strip_base: &Path,
-    added: &mut Vec<FileDiff>,
-    modified: &mut Vec<FileDiff>,
-) -> Result<(), BcmrError> {
-    let relative = src_path.strip_prefix(strip_base).unwrap_or(src_path);
-    let src_meta = src_path.metadata()?;
-    let src_size = src_meta.len();
-
-    if !dst_path.exists() {
-        added.push(FileDiff {
-            path: relative.to_path_buf(),
-            size: Some(src_size),
-            src_size: Some(src_size),
-            dst_size: None,
-            is_dir: false,
-        });
-        return Ok(());
-    }
-
-    let dst_meta = dst_path.metadata()?;
-    let dst_size = dst_meta.len();
-
-    if src_size != dst_size {
-        modified.push(FileDiff {
-            path: relative.to_path_buf(),
-            size: None,
-            src_size: Some(src_size),
-            dst_size: Some(dst_size),
-            is_dir: false,
-        });
-        return Ok(());
-    }
-
-    // Same size — compare mtime
-    let src_mtime = src_meta.modified()?;
-    let dst_mtime = dst_meta.modified()?;
-    if src_mtime != dst_mtime {
-        modified.push(FileDiff {
-            path: relative.to_path_buf(),
-            size: None,
-            src_size: Some(src_size),
-            dst_size: Some(dst_size),
-            is_dir: false,
-        });
-    }
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Local source → Remote destination
-// ---------------------------------------------------------------------------
-
-async fn check_local_vs_remote(
-    sources: &[PathBuf],
-    dest: &Path,
-    recursive: bool,
-    excludes: &[regex::Regex],
-) -> Result<CheckResult, BcmrError> {
-    let dest_str = dest.to_string_lossy();
-    let rdest = parse_remote_path(&dest_str)
-        .ok_or_else(|| BcmrError::InvalidInput("Invalid remote path".into()))?;
-
-    let mut added = Vec::new();
-    let mut modified = Vec::new();
-
-    for src in sources {
-        if traversal::is_excluded(src, excludes) {
-            continue;
-        }
-
-        if src.is_file() {
-            let fname = src
-                .file_name()
-                .ok_or_else(|| BcmrError::InvalidInput("Invalid source file name".into()))?
-                .to_string_lossy();
-            let remote_path = rdest.join(&fname);
-
-            match remote::remote_stat(&remote_path).await {
-                Ok(info) => {
-                    let src_size = src.metadata()?.len();
-                    if src_size != info.size {
-                        modified.push(FileDiff {
-                            path: PathBuf::from(fname.as_ref()),
-                            size: None,
-                            src_size: Some(src_size),
-                            dst_size: Some(info.size),
-                            is_dir: false,
-                        });
-                    }
-                }
-                Err(_) => {
-                    let src_size = src.metadata()?.len();
-                    added.push(FileDiff {
-                        path: PathBuf::from(fname.as_ref()),
-                        size: Some(src_size),
-                        src_size: Some(src_size),
-                        dst_size: None,
-                        is_dir: false,
-                    });
-                }
-            }
-        } else if src.is_dir() && recursive {
-            let src_name = src
-                .file_name()
-                .ok_or_else(|| BcmrError::InvalidInput("Invalid source directory name".into()))?;
-            let remote_dir = rdest.join(&src_name.to_string_lossy());
-
-            // Get remote file listing
-            let remote_files = remote::remote_list_files(&remote_dir)
-                .await
-                .unwrap_or_default();
-
-            let remote_map: std::collections::HashMap<String, (u64, bool)> = remote_files
-                .into_iter()
-                .map(|(path, size, is_dir)| (path, (size, is_dir)))
-                .collect();
-
-            // Walk local source
-            for entry in traversal::walk(src, true, false, 1, excludes) {
-                let entry = entry?;
-                let path = entry.path();
-                let relative = path.strip_prefix(src)?;
-                let rel_str = relative.to_string_lossy().to_string();
-
-                if path.is_dir() {
-                    if !remote_map.contains_key(&rel_str) {
-                        added.push(FileDiff {
-                            path: relative.to_path_buf(),
-                            size: None,
-                            src_size: None,
-                            dst_size: None,
-                            is_dir: true,
-                        });
-                    }
-                } else if path.is_file() {
-                    let src_size = entry.metadata()?.len();
-                    match remote_map.get(&rel_str) {
-                        Some(&(dst_size, _)) => {
-                            if src_size != dst_size {
-                                modified.push(FileDiff {
-                                    path: relative.to_path_buf(),
-                                    size: None,
-                                    src_size: Some(src_size),
-                                    dst_size: Some(dst_size),
-                                    is_dir: false,
-                                });
-                            }
-                        }
-                        None => {
-                            added.push(FileDiff {
-                                path: relative.to_path_buf(),
-                                size: Some(src_size),
-                                src_size: Some(src_size),
-                                dst_size: None,
-                                is_dir: false,
-                            });
-                        }
-                    }
-                }
-            }
-        } else if src.is_dir() {
-            return Err(BcmrError::InvalidInput(format!(
-                "Source '{}' is a directory. Use -r flag for recursive check.",
-                src.display()
-            )));
-        } else {
-            return Err(BcmrError::SourceNotFound(src.clone()));
-        }
-    }
-
-    Ok(build_result(added, modified, Vec::new()))
-}
-
-// ---------------------------------------------------------------------------
-// Remote source → Local destination
-// ---------------------------------------------------------------------------
-
-async fn check_remote_vs_local(
-    sources: &[PathBuf],
-    dest: &Path,
-    recursive: bool,
-    excludes: &[regex::Regex],
-) -> Result<CheckResult, BcmrError> {
-    let mut added = Vec::new();
-    let mut modified = Vec::new();
-
-    for src in sources {
-        let src_str = src.to_string_lossy();
-        let rsrc = match parse_remote_path(&src_str) {
-            Some(r) => r,
-            None => continue,
-        };
-
-        let info = remote::remote_stat(&rsrc).await?;
-
-        if !info.is_dir {
-            // Single remote file
-            let fname = rsrc.path.rsplit('/').next().unwrap_or(&rsrc.path);
-            let local_path = if dest.is_dir() {
-                dest.join(fname)
-            } else {
-                dest.to_path_buf()
-            };
-
-            if !local_path.exists() {
+    // Files in source but not in destination → added
+    // Files in both but different size → modified
+    for s in &src {
+        match dst_map.get(s.rel_path.as_str()) {
+            None => {
                 added.push(FileDiff {
-                    path: PathBuf::from(fname),
-                    size: Some(info.size),
-                    src_size: Some(info.size),
+                    path: PathBuf::from(&s.rel_path),
+                    size: if s.is_dir { None } else { Some(s.size) },
+                    src_size: if s.is_dir { None } else { Some(s.size) },
                     dst_size: None,
+                    is_dir: s.is_dir,
+                });
+            }
+            Some(d) if !s.is_dir && s.size != d.size => {
+                modified.push(FileDiff {
+                    path: PathBuf::from(&s.rel_path),
+                    size: None,
+                    src_size: Some(s.size),
+                    dst_size: Some(d.size),
                     is_dir: false,
                 });
-            } else {
-                let local_size = local_path.metadata()?.len();
-                if info.size != local_size {
-                    modified.push(FileDiff {
-                        path: PathBuf::from(fname),
-                        size: None,
-                        src_size: Some(info.size),
-                        dst_size: Some(local_size),
-                        is_dir: false,
-                    });
-                }
             }
-        } else if recursive {
-            let dir_name = rsrc.path.rsplit('/').next().unwrap_or(&rsrc.path);
-            let local_dir = if dest.is_dir() {
-                dest.join(dir_name)
-            } else {
-                dest.to_path_buf()
-            };
-
-            let remote_files = remote::remote_list_files(&rsrc).await?;
-
-            for (rel_path, size, is_dir) in &remote_files {
-                if traversal::is_excluded(Path::new(rel_path), excludes) {
-                    continue;
-                }
-
-                let local_path = local_dir.join(rel_path);
-
-                if *is_dir {
-                    if !local_path.exists() {
-                        added.push(FileDiff {
-                            path: PathBuf::from(rel_path),
-                            size: None,
-                            src_size: None,
-                            dst_size: None,
-                            is_dir: true,
-                        });
-                    }
-                } else if !local_path.exists() {
-                    added.push(FileDiff {
-                        path: PathBuf::from(rel_path),
-                        size: Some(*size),
-                        src_size: Some(*size),
-                        dst_size: None,
-                        is_dir: false,
-                    });
-                } else {
-                    let local_size = local_path.metadata()?.len();
-                    if *size != local_size {
-                        modified.push(FileDiff {
-                            path: PathBuf::from(rel_path),
-                            size: None,
-                            src_size: Some(*size),
-                            dst_size: Some(local_size),
-                            is_dir: false,
-                        });
-                    }
-                }
-            }
-        } else {
-            return Err(BcmrError::InvalidInput(format!(
-                "Remote source '{}' is a directory. Use -r flag for recursive check.",
-                rsrc
-            )));
+            _ => {} // in sync
         }
     }
 
-    Ok(build_result(added, modified, Vec::new()))
-}
+    // Files in destination but not in source → missing
+    for d in &dst {
+        if !src_map.contains_key(d.rel_path.as_str()) {
+            missing.push(FileDiff {
+                path: PathBuf::from(&d.rel_path),
+                size: if d.is_dir { None } else { Some(d.size) },
+                src_size: None,
+                dst_size: if d.is_dir { None } else { Some(d.size) },
+                is_dir: d.is_dir,
+            });
+        }
+    }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+    (added, modified, missing)
+}
 
 fn build_result(
     added: Vec<FileDiff>,
