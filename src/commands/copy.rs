@@ -910,6 +910,7 @@ where
                     sync,
                     preserve,
                     verify,
+                    inline_src_hash: None,
                 };
                 return ctx.run(fs::File::open(&write_target).await?).await;
             }
