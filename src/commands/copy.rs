@@ -737,11 +737,7 @@ pub(crate) async fn preserve_attributes(
 }
 
 struct CopyFileOptions {
-    preserve: bool,
-    verify: bool,
-    resume: bool,
-    strict: bool,
-    append: bool,
+    transfer: crate::core::remote::TransferOptions,
     sync: bool,
     reflink_arg: Option<String>,
     sparse_arg: Option<String>,
@@ -751,11 +747,13 @@ struct CopyFileOptions {
 impl CopyFileOptions {
     fn from_cli(cli: &Commands, test_mode: TestMode) -> Self {
         Self {
-            preserve: cli.is_preserve(),
-            verify: cli.is_verify(),
-            resume: cli.is_resume(),
-            strict: cli.is_strict(),
-            append: cli.is_append(),
+            transfer: crate::core::remote::TransferOptions {
+                preserve: cli.is_preserve(),
+                verify: cli.is_verify(),
+                resume: cli.is_resume(),
+                strict: cli.is_strict(),
+                append: cli.is_append(),
+            },
             sync: cli.is_sync(),
             reflink_arg: cli.get_reflink_mode(),
             sparse_arg: cli.get_sparse_mode(),
@@ -794,14 +792,11 @@ struct FinalizeCtx<'a> {
     sync: bool,
     preserve: bool,
     verify: bool,
+    inline_src_hash: Option<blake3::Hash>,
 }
 
 impl<'a> FinalizeCtx<'a> {
-    async fn run(
-        self,
-        dst_file: fs::File,
-        inline_hash: Option<blake3::Hash>,
-    ) -> std::result::Result<(), BcmrError> {
+    async fn run(self, dst_file: fs::File) -> std::result::Result<(), BcmrError> {
         super::copy_strategies::finalize(
             dst_file,
             self.write_target,
@@ -812,7 +807,7 @@ impl<'a> FinalizeCtx<'a> {
             self.sync,
             self.preserve,
             self.verify,
-            inline_hash,
+            self.inline_src_hash,
         )
         .await
     }
@@ -828,16 +823,19 @@ where
     F: Fn(u64),
 {
     let CopyFileOptions {
-        preserve,
-        verify,
-        resume,
-        strict,
-        append,
+        transfer,
         sync,
         ref reflink_arg,
         ref sparse_arg,
         test_mode,
     } = opts;
+    let crate::core::remote::TransferOptions {
+        preserve,
+        verify,
+        resume,
+        strict,
+        append,
+    } = transfer;
 
     let file_size = src.metadata()?.len();
     let file_name = src
@@ -892,8 +890,9 @@ where
             sync,
             preserve,
             verify,
+            inline_src_hash: None,
         };
-        return ctx.run(fs::File::open(&write_target).await?, None).await;
+        return ctx.run(fs::File::open(&write_target).await?).await;
     }
 
     // Fast path 2: copy_file_range (Linux)
@@ -912,7 +911,7 @@ where
                     preserve,
                     verify,
                 };
-                return ctx.run(fs::File::open(&write_target).await?, None).await;
+                return ctx.run(fs::File::open(&write_target).await?).await;
             }
             Some(Err(e)) => return Err(e),
             None => {}
@@ -1034,8 +1033,9 @@ where
         sync,
         preserve,
         verify,
+        inline_src_hash,
     };
-    ctx.run(dst_file, inline_src_hash).await
+    ctx.run(dst_file).await
 }
 
 enum ScanMessage {

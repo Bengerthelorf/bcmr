@@ -1,91 +1,29 @@
 use crate::cli::Commands;
-use crate::commands;
 use crate::config::CONFIG;
 use crate::core::error::BcmrError;
 use crate::core::remote::{self, parse_remote_path, RemotePath};
 use crate::core::serve_client::ServeClient;
-use crate::ui::progress::{self, ProgressRenderer};
+use crate::ui::progress::ProgressRenderer;
+use crate::ui::runner::ProgressRunner;
 use crate::ui::utils::format_bytes;
 use anyhow::{bail, Result};
 use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
-use tokio::signal::ctrl_c;
-use tokio::time::Duration;
+
+fn transfer_options_from_cli(cli: &Commands) -> remote::TransferOptions {
+    remote::TransferOptions {
+        preserve: cli.is_preserve(),
+        verify: cli.is_verify(),
+        resume: cli.is_resume(),
+        strict: cli.is_strict(),
+        append: cli.is_append(),
+    }
+}
 
 pub fn is_plain_mode(args: &Commands) -> bool {
     args.is_tui_mode() || CONFIG.progress.style.eq_ignore_ascii_case("plain")
-}
-
-pub struct ProgressRunner {
-    progress: Arc<Mutex<Box<dyn ProgressRenderer>>>,
-    ticker_handle: tokio::task::JoinHandle<()>,
-}
-
-impl ProgressRunner {
-    pub fn new(total_size: u64, plain: bool, silent: bool, json: bool) -> std::io::Result<Self> {
-        let renderer = progress::create_renderer(total_size, plain, silent, json)?;
-        let progress = Arc::new(Mutex::new(renderer));
-
-        let ticker = Arc::clone(&progress);
-        let ticker_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(100));
-            loop {
-                interval.tick().await;
-                ticker.lock().tick();
-            }
-        });
-
-        let signal = Arc::clone(&progress);
-        tokio::spawn(async move {
-            if let Ok(()) = ctrl_c().await {
-                commands::copy::cleanup_partial_files();
-                let _ = signal.lock().finish();
-                std::process::exit(130);
-            }
-        });
-
-        Ok(Self {
-            progress,
-            ticker_handle,
-        })
-    }
-
-    pub fn progress(&self) -> &Arc<Mutex<Box<dyn ProgressRenderer>>> {
-        &self.progress
-    }
-
-    pub fn inc_callback(&self) -> impl Fn(u64) + Send + Sync + Clone + 'static {
-        let p = Arc::clone(&self.progress);
-        move |n| p.lock().inc_current(n)
-    }
-
-    pub fn skip_callback(&self) -> impl Fn(u64) + Send + Sync + Clone + 'static {
-        let p = Arc::clone(&self.progress);
-        move |n| p.lock().inc_skipped(n)
-    }
-
-    pub fn file_callback(&self) -> impl Fn(&str, u64) + Send + Sync + Clone + 'static {
-        let p = Arc::clone(&self.progress);
-        move |name, size| p.lock().set_current_file(name, size)
-    }
-
-    pub fn set_parallel_mode(&self, worker_count: usize) {
-        self.progress.lock().set_parallel_mode(worker_count);
-    }
-
-    pub fn finish_ok(self) -> Result<()> {
-        self.ticker_handle.abort();
-        self.progress.lock().finish()?;
-        Ok(())
-    }
-
-    pub fn finish_err(self, msg: String) -> Result<()> {
-        self.ticker_handle.abort();
-        let _ = self.progress.lock().finish();
-        bail!("{}", msg);
-    }
 }
 
 pub struct TransferItem {
@@ -380,7 +318,7 @@ async fn handle_remote_upload(
             total_size += src.metadata()?.len();
         } else if src.is_dir() && args.is_recursive() {
             total_size +=
-                commands::copy::get_total_size(std::slice::from_ref(src), true, args, &[]).await?;
+                super::copy::get_total_size(std::slice::from_ref(src), true, args, &[]).await?;
         } else if src.is_dir() {
             bail!(
                 "Source '{}' is a directory. Use -r flag for recursive copy.",
@@ -414,19 +352,14 @@ async fn handle_remote_upload(
         return Ok(());
     }
 
-    let opts = remote::RemoteTransferOptions {
-        preserve: args.is_preserve(),
-        verify: args.is_verify(),
-        resume: args.is_resume(),
-        strict: args.is_strict(),
-        append: args.is_append(),
-    };
+    let opts = transfer_options_from_cli(args);
 
     let runner = ProgressRunner::new(
         total_size,
         is_plain_mode(args),
         false,
         crate::config::is_json_mode(),
+        super::copy::cleanup_partial_files,
     )?;
     runner.progress().lock().set_operation_type("Uploading");
     let multi_source = sources.len() > 1;
@@ -551,19 +484,14 @@ async fn handle_remote_download(
         return Ok(());
     }
 
-    let opts = remote::RemoteTransferOptions {
-        preserve: args.is_preserve(),
-        verify: args.is_verify(),
-        resume: args.is_resume(),
-        strict: args.is_strict(),
-        append: args.is_append(),
-    };
+    let opts = transfer_options_from_cli(args);
 
     let runner = ProgressRunner::new(
         total_size,
         is_plain_mode(args),
         false,
         crate::config::is_json_mode(),
+        super::copy::cleanup_partial_files,
     )?;
     runner.progress().lock().set_operation_type("Downloading");
 
@@ -702,7 +630,7 @@ async fn handle_serve_upload(
             total_size += src.metadata()?.len();
         } else if src.is_dir() && args.is_recursive() {
             total_size +=
-                commands::copy::get_total_size(std::slice::from_ref(src), true, args, &[]).await?;
+                super::copy::get_total_size(std::slice::from_ref(src), true, args, &[]).await?;
         }
     }
 
@@ -711,6 +639,7 @@ async fn handle_serve_upload(
         is_plain_mode(args),
         false,
         crate::config::is_json_mode(),
+        super::copy::cleanup_partial_files,
     )?;
     runner
         .progress()
@@ -873,6 +802,7 @@ async fn handle_serve_download(
         is_plain_mode(args),
         false,
         crate::config::is_json_mode(),
+        super::copy::cleanup_partial_files,
     )?;
     runner
         .progress()

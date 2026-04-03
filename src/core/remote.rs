@@ -104,14 +104,17 @@ pub struct RemoteFileInfo {
     pub size: u64,
 }
 
-#[derive(Clone)]
-pub struct RemoteTransferOptions {
+/// Transfer options shared between local copy and remote operations.
+#[derive(Clone, Default)]
+pub struct TransferOptions {
     pub preserve: bool,
     pub verify: bool,
     pub resume: bool,
     pub strict: bool,
     pub append: bool,
 }
+
+pub type RemoteTransferOptions = TransferOptions;
 
 struct ResumeDecision {
     skip_bytes: u64,

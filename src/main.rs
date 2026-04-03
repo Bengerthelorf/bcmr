@@ -5,9 +5,10 @@ mod core;
 mod output;
 mod ui;
 
-use crate::commands::remote_copy::{handle_remote_copy, is_plain_mode, ProgressRunner};
+use crate::commands::remote_copy::{handle_remote_copy, is_plain_mode};
 use crate::config::{is_json_mode, set_json_mode, UpdateCheck, CONFIG};
 use crate::core::error::BcmrError;
+use crate::ui::runner::ProgressRunner;
 use anyhow::{bail, Result};
 use cli::Commands;
 use std::io::{self, Write};
@@ -137,8 +138,13 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
             return Ok(());
         }
 
-        let runner =
-            ProgressRunner::new(plan.total_size, is_plain_mode(args), false, is_json_mode())?;
+        let runner = ProgressRunner::new(
+            plan.total_size,
+            is_plain_mode(args),
+            false,
+            is_json_mode(),
+            commands::copy::cleanup_partial_files,
+        )?;
 
         {
             let mut p = runner.progress().lock();
@@ -163,7 +169,13 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
 
         runner.finish_ok()
     } else {
-        let runner = ProgressRunner::new(0, is_plain_mode(args), false, is_json_mode())?;
+        let runner = ProgressRunner::new(
+            0,
+            is_plain_mode(args),
+            false,
+            is_json_mode(),
+            commands::copy::cleanup_partial_files,
+        )?;
 
         {
             let mut p = runner.progress().lock();
@@ -257,7 +269,13 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
         return Ok(());
     }
 
-    let runner = ProgressRunner::new(total_size, is_plain_mode(args), false, is_json_mode())?;
+    let runner = ProgressRunner::new(
+        total_size,
+        is_plain_mode(args),
+        false,
+        is_json_mode(),
+        commands::copy::cleanup_partial_files,
+    )?;
 
     if let Some(first) = sources.first() {
         let display_name = first.file_name().unwrap_or_default().to_string_lossy();
@@ -304,7 +322,13 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         let file_count = files_to_remove.iter().filter(|f| !f.is_dir).count();
         let dir_count = files_to_remove.iter().filter(|f| f.is_dir).count();
 
-        let runner = ProgressRunner::new(total_size, is_plain_mode(args), true, is_json_mode())?;
+        let runner = ProgressRunner::new(
+            total_size,
+            is_plain_mode(args),
+            true,
+            is_json_mode(),
+            commands::copy::cleanup_partial_files,
+        )?;
         let result = commands::remove::remove_paths(
             paths,
             args,
@@ -345,6 +369,7 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         is_plain_mode(args),
         args.is_dry_run(),
         is_json_mode(),
+        commands::copy::cleanup_partial_files,
     )?;
 
     runner.progress().lock().set_operation_type("Removing");
