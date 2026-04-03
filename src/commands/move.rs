@@ -1,4 +1,4 @@
-use crate::cli::{Commands, TestMode};
+use crate::cli::Commands;
 use crate::commands::copy;
 use crate::core::error::BcmrError;
 use crate::core::io as durable_io;
@@ -45,13 +45,9 @@ pub async fn get_total_size(
     copy::get_total_size(sources, recursive, cli, excludes).await
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn move_path<F>(
     src: &Path,
     dst: &Path,
-    recursive: bool,
-    preserve: bool,
-    test_mode: TestMode,
     cli: &Commands,
     excludes: &[regex::Regex],
     progress_callback: F,
@@ -60,6 +56,7 @@ pub async fn move_path<F>(
 where
     F: Fn(u64) + Send + Sync + Clone,
 {
+    let recursive = cli.is_recursive();
     if traversal::is_excluded(src, excludes) {
         return Ok(());
     }
@@ -102,9 +99,6 @@ where
                 copy::copy_path(
                     src,
                     &dst_path,
-                    false,
-                    preserve,
-                    test_mode,
                     cli,
                     excludes,
                     progress_callback.clone(),
@@ -175,9 +169,6 @@ where
             copy::copy_path(
                 src,
                 dst,
-                recursive,
-                preserve,
-                test_mode.clone(),
                 cli,
                 excludes,
                 progress_callback.clone(),
@@ -203,9 +194,6 @@ where
                     copy::copy_path(
                         src,
                         dst,
-                        recursive,
-                        preserve,
-                        test_mode,
                         cli,
                         excludes,
                         progress_callback.clone(),

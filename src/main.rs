@@ -84,7 +84,6 @@ fn confirm_removal(files: &[commands::remove::FileToRemove]) -> Result<bool> {
 async fn handle_copy_command(args: &Commands) -> Result<()> {
     use crate::core::remote::parse_remote_path;
 
-    let test_mode = args.get_test_mode();
     let excludes = args.compile_excludes()?;
     let (sources, dest) = args.get_sources_and_dest().map_err(anyhow::Error::msg)?;
 
@@ -152,8 +151,6 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
 
         let result = commands::copy::execute_plan(
             &plan,
-            args.is_preserve(),
-            test_mode,
             args,
             runner.inc_callback(),
             runner.file_callback(),
@@ -194,11 +191,8 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
         let result = commands::copy::pipeline_copy(
             sources,
             dest,
-            args.is_recursive(),
-            &excludes,
-            args.is_preserve(),
-            test_mode,
             args,
+            &excludes,
             runner.inc_callback(),
             runner.file_callback(),
             total_cb,
@@ -216,7 +210,6 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
 }
 
 async fn handle_move_command(args: &Commands) -> Result<()> {
-    let test_mode = args.get_test_mode();
     let excludes = args.compile_excludes()?;
     let (sources, dest) = args.get_sources_and_dest().map_err(anyhow::Error::msg)?;
 
@@ -252,9 +245,6 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
             commands::r#move::move_path(
                 src,
                 dest,
-                args.is_recursive(),
-                args.is_preserve(),
-                test_mode.clone(),
                 args,
                 &excludes,
                 |_| {},
@@ -286,9 +276,6 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
         let result = commands::r#move::move_path(
             src,
             dest,
-            args.is_recursive(),
-            args.is_preserve(),
-            test_mode.clone(),
             args,
             &excludes,
             runner.inc_callback(),
@@ -308,7 +295,6 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
 }
 
 async fn handle_remove_command(args: &Commands) -> Result<()> {
-    let test_mode = args.get_test_mode();
     let excludes = args.compile_excludes()?;
     let paths = args.get_remove_paths().map_err(anyhow::Error::msg)?;
 
@@ -328,7 +314,6 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
             ProgressRunner::new(total_size, is_plain_mode(args), true, is_json_mode())?;
         let result = commands::remove::remove_paths(
             paths,
-            test_mode,
             args,
             &excludes,
             Arc::clone(runner.progress()),
@@ -381,7 +366,6 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
 
     commands::remove::remove_paths(
         paths,
-        test_mode,
         args,
         &excludes,
         Arc::clone(runner.progress()),

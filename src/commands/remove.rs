@@ -141,17 +141,16 @@ async fn confirm_remove(
     Ok(input.trim().eq_ignore_ascii_case("y") || input.trim().eq_ignore_ascii_case("yes"))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn remove_path(
     path: &Path,
     is_dir: bool,
-    test_mode: TestMode,
     cli: &Commands,
     excludes: &[regex::Regex],
     progress_state: Arc<Mutex<ProgressState>>,
     progress_callback: impl Fn(u64) + Send + Sync,
     on_new_file: impl Fn(&str, u64) + Send + Sync,
 ) -> std::result::Result<(), BcmrError> {
+    let test_mode = cli.get_test_mode();
     if traversal::is_excluded(path, excludes) {
         return Ok(());
     }
@@ -304,10 +303,8 @@ impl ProgressState {
 
 type FileCallback = Box<dyn Fn(&str, u64) + Send + Sync>;
 
-#[allow(clippy::too_many_arguments)]
 pub async fn remove_paths(
     paths: &[PathBuf],
-    test_mode: TestMode,
     cli: &Commands,
     excludes: &[regex::Regex],
     progress: Arc<Mutex<Box<dyn ProgressRenderer>>>,
@@ -324,7 +321,6 @@ pub async fn remove_paths(
         remove_path(
             path,
             path.is_dir(),
-            test_mode.clone(),
             cli,
             excludes,
             Arc::clone(&progress_state),

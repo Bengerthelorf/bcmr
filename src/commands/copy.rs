@@ -458,11 +458,8 @@ pub fn dry_run_plan(plan: &CopyPlan, cli: &Commands) -> std::result::Result<(), 
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn execute_plan<F>(
     plan: &CopyPlan,
-    preserve: bool,
-    test_mode: TestMode,
     cli: &Commands,
     progress_callback: F,
     on_new_file: impl Fn(&str, u64) + Send + Sync + 'static,
@@ -470,6 +467,7 @@ pub async fn execute_plan<F>(
 where
     F: Fn(u64) + Send + Sync,
 {
+    let test_mode = cli.get_test_mode();
     let callback = ProgressCallback {
         callback: progress_callback,
         on_new_file: Box::new(on_new_file),
@@ -494,17 +492,7 @@ where
                 copy_file(
                     src,
                     dst,
-                    CopyFileOptions {
-                        preserve,
-                        verify: cli.is_verify(),
-                        resume: cli.is_resume(),
-                        strict: cli.is_strict(),
-                        append: cli.is_append(),
-                        sync: cli.is_sync(),
-                        reflink_arg: cli.get_reflink_mode(),
-                        sparse_arg: cli.get_sparse_mode(),
-                        test_mode: test_mode.clone(),
-                    },
+                    CopyFileOptions::from_cli(cli, test_mode.clone()),
                     &callback,
                 )
                 .await?;
@@ -516,9 +504,7 @@ where
         }
     }
 
-    // Preserve directory attributes after all files are copied (deepest first)
-    // so that file copies don't alter directory mtimes
-    if preserve {
+    if cli.is_preserve() {
         for entry in plan.entries.iter().rev() {
             if let PlanEntry::CreateDir { src, dst } = entry {
                 preserve_attributes(src, dst).await?;
@@ -535,13 +521,9 @@ pub struct ProgressCallback<F> {
     on_new_file: Box<dyn Fn(&str, u64) + Send + Sync>,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn copy_path<F>(
     src: &Path,
     dst: &Path,
-    recursive: bool,
-    preserve: bool,
-    test_mode: TestMode,
     cli: &Commands,
     excludes: &[regex::Regex],
     progress_callback: F,
@@ -550,6 +532,7 @@ pub async fn copy_path<F>(
 where
     F: Fn(u64) + Send + Sync,
 {
+    let test_mode = cli.get_test_mode();
     let callback = ProgressCallback {
         callback: progress_callback,
         on_new_file: Box::new(on_new_file),
@@ -590,17 +573,7 @@ where
         copy_file(
             src,
             &dst_path,
-            CopyFileOptions {
-                preserve,
-                verify: cli.is_verify(),
-                resume: cli.is_resume(),
-                strict: cli.is_strict(),
-                append: cli.is_append(),
-                sync: cli.is_sync(),
-                reflink_arg: cli.get_reflink_mode(),
-                sparse_arg: cli.get_sparse_mode(),
-                test_mode,
-            },
+            CopyFileOptions::from_cli(cli, test_mode),
             &callback,
         )
         .await?;
@@ -608,7 +581,7 @@ where
         if cli.is_verbose() {
             eprintln!("'{}' -> '{}'", src.display(), dst_path.display());
         }
-    } else if recursive && src.is_dir() {
+    } else if cli.is_recursive() && src.is_dir() {
         let src_dir_name = src
             .file_name()
             .ok_or_else(|| BcmrError::InvalidInput("Invalid source directory name".to_string()))?;
@@ -683,17 +656,7 @@ where
                 copy_file(
                     &src_path,
                     &dst_path,
-                    CopyFileOptions {
-                        preserve,
-                        verify: cli.is_verify(),
-                        resume: cli.is_resume(),
-                        strict: cli.is_strict(),
-                        append: cli.is_append(),
-                        sync: cli.is_sync(),
-                        reflink_arg: cli.get_reflink_mode(),
-                        sparse_arg: cli.get_sparse_mode(),
-                        test_mode: test_mode.clone(),
-                    },
+                    CopyFileOptions::from_cli(cli, test_mode.clone()),
                     &callback,
                 )
                 .await?;
@@ -704,7 +667,7 @@ where
             }
         }
 
-        if preserve && !cli.is_dry_run() {
+        if cli.is_preserve() && !cli.is_dry_run() {
             for (src_dir, dst_dir) in dir_pairs.iter().rev() {
                 preserve_attributes(src_dir, dst_dir).await?;
             }
@@ -757,6 +720,22 @@ struct CopyFileOptions {
     reflink_arg: Option<String>,
     sparse_arg: Option<String>,
     test_mode: TestMode,
+}
+
+impl CopyFileOptions {
+    fn from_cli(cli: &Commands, test_mode: TestMode) -> Self {
+        Self {
+            preserve: cli.is_preserve(),
+            verify: cli.is_verify(),
+            resume: cli.is_resume(),
+            strict: cli.is_strict(),
+            append: cli.is_append(),
+            sync: cli.is_sync(),
+            reflink_arg: cli.get_reflink_mode(),
+            sparse_arg: cli.get_sparse_mode(),
+            test_mode,
+        }
+    }
 }
 
 async fn copy_file<F>(
@@ -1011,15 +990,11 @@ enum ScanMessage {
     Done,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn pipeline_copy<F>(
     sources: &[PathBuf],
     dst: &Path,
-    recursive: bool,
-    excludes: &[regex::Regex],
-    preserve: bool,
-    test_mode: TestMode,
     cli: &Commands,
+    excludes: &[regex::Regex],
     progress_callback: F,
     on_new_file: impl Fn(&str, u64) + Send + Sync + 'static,
     on_total_update: impl Fn(u64) + Send + Sync + 'static,
@@ -1029,6 +1004,8 @@ pub async fn pipeline_copy<F>(
 where
     F: Fn(u64) + Send + Sync,
 {
+    let test_mode = cli.get_test_mode();
+    let recursive = cli.is_recursive();
     let callback = ProgressCallback {
         callback: progress_callback,
         on_new_file: Box::new(on_new_file),
@@ -1196,17 +1173,7 @@ where
                     copy_file(
                         src,
                         dst,
-                        CopyFileOptions {
-                            preserve,
-                            verify: cli.is_verify(),
-                            resume: cli.is_resume(),
-                            strict: cli.is_strict(),
-                            append: cli.is_append(),
-                            sync: cli.is_sync(),
-                            reflink_arg: cli.get_reflink_mode(),
-                            sparse_arg: cli.get_sparse_mode(),
-                            test_mode: test_mode.clone(),
-                        },
+                        CopyFileOptions::from_cli(cli, test_mode.clone()),
                         &callback,
                     )
                     .await?;
@@ -1225,7 +1192,7 @@ where
 
     scanner.await??;
 
-    if preserve {
+    if cli.is_preserve() {
         for (src, dst) in dir_entries.iter().rev() {
             preserve_attributes(src, dst).await?;
         }
