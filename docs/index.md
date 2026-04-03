@@ -3,7 +3,7 @@ layout: home
 hero:
   name: BCMR
   text: Better Copy Move Remove
-  tagline: A modern, safe CLI tool for file operations — with progress display, resume, verification, and remote copy via SSH.
+  tagline: A modern, safe CLI tool for file operations — with progress display, resume, verification, remote copy via SSH, and JSON output for AI agents.
   image:
     src: /images/demo.gif
     alt: BCMR Demo
@@ -34,6 +34,9 @@ features:
   - icon: 🛡️
     title: Safe Operations
     details: Dry-run preview, overwrite prompts, regex exclusions, atomic writes via temp file + rename.
+  - icon: 🤖
+    title: AI-Agent Friendly
+    details: "--json flag for NDJSON streaming progress and structured results. check command to diff source vs destination. Designed for programmatic consumption."
   - icon: 🎨
     title: Fully Configurable
     details: Custom color gradients, bar characters, border styles, and reflink/sparse defaults via TOML config.

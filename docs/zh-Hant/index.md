@@ -3,7 +3,7 @@ layout: home
 hero:
   name: BCMR
   text: 更好的複製、移動、刪除
-  tagline: 現代化、安全的檔案操作 CLI 工具 — 支援進度顯示、斷點續傳、完整性校驗和 SSH 遠端複製。
+  tagline: 現代化、安全的檔案操作 CLI 工具 — 支援進度顯示、斷點續傳、完整性校驗、SSH 遠端複製和 AI Agent JSON 輸出。
   image:
     src: /images/demo.gif
     alt: BCMR 示範
@@ -34,6 +34,9 @@ features:
   - icon: "\U0001F6E1\uFE0F"
     title: 安全操作
     details: 乾跑預覽、覆寫提示、正規表達式排除、透過暫存檔案+重新命名實現原子寫入。
+  - icon: "\U0001F916"
+    title: AI Agent 友好
+    details: "--json 輸出 NDJSON 串流進度和結構化結果。check 命令比較來源與目標差異。專為程式化使用設計。"
   - icon: "\U0001F3A8"
     title: 完全可設定
     details: 自訂顏色漸變、進度條字元、邊框樣式，以及 reflink/sparse 預設值，均透過 TOML 設定。

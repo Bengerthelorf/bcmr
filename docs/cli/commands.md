@@ -251,3 +251,68 @@ Detects remote OS and architecture automatically. Same platform: transfers local
 bcmr deploy user@server
 bcmr deploy root@10.0.0.1 --path /usr/local/bin/bcmr
 ```
+
+---
+
+## check
+
+Compare source and destination without making changes. Reports files that are added, modified, or missing.
+
+```
+bcmr check [OPTIONS] <SOURCES>... <DESTINATION>
+```
+
+| Flag | Description |
+|------|-------------|
+| `-r`, `--recursive` | Recursively compare directories |
+| `-e`, `--exclude <PATTERN>` | Exclude paths matching regex |
+
+**Exit codes:** `0` = in sync, `1` = differences found, `2` = error.
+
+Comparison uses file size and modification time — no content hashing.
+
+**Examples:**
+
+```bash
+# Compare two directories
+bcmr check -r src/ backup/
+
+# Check with JSON output (for scripts / AI agents)
+bcmr check --json -r src/ backup/
+```
+
+---
+
+## Global Flags
+
+These flags apply to all commands:
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output NDJSON streaming progress and structured results (for AI agents and scripts) |
+| `-h`, `--help` | Print help |
+| `-V`, `--version` | Print version |
+
+### JSON Output
+
+When `--json` is passed, bcmr suppresses all human-readable output (progress bars, colors, prompts) and writes newline-delimited JSON to stdout:
+
+**Progress lines** (emitted every ~200ms during transfers):
+
+```json
+{"type":"progress","operation":"Copying","bytes_done":1048576,"bytes_total":10485760,"percent":10.0,"speed_bps":52428800,"eta_secs":2,"file":"large.bin","file_size":10485760,"file_progress":1048576}
+```
+
+**Result line** (emitted on completion):
+
+```json
+{"type":"result","status":"success","operation":"Copying","bytes_total":10485760,"duration_secs":3.2,"avg_speed_bps":3276800}
+```
+
+**Check output** (`bcmr check --json`):
+
+```json
+{"command":"check","status":"success","in_sync":false,"added":[{"path":"new.txt","size":4096,"src_size":4096,"is_dir":false}],"modified":[],"missing":[],"summary":{"added":1,"modified":0,"missing":0,"total_bytes":4096}}
+```
+
+Interactive prompts are auto-accepted in JSON mode (`--json` implies `--yes`).

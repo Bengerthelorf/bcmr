@@ -244,3 +244,68 @@ bcmr deploy <TARGET> [--path <PATH>]
 bcmr deploy user@server
 bcmr deploy root@10.0.0.1 --path /usr/local/bin/bcmr
 ```
+
+---
+
+## check
+
+比較來源與目標，不做任何變更。回報新增、修改和缺失的檔案。
+
+```
+bcmr check [OPTIONS] <SOURCES>... <DESTINATION>
+```
+
+| 旗標 | 說明 |
+|------|------|
+| `-r`, `--recursive` | 遞迴比較目錄 |
+| `-e`, `--exclude <PATTERN>` | 排除符合正規式的路徑 |
+
+**結束碼：** `0` = 已同步，`1` = 有差異，`2` = 錯誤。
+
+比較依據為檔案大小和修改時間，不做內容雜湊。
+
+**範例：**
+
+```bash
+# 比較兩個目錄
+bcmr check -r src/ backup/
+
+# JSON 輸出（適用於腳本 / AI Agent）
+bcmr check --json -r src/ backup/
+```
+
+---
+
+## 全域旗標
+
+以下旗標適用於所有命令：
+
+| 旗標 | 說明 |
+|------|------|
+| `--json` | 輸出 NDJSON 串流進度和結構化結果（適用於 AI Agent 和腳本） |
+| `-h`, `--help` | 列印說明 |
+| `-V`, `--version` | 列印版本 |
+
+### JSON 輸出
+
+傳入 `--json` 時，bcmr 抑制所有人類可讀輸出（進度條、色彩、提示），將換行分隔的 JSON 寫入 stdout：
+
+**進度行**（傳輸期間約每 200ms 輸出一行）：
+
+```json
+{"type":"progress","operation":"Copying","bytes_done":1048576,"bytes_total":10485760,"percent":10.0,"speed_bps":52428800,"eta_secs":2,"file":"large.bin","file_size":10485760,"file_progress":1048576}
+```
+
+**結果行**（完成時輸出）：
+
+```json
+{"type":"result","status":"success","operation":"Copying","bytes_total":10485760,"duration_secs":3.2,"avg_speed_bps":3276800}
+```
+
+**Check 輸出**（`bcmr check --json`）：
+
+```json
+{"command":"check","status":"success","in_sync":false,"added":[{"path":"new.txt","size":4096,"src_size":4096,"is_dir":false}],"modified":[],"missing":[],"summary":{"added":1,"modified":0,"missing":0,"total_bytes":4096}}
+```
+
+JSON 模式下互動提示自動確認（`--json` 隱含 `--yes`）。

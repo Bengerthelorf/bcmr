@@ -1,6 +1,6 @@
 # CLI Overview
 
-BCMR provides three main commands for file operations, plus shell integration and self-update.
+BCMR provides commands for file operations, comparison, shell integration, and self-update.
 
 ## Commands
 
@@ -9,9 +9,19 @@ BCMR provides three main commands for file operations, plus shell integration an
 | [`copy`](/cli/commands#copy) | Copy files and directories |
 | [`move`](/cli/commands#move) | Move files and directories |
 | [`remove`](/cli/commands#remove) | Remove files and directories |
+| [`check`](/cli/commands#check) | Compare source and destination without changes |
 | [`init`](/cli/commands#init) | Generate shell integration script |
 | [`update`](/cli/commands#update) | Check for updates and self-update |
 | [`completions`](/cli/commands#completions) | Generate shell completion scripts |
+| [`deploy`](/cli/commands#deploy) | Deploy bcmr to a remote host |
+
+## Global Flags
+
+| Flag | Description |
+|------|-------------|
+| `--json` | NDJSON streaming output for AI agents and scripts |
+| `-h`, `--help` | Print help |
+| `-V`, `--version` | Print version |
 
 ## Common Flags
 
