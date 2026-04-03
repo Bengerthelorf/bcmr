@@ -19,7 +19,8 @@ impl ProgressRunner {
         json: bool,
         on_interrupt: fn(),
     ) -> std::io::Result<Self> {
-        let renderer = progress::create_renderer(total_size, plain, silent, json)?;
+        let log = crate::config::log_file();
+        let renderer = progress::create_renderer(total_size, plain, silent, json, log.as_ref())?;
         let progress = Arc::new(Mutex::new(renderer));
 
         let ticker = Arc::clone(&progress);

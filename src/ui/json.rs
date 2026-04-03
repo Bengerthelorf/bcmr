@@ -2,18 +2,62 @@ use crate::ui::progress::ProgressRenderer;
 use crate::ui::state::ProgressData;
 
 use serde::Serialize;
-use std::io::{self, Write};
+use std::fs;
+use std::io::{self, BufWriter, Write};
+use std::path::PathBuf;
 use std::time::Instant;
 
-/// NDJSON streaming progress renderer.
+/// NDJSON progress renderer.
 ///
-/// Emits one JSON object per line to stdout:
+/// Writes one JSON object per line:
 /// - `{"type":"progress",...}` on every tick (throttled)
 /// - `{"type":"result",...}`  on finish
+///
+/// Output goes to a log file (detach mode) or stdout (stream mode).
 pub struct JsonProgress {
     data: ProgressData,
     last_emit: Instant,
     finished: bool,
+    writer: JsonWriter,
+}
+
+enum JsonWriter {
+    Stdout,
+    File(BufWriter<fs::File>),
+}
+
+impl JsonWriter {
+    fn write_line(&mut self, value: &impl Serialize) {
+        match self {
+            JsonWriter::Stdout => {
+                let mut out = io::stdout().lock();
+                let _ = serde_json::to_writer(&mut out, value);
+                let _ = out.write_all(b"\n");
+                let _ = out.flush();
+            }
+            JsonWriter::File(f) => {
+                let _ = serde_json::to_writer(&mut *f, value);
+                let _ = f.write_all(b"\n");
+                let _ = f.flush();
+            }
+        }
+    }
+
+    fn write_line_strict(&mut self, value: &impl Serialize) -> io::Result<()> {
+        match self {
+            JsonWriter::Stdout => {
+                let mut out = io::stdout().lock();
+                serde_json::to_writer(&mut out, value).map_err(io::Error::other)?;
+                out.write_all(b"\n")?;
+                out.flush()
+            }
+            JsonWriter::File(f) => {
+                serde_json::to_writer(&mut *f, value).map_err(io::Error::other)?;
+                f.write_all(b"\n")?;
+                f.flush()
+            }
+        }
+    }
 }
 
 // ── NDJSON line types ──────────────────────────────────────────────────
@@ -54,12 +98,28 @@ struct ResultLine<'a> {
 const EMIT_INTERVAL_MS: u128 = 200;
 
 impl JsonProgress {
+    /// Stream mode: write NDJSON to stdout.
     pub fn new(total_bytes: u64) -> Self {
         Self {
             data: ProgressData::new(total_bytes),
             last_emit: Instant::now(),
             finished: false,
+            writer: JsonWriter::Stdout,
         }
+    }
+
+    /// Detach mode: write NDJSON to a log file.
+    pub fn with_log_file(total_bytes: u64, path: &PathBuf) -> io::Result<Self> {
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        Ok(Self {
+            data: ProgressData::new(total_bytes),
+            last_emit: Instant::now(),
+            finished: false,
+            writer: JsonWriter::File(BufWriter::new(file)),
+        })
     }
 
     fn emit_progress(&mut self) {
@@ -94,10 +154,7 @@ impl JsonProgress {
             scanning: self.data.scanning,
         };
 
-        let mut stdout = io::stdout().lock();
-        let _ = serde_json::to_writer(&mut stdout, &line);
-        let _ = stdout.write_all(b"\n");
-        let _ = stdout.flush();
+        self.writer.write_line(&line);
     }
 }
 
@@ -179,9 +236,6 @@ impl ProgressRenderer for JsonProgress {
             avg_speed_bps: avg_bps,
         };
 
-        let mut stdout = io::stdout().lock();
-        serde_json::to_writer(&mut stdout, &line).map_err(io::Error::other)?;
-        stdout.write_all(b"\n")?;
-        stdout.flush()
+        self.writer.write_line_strict(&line)
     }
 }

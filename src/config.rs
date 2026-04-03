@@ -15,6 +15,19 @@ pub fn is_json_mode() -> bool {
     JSON_MODE.load(Ordering::Relaxed)
 }
 
+use parking_lot::Mutex;
+use std::path::PathBuf;
+
+static LOG_FILE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+pub fn set_log_file(path: PathBuf) {
+    *LOG_FILE.lock() = Some(path);
+}
+
+pub fn log_file() -> Option<PathBuf> {
+    LOG_FILE.lock().clone()
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub progress: ProgressConfig,

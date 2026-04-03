@@ -536,11 +536,110 @@ fn background_update_check(command: &Commands) -> Option<mpsc::Receiver<Option<S
     Some(rx)
 }
 
+/// For copy/move/remove with --json: detach to background and write progress to log file.
+/// Returns true if this process should exit (parent after fork), false if it should continue (child or no detach).
+fn maybe_detach(cli: &cli::Cli) -> Result<bool> {
+    let is_operation = matches!(
+        cli.command,
+        Commands::Copy { .. } | Commands::Move { .. } | Commands::Remove { .. }
+    );
+
+    if !cli.json || !is_operation {
+        return Ok(false);
+    }
+
+    // If --_bg is set, we ARE the background child: set up log file and continue.
+    if let Some(ref job_id) = cli._bg {
+        let log_path = commands::jobs::log_path(job_id);
+        config::set_log_file(log_path);
+        return Ok(false);
+    }
+
+    // Parent: spawn background child with --_bg flag.
+    commands::jobs::ensure_jobs_dir()?;
+    let job_id = commands::jobs::new_job_id();
+    let log_path = commands::jobs::log_path(&job_id);
+
+    let exe = std::env::current_exe()?;
+    let original_args: Vec<String> = std::env::args().skip(1).collect();
+    // --_bg must come before the subcommand (global flag)
+    let mut args = vec!["--_bg".to_string(), job_id.clone()];
+    args.extend(original_args);
+
+    let child = std::process::Command::new(exe)
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+
+    // Write job start info to log file
+    let job_info = commands::jobs::JobInfo {
+        job_id: job_id.clone(),
+        pid: child.id(),
+        log: log_path.to_string_lossy().to_string(),
+    };
+    let mut f = std::fs::File::create(&log_path)?;
+    serde_json::to_writer(&mut f, &job_info)?;
+    use std::io::Write;
+    f.write_all(b"\n")?;
+
+    // Print job info to stdout for the caller
+    println!("{}", serde_json::to_string(&job_info)?);
+
+    // Clean up old job logs (7 days)
+    commands::jobs::cleanup_old_jobs(7 * 24 * 3600);
+
+    Ok(true) // parent exits
+}
+
+fn handle_status_command(job_id: &Option<String>) {
+    match job_id {
+        Some(id) => match commands::jobs::read_latest_status(id) {
+            Ok(line) => println!("{}", line),
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        },
+        None => {
+            // List all jobs
+            let jobs = commands::jobs::list_jobs();
+            if jobs.is_empty() {
+                println!("No jobs found.");
+                return;
+            }
+            for (id, latest, alive) in &jobs {
+                let status = if *alive { "running" } else { "done" };
+                // Try to extract percent from latest line
+                let detail = serde_json::from_str::<serde_json::Value>(latest)
+                    .ok()
+                    .and_then(|v| {
+                        if v.get("type")?.as_str()? == "progress" {
+                            Some(format!("{:.1}%", v.get("percent")?.as_f64()?))
+                        } else if v.get("type")?.as_str()? == "result" {
+                            Some("complete".to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+                println!("{}\t{}\t{}", id, status, detail);
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = cli::parse_args();
 
-    set_json_mode(cli.json);
+    // Handle detach for --json operations
+    if maybe_detach(&cli)? {
+        return Ok(()); // parent exits after spawning background child
+    }
+
+    set_json_mode(cli.json || cli._bg.is_some());
 
     let update_rx = background_update_check(&cli.command);
 
@@ -577,6 +676,9 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+        }
+        Commands::Status { job_id } => {
+            handle_status_command(job_id);
         }
         Commands::Init { .. } => handle_init_command(&cli.command)?,
         Commands::Update => commands::update::run()?,

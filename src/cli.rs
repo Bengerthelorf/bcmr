@@ -12,9 +12,15 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    /// Output results as JSON (for programmatic / AI-agent consumption)
+    /// Output results as JSON (for programmatic / AI-agent consumption).
+    /// On copy/move/remove: detaches to background and writes progress to a log file.
+    /// Use `bcmr status` to query progress.
     #[arg(long, global = true)]
     pub json: bool,
+
+    /// Internal: run as a detached background job writing to a log file.
+    #[arg(long = "_bg", hide = true)]
+    pub _bg: Option<String>,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -158,6 +164,12 @@ pub enum Commands {
     Move {
         #[command(flatten)]
         args: CopyMoveArgs,
+    },
+
+    /// Show status of background jobs
+    Status {
+        /// Job ID to query (omit to list all jobs)
+        job_id: Option<String>,
     },
 
     /// Check for updates and self-update

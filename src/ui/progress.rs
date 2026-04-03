@@ -2,6 +2,7 @@ use crate::ui::inline::InlineProgress;
 use crate::ui::json::JsonProgress;
 use crate::ui::tui::TuiProgress;
 use std::io;
+use std::path::PathBuf;
 
 pub trait ProgressRenderer: Send {
     // -- Required: core progress tracking --
@@ -43,9 +44,13 @@ pub fn create_renderer(
     plain: bool,
     silent: bool,
     json: bool,
+    log_file: Option<&PathBuf>,
 ) -> io::Result<Box<dyn ProgressRenderer>> {
     if json {
-        Ok(Box::new(JsonProgress::new(total_bytes)))
+        match log_file {
+            Some(path) => Ok(Box::new(JsonProgress::with_log_file(total_bytes, path)?)),
+            None => Ok(Box::new(JsonProgress::new(total_bytes))),
+        }
     } else if silent {
         Ok(Box::new(SilentProgress))
     } else if plain {
