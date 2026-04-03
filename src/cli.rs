@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -41,6 +41,70 @@ impl std::fmt::Display for Shell {
     }
 }
 
+/// Shared arguments for copy and move operations
+#[derive(Args, Debug)]
+pub struct CopyMoveArgs {
+    /// Source files and destination directory (last argument is the destination)
+    #[arg(required = true, num_args = 2..)]
+    pub paths: Vec<PathBuf>,
+
+    /// Recursively process directories
+    #[arg(short, long)]
+    pub recursive: bool,
+
+    /// Preserve file attributes
+    #[arg(short, long)]
+    pub preserve: bool,
+
+    /// Overwrite existing files
+    #[arg(short, long)]
+    pub force: bool,
+
+    /// Skip confirmation prompt when using force
+    #[arg(short = 'y', long = "yes")]
+    pub yes: bool,
+
+    /// Explain what is being done
+    #[arg(short = 'v', long)]
+    pub verbose: bool,
+
+    /// Exclude paths matching regex pattern
+    #[arg(short = 'e', long)]
+    pub exclude: Option<Vec<String>>,
+
+    /// Enable inline TUI mode (classic 3-line display)
+    #[arg(short, long)]
+    pub tui: bool,
+
+    /// Run in dry-run mode (no changes)
+    #[arg(short = 'n', long)]
+    pub dry_run: bool,
+
+    /// Hidden test mode for simulation
+    #[arg(long, hide = true, value_parser = parse_test_mode)]
+    pub test_mode: Option<TestMode>,
+
+    /// Verify file integrity after operation
+    #[arg(short = 'V', long, default_value_t = false)]
+    pub verify: bool,
+
+    /// Resume interrupted operation
+    #[arg(short = 'C', long, default_value_t = false)]
+    pub resume: bool,
+
+    /// Use strict hash verification for resume
+    #[arg(short = 's', long, default_value_t = false)]
+    pub strict: bool,
+
+    /// Append data to existing file (ignores mtime, checks size only)
+    #[arg(short = 'a', long, default_value_t = false)]
+    pub append: bool,
+
+    /// Sync data to disk after operation (fsync)
+    #[arg(long, default_value_t = false)]
+    pub sync: bool,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Initialize shell integration
@@ -72,66 +136,8 @@ pub enum Commands {
 
     /// Copy files or directories
     Copy {
-        /// Source files and destination directory
-        /// Last argument is the destination
-        #[arg(required = true, num_args = 2..)]
-        paths: Vec<PathBuf>,
-
-        /// Recursively copy directories
-        #[arg(short, long)]
-        recursive: bool,
-
-        /// Preserve file attributes
-        #[arg(short, long)]
-        preserve: bool,
-
-        /// Overwrite existing files
-        #[arg(short, long)]
-        force: bool,
-
-        /// Skip confirmation prompt when using force
-        #[arg(short = 'y', long = "yes")]
-        yes: bool,
-
-        /// Explain what is being done
-        #[arg(short = 'v', long)]
-        verbose: bool,
-
-        /// Exclude paths matching regex pattern
-        #[arg(short = 'e', long)]
-        exclude: Option<Vec<String>>,
-
-        /// Enable inline TUI mode (classic 3-line display)
-        #[arg(short, long)]
-        tui: bool,
-
-        /// Run in dry-run mode (no changes)
-        #[arg(short = 'n', long)]
-        dry_run: bool,
-
-        /// Hidden test mode for simulation
-        #[arg(long, hide = true, value_parser = parse_test_mode)]
-        test_mode: Option<TestMode>,
-
-        /// Verify file integrity after copy
-        #[arg(short = 'V', long, default_value_t = false)]
-        verify: bool,
-
-        /// Resume interrupted copy
-        #[arg(short = 'C', long, default_value_t = false)]
-        resume: bool,
-
-        /// Use strict hash verification for resume
-        #[arg(short = 's', long, default_value_t = false)]
-        strict: bool,
-
-        /// Append data to existing file (ignores mtime, checks size only)
-        #[arg(short = 'a', long, default_value_t = false)]
-        append: bool,
-
-        /// Sync data to disk after copy (fsync)
-        #[arg(long, default_value_t = false)]
-        sync: bool,
+        #[command(flatten)]
+        args: CopyMoveArgs,
 
         /// Use Copy-on-Write (reflink) if supported
         /// Modes: force, auto (default), disable
@@ -150,66 +156,8 @@ pub enum Commands {
 
     /// Move files or directories
     Move {
-        /// Source files and destination directory
-        /// Last argument is the destination
-        #[arg(required = true, num_args = 2..)]
-        paths: Vec<PathBuf>,
-
-        /// Recursively move directories
-        #[arg(short, long)]
-        recursive: bool,
-
-        /// Preserve file attributes
-        #[arg(short, long)]
-        preserve: bool,
-
-        /// Overwrite existing files
-        #[arg(short, long)]
-        force: bool,
-
-        /// Skip confirmation prompt when using force
-        #[arg(short = 'y', long = "yes")]
-        yes: bool,
-
-        /// Explain what is being done
-        #[arg(short = 'v', long)]
-        verbose: bool,
-
-        /// Exclude paths matching regex pattern
-        #[arg(short = 'e', long)]
-        exclude: Option<Vec<String>>,
-
-        /// Enable inline TUI mode (classic 3-line display)
-        #[arg(short, long)]
-        tui: bool,
-
-        /// Run in dry-run mode (no changes)
-        #[arg(short = 'n', long)]
-        dry_run: bool,
-
-        /// Hidden test mode for simulation
-        #[arg(long, hide = true, value_parser = parse_test_mode)]
-        test_mode: Option<TestMode>,
-
-        /// Verify file integrity after move
-        #[arg(short = 'V', long, default_value_t = false)]
-        verify: bool,
-
-        /// Resume interrupted move (cross-device fallback only)
-        #[arg(short = 'C', long, default_value_t = false)]
-        resume: bool,
-
-        /// Use strict hash verification for resume
-        #[arg(short = 's', long, default_value_t = false)]
-        strict: bool,
-
-        /// Append data to existing file (ignores mtime, checks size only)
-        #[arg(short = 'a', long, default_value_t = false)]
-        append: bool,
-
-        /// Sync data to disk after move (fsync, cross-device only)
-        #[arg(long, default_value_t = false)]
-        sync: bool,
+        #[command(flatten)]
+        args: CopyMoveArgs,
     },
 
     /// Check for updates and self-update
@@ -310,123 +258,93 @@ pub enum TestMode {
 }
 
 impl Commands {
+    fn copy_move_args(&self) -> Option<&CopyMoveArgs> {
+        match self {
+            Commands::Copy { args, .. } | Commands::Move { args, .. } => Some(args),
+            _ => None,
+        }
+    }
+
     pub fn get_test_mode(&self) -> TestMode {
         match self {
-            Commands::Copy { test_mode, .. }
-            | Commands::Move { test_mode, .. }
-            | Commands::Remove { test_mode, .. } => test_mode.clone().unwrap_or(TestMode::None),
+            Commands::Copy { args, .. } | Commands::Move { args, .. } => {
+                args.test_mode.clone().unwrap_or(TestMode::None)
+            }
+            Commands::Remove { test_mode, .. } => test_mode.clone().unwrap_or(TestMode::None),
             _ => TestMode::None,
         }
     }
 
     pub fn compile_excludes(&self) -> Result<Vec<regex::Regex>, regex::Error> {
         let patterns = match self {
-            Commands::Copy { exclude, .. }
-            | Commands::Move { exclude, .. }
-            | Commands::Remove { exclude, .. }
-            | Commands::Check { exclude, .. } => exclude.as_ref(),
+            Commands::Copy { args, .. } | Commands::Move { args, .. } => args.exclude.as_ref(),
+            Commands::Remove { exclude, .. } | Commands::Check { exclude, .. } => exclude.as_ref(),
             _ => None,
         };
 
-        if let Some(patterns) = patterns {
-            patterns.iter().map(|p| regex::Regex::new(p)).collect()
-        } else {
-            Ok(Vec::new())
+        match patterns {
+            Some(p) => p.iter().map(|s| regex::Regex::new(s)).collect(),
+            None => Ok(Vec::new()),
         }
     }
 
     pub fn is_yes(&self) -> bool {
-        match self {
-            Commands::Copy { yes, .. }
-            | Commands::Move { yes, .. }
-            | Commands::Remove { yes, .. } => *yes,
-            _ => false,
-        }
+        self.copy_move_args().is_some_and(|a| a.yes)
+            || matches!(self, Commands::Remove { yes: true, .. })
     }
 
     pub fn should_prompt_for_overwrite(&self) -> bool {
         match self {
-            Commands::Copy { force, yes, .. } | Commands::Move { force, yes, .. } => {
-                *force && !*yes
+            Commands::Copy { args, .. } | Commands::Move { args, .. } => {
+                args.force && !args.yes
             }
             Commands::Remove {
                 force, interactive, ..
             } => !*force && *interactive,
-            Commands::Init { .. }
-            | Commands::Update
-            | Commands::Completions { .. }
-            | Commands::CompleteRemote { .. }
-            | Commands::Serve
-            | Commands::Deploy { .. }
-            | Commands::Check { .. } => false,
+            _ => false,
         }
     }
 
     pub fn is_tui_mode(&self) -> bool {
-        match self {
-            Commands::Copy { tui, .. }
-            | Commands::Move { tui, .. }
-            | Commands::Remove { tui, .. } => *tui,
-            _ => false,
-        }
+        self.copy_move_args().is_some_and(|a| a.tui)
+            || matches!(self, Commands::Remove { tui: true, .. })
     }
 
     pub fn is_dry_run(&self) -> bool {
-        match self {
-            Commands::Copy { dry_run, .. }
-            | Commands::Move { dry_run, .. }
-            | Commands::Remove { dry_run, .. } => *dry_run,
-            _ => false,
-        }
+        self.copy_move_args().is_some_and(|a| a.dry_run)
+            || matches!(self, Commands::Remove { dry_run: true, .. })
     }
 
     pub fn get_sources_and_dest(&self) -> std::result::Result<(&[PathBuf], &PathBuf), String> {
-        match self {
-            Commands::Copy { paths, .. }
-            | Commands::Move { paths, .. }
-            | Commands::Check { paths, .. } => {
-                let (dest, sources) = paths
-                    .split_last()
-                    .ok_or_else(|| "missing source/destination arguments".to_string())?;
-                Ok((sources, dest))
-            }
-            _ => Err("command does not have source/destination structure".to_string()),
-        }
+        let paths = match self {
+            Commands::Copy { args, .. } | Commands::Move { args, .. } => &args.paths,
+            Commands::Check { paths, .. } => paths,
+            _ => return Err("command does not have source/destination structure".to_string()),
+        };
+        let (dest, sources) = paths
+            .split_last()
+            .ok_or_else(|| "missing source/destination arguments".to_string())?;
+        Ok((sources, dest))
     }
 
     pub fn is_verify(&self) -> bool {
-        match self {
-            Commands::Copy { verify, .. } | Commands::Move { verify, .. } => *verify,
-            _ => false,
-        }
+        self.copy_move_args().is_some_and(|a| a.verify)
     }
 
     pub fn is_resume(&self) -> bool {
-        match self {
-            Commands::Copy { resume, .. } | Commands::Move { resume, .. } => *resume,
-            _ => false,
-        }
+        self.copy_move_args().is_some_and(|a| a.resume)
     }
 
     pub fn is_strict(&self) -> bool {
-        match self {
-            Commands::Copy { strict, .. } | Commands::Move { strict, .. } => *strict,
-            _ => false,
-        }
+        self.copy_move_args().is_some_and(|a| a.strict)
     }
 
     pub fn is_append(&self) -> bool {
-        match self {
-            Commands::Copy { append, .. } | Commands::Move { append, .. } => *append,
-            _ => false,
-        }
+        self.copy_move_args().is_some_and(|a| a.append)
     }
 
     pub fn is_sync(&self) -> bool {
-        match self {
-            Commands::Copy { sync, .. } | Commands::Move { sync, .. } => *sync,
-            _ => false,
-        }
+        self.copy_move_args().is_some_and(|a| a.sync)
     }
 
     pub fn get_reflink_mode(&self) -> Option<String> {
@@ -451,52 +369,39 @@ impl Commands {
     }
 
     pub fn is_recursive(&self) -> bool {
-        match self {
-            Commands::Copy { recursive, .. }
-            | Commands::Move { recursive, .. }
-            | Commands::Remove { recursive, .. }
-            | Commands::Check { recursive, .. } => *recursive,
-            _ => false,
-        }
+        self.copy_move_args().is_some_and(|a| a.recursive)
+            || matches!(
+                self,
+                Commands::Remove {
+                    recursive: true,
+                    ..
+                } | Commands::Check {
+                    recursive: true,
+                    ..
+                }
+            )
     }
 
     pub fn is_preserve(&self) -> bool {
-        match self {
-            Commands::Copy { preserve, .. } | Commands::Move { preserve, .. } => *preserve,
-            _ => false,
-        }
+        self.copy_move_args().is_some_and(|a| a.preserve)
     }
 
     pub fn is_force(&self) -> bool {
-        match self {
-            Commands::Copy { force, .. }
-            | Commands::Move { force, .. }
-            | Commands::Remove { force, .. } => *force,
-            _ => false,
-        }
+        self.copy_move_args().is_some_and(|a| a.force)
+            || matches!(self, Commands::Remove { force: true, .. })
     }
 
     pub fn is_interactive(&self) -> bool {
-        match self {
-            Commands::Remove { interactive, .. } => *interactive,
-            _ => false,
-        }
+        matches!(self, Commands::Remove { interactive: true, .. })
     }
 
     pub fn is_verbose(&self) -> bool {
-        match self {
-            Commands::Copy { verbose, .. }
-            | Commands::Move { verbose, .. }
-            | Commands::Remove { verbose, .. } => *verbose,
-            _ => false,
-        }
+        self.copy_move_args().is_some_and(|a| a.verbose)
+            || matches!(self, Commands::Remove { verbose: true, .. })
     }
 
     pub fn is_dir_only(&self) -> bool {
-        match self {
-            Commands::Remove { dir, .. } => *dir,
-            _ => false,
-        }
+        matches!(self, Commands::Remove { dir: true, .. })
     }
 
     pub fn get_remove_paths(&self) -> std::result::Result<&[PathBuf], String> {
@@ -563,24 +468,41 @@ mod tests {
         assert!(parse_test_mode("invalid:abc").is_err());
     }
 
+    fn test_args(paths: Vec<PathBuf>) -> CopyMoveArgs {
+        CopyMoveArgs {
+            paths,
+            recursive: false,
+            preserve: false,
+            force: false,
+            yes: false,
+            verbose: false,
+            exclude: None,
+            tui: false,
+            dry_run: false,
+            test_mode: None,
+            verify: false,
+            resume: false,
+            strict: false,
+            append: false,
+            sync: false,
+        }
+    }
+
     #[test]
     fn test_commands_copy_accessors() {
         let cmd = Commands::Copy {
-            paths: vec![PathBuf::from("src"), PathBuf::from("dst")],
-            recursive: true,
-            preserve: true,
-            force: true,
-            yes: false,
-            verbose: true,
-            exclude: Some(vec!["*.log".to_string()]),
-            tui: false,
-            dry_run: true,
-            test_mode: None,
-            verify: true,
-            resume: true,
-            strict: true,
-            append: false,
-            sync: false,
+            args: CopyMoveArgs {
+                recursive: true,
+                preserve: true,
+                force: true,
+                verbose: true,
+                exclude: Some(vec!["*.log".to_string()]),
+                dry_run: true,
+                verify: true,
+                resume: true,
+                strict: true,
+                ..test_args(vec![PathBuf::from("src"), PathBuf::from("dst")])
+            },
             reflink: Some("auto".to_string()),
             sparse: None,
             parallel: Some(4),
@@ -607,25 +529,11 @@ mod tests {
     #[test]
     fn test_commands_get_sources_and_dest() {
         let cmd = Commands::Copy {
-            paths: vec![
+            args: test_args(vec![
                 PathBuf::from("a"),
                 PathBuf::from("b"),
                 PathBuf::from("dest"),
-            ],
-            recursive: false,
-            preserve: false,
-            force: false,
-            yes: false,
-            verbose: false,
-            exclude: None,
-            tui: false,
-            dry_run: false,
-            test_mode: None,
-            verify: false,
-            resume: false,
-            strict: false,
-            append: false,
-            sync: false,
+            ]),
             reflink: None,
             sparse: None,
             parallel: None,

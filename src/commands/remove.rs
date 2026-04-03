@@ -141,6 +141,36 @@ async fn confirm_remove(
     Ok(input.trim().eq_ignore_ascii_case("y") || input.trim().eq_ignore_ascii_case("yes"))
 }
 
+async fn report_progress(
+    size: u64,
+    test_mode: &TestMode,
+    callback: &(impl Fn(u64) + Send + Sync),
+) {
+    if size == 0 {
+        return;
+    }
+    match test_mode {
+        TestMode::Delay(ms) => {
+            callback(size);
+            tokio::time::sleep(Duration::from_millis(*ms)).await;
+        }
+        TestMode::SpeedLimit(bps) => {
+            let mut remaining = size;
+            while remaining > 0 {
+                let chunk = remaining.min(*bps);
+                callback(chunk);
+                remaining -= chunk;
+                if remaining > 0 {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+        TestMode::None => {
+            callback(size);
+        }
+    }
+}
+
 pub async fn remove_path(
     path: &Path,
     is_dir: bool,
@@ -206,26 +236,7 @@ pub async fn remove_path(
             }
 
             if entry.file_type().is_file() {
-                match test_mode {
-                    TestMode::Delay(ms) => {
-                        progress_callback(size);
-                        tokio::time::sleep(Duration::from_millis(ms)).await;
-                    }
-                    TestMode::SpeedLimit(bps) => {
-                        let mut remaining = size;
-                        while remaining > 0 {
-                            let chunk = remaining.min(bps);
-                            progress_callback(chunk);
-                            remaining -= chunk;
-                            if remaining > 0 {
-                                tokio::time::sleep(Duration::from_secs(1)).await;
-                            }
-                        }
-                    }
-                    TestMode::None => {
-                        progress_callback(size);
-                    }
-                }
+                report_progress(size, &test_mode, &progress_callback).await;
             }
 
             // Skip root item itself
@@ -246,32 +257,7 @@ pub async fn remove_path(
         let size = path.metadata()?.len();
         on_new_file(&file_name, size);
 
-        match test_mode {
-            TestMode::Delay(ms) => {
-                if size > 0 {
-                    progress_callback(size);
-                }
-                tokio::time::sleep(Duration::from_millis(ms)).await;
-            }
-            TestMode::SpeedLimit(bps) => {
-                if size > 0 {
-                    let mut remaining = size;
-                    while remaining > 0 {
-                        let chunk = remaining.min(bps);
-                        progress_callback(chunk);
-                        remaining -= chunk;
-                        if remaining > 0 {
-                            tokio::time::sleep(Duration::from_secs(1)).await;
-                        }
-                    }
-                }
-            }
-            TestMode::None => {
-                if size > 0 {
-                    progress_callback(size);
-                }
-            }
-        }
+        report_progress(size, &test_mode, &progress_callback).await;
 
         fs::remove_file(path).await?;
         progress_state.lock().inc_processed();

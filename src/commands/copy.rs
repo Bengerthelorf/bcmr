@@ -305,12 +305,7 @@ pub enum PlanEntry {
         src: PathBuf,
         dst: PathBuf,
     },
-    CopyFile {
-        src: PathBuf,
-        dst: PathBuf,
-        #[allow(dead_code)]
-        size: u64,
-    },
+    CopyFile { src: PathBuf, dst: PathBuf },
 }
 
 pub struct CopyPlan {
@@ -358,7 +353,6 @@ fn plan_copy_sync(
             entries.push(PlanEntry::CopyFile {
                 src: src.clone(),
                 dst: dst_path,
-                size,
             });
         } else if recursive && src.is_dir() {
             let src_name = src
@@ -404,7 +398,6 @@ fn plan_copy_sync(
                     entries.push(PlanEntry::CopyFile {
                         src: path.to_path_buf(),
                         dst: target,
-                        size,
                     });
                 }
             }
@@ -449,7 +442,7 @@ pub fn dry_run_plan(plan: &CopyPlan, cli: &Commands) -> std::result::Result<(), 
                     );
                 }
             }
-            PlanEntry::CopyFile { src, dst, .. } => {
+            PlanEntry::CopyFile { src, dst } => {
                 let action = determine_dry_run_action(src, dst, cli)?;
                 print_dry_run(action, &src.to_string_lossy(), Some(&dst.to_string_lossy()));
             }
@@ -480,7 +473,7 @@ where
                     fs::create_dir_all(dst).await?;
                 }
             }
-            PlanEntry::CopyFile { src, dst, .. } => {
+            PlanEntry::CopyFile { src, dst } => {
                 if dst.exists() && !cli.is_force() && is_normal_write(cli) {
                     return Err(BcmrError::TargetExists(dst.clone()));
                 }
@@ -1052,7 +1045,6 @@ where
                     .blocking_send(ScanMessage::Entry(PlanEntry::CopyFile {
                         src: src.clone(),
                         dst: dst_path,
-                        size,
                     }))
                     .is_err()
                 {
@@ -1124,7 +1116,6 @@ where
                             .blocking_send(ScanMessage::Entry(PlanEntry::CopyFile {
                                 src: path.to_path_buf(),
                                 dst: target,
-                                size,
                             }))
                             .is_err()
                         {
@@ -1160,7 +1151,7 @@ where
                     dir_entries.push((src.clone(), dst.clone()));
                 }
                 PlanEntry::CopyFile {
-                    ref src, ref dst, ..
+                    ref src, ref dst
                 } => {
                     if dst.exists() && !cli.is_force() && is_normal_write(cli) {
                         return Err(BcmrError::TargetExists(dst.clone()));
