@@ -222,17 +222,25 @@ async fn collect_remote_entries(
     serve: &mut Option<ServeClient>,
 ) -> Result<Vec<Entry>, BcmrError> {
     if let Some(ref mut client) = serve {
-        let entries = client.list(&rp.path).await?;
-        return Ok(entries
-            .into_iter()
-            .map(|e| Entry {
-                rel_path: e.path,
-                size: e.size,
-                is_dir: e.is_dir,
-            })
-            .collect());
+        match client.list(&rp.path).await {
+            Ok(entries) => {
+                return Ok(entries
+                    .into_iter()
+                    .map(|e| Entry {
+                        rel_path: e.path,
+                        size: e.size,
+                        is_dir: e.is_dir,
+                    })
+                    .collect());
+            }
+            Err(_) => {
+                // Serve list failed (e.g. frame too large for huge directories).
+                // Drop the broken connection and fall through to SSH find.
+                *serve = None;
+            }
+        }
     }
-    // Fallback: SSH find
+    // Fallback: SSH find (no frame size limit, handles any directory size)
     let files = remote::remote_list_files(rp).await?;
     Ok(files
         .into_iter()
