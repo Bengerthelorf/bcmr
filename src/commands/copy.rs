@@ -1000,16 +1000,24 @@ enum ScanMessage {
     Done,
 }
 
+type BoxCallback = Box<dyn Fn(u64) + Send + Sync>;
+type BoxFileCallback = Box<dyn Fn(&str, u64) + Send + Sync>;
+type BoxNotify = Box<dyn Fn() + Send + Sync>;
+
+pub struct PipelineCallbacks<F: Fn(u64) + Send + Sync> {
+    pub on_progress: F,
+    pub on_new_file: BoxFileCallback,
+    pub on_total_update: BoxCallback,
+    pub on_scan_complete: BoxNotify,
+    pub on_file_found: BoxCallback,
+}
+
 pub async fn pipeline_copy<F>(
     sources: &[PathBuf],
     dst: &Path,
     cli: &Commands,
     excludes: &[regex::Regex],
-    progress_callback: F,
-    on_new_file: impl Fn(&str, u64) + Send + Sync + 'static,
-    on_total_update: impl Fn(u64) + Send + Sync + 'static,
-    on_scan_complete: impl Fn() + Send + Sync + 'static,
-    on_file_found: impl Fn(u64) + Send + Sync + 'static,
+    cb: PipelineCallbacks<F>,
 ) -> std::result::Result<(), BcmrError>
 where
     F: Fn(u64) + Send + Sync,
@@ -1017,9 +1025,12 @@ where
     let test_mode = cli.get_test_mode();
     let recursive = cli.is_recursive();
     let callback = ProgressCallback {
-        callback: progress_callback,
-        on_new_file: Box::new(on_new_file),
+        callback: cb.on_progress,
+        on_new_file: cb.on_new_file,
     };
+    let on_total_update = cb.on_total_update;
+    let on_scan_complete = cb.on_scan_complete;
+    let on_file_found = cb.on_file_found;
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<ScanMessage>(256);
 

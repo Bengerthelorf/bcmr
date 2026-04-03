@@ -180,7 +180,7 @@ impl ProgressRenderer for JsonProgress {
 
         let mut stdout = io::stdout().lock();
         serde_json::to_writer(&mut stdout, &line)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
         stdout.write_all(b"\n")?;
         stdout.flush()
     }

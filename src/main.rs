@@ -193,11 +193,13 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
             dest,
             args,
             &excludes,
-            runner.inc_callback(),
-            runner.file_callback(),
-            total_cb,
-            scan_done_cb,
-            files_found_cb,
+            commands::copy::PipelineCallbacks {
+                on_progress: runner.inc_callback(),
+                on_new_file: Box::new(runner.file_callback()),
+                on_total_update: Box::new(total_cb),
+                on_scan_complete: Box::new(scan_done_cb),
+                on_file_found: Box::new(files_found_cb),
+            },
         )
         .await;
 
