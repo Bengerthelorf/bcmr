@@ -261,6 +261,21 @@ fn is_normal_write(cli: &Commands) -> bool {
     !cli.is_resume() && !cli.is_append() && !cli.is_strict()
 }
 
+/// Check if destination exists and handle overwrite rules.
+/// Returns Err if overwrite is not allowed; removes dst if force + resume/append/strict mode.
+async fn check_overwrite(dst: &Path, cli: &Commands) -> std::result::Result<(), BcmrError> {
+    if !dst.exists() {
+        return Ok(());
+    }
+    if !cli.is_force() && is_normal_write(cli) {
+        return Err(BcmrError::TargetExists(dst.to_path_buf()));
+    }
+    if cli.is_force() && !is_normal_write(cli) {
+        fs::remove_file(dst).await?;
+    }
+    Ok(())
+}
+
 fn determine_dry_run_action(
     src: &Path,
     dst: &Path,
@@ -474,13 +489,7 @@ where
                 }
             }
             PlanEntry::CopyFile { src, dst } => {
-                if dst.exists() && !cli.is_force() && is_normal_write(cli) {
-                    return Err(BcmrError::TargetExists(dst.clone()));
-                }
-
-                if dst.exists() && cli.is_force() && !is_normal_write(cli) {
-                    fs::remove_file(dst).await?;
-                }
+                check_overwrite(dst, cli).await?;
 
                 copy_file(
                     src,
@@ -731,6 +740,58 @@ impl CopyFileOptions {
     }
 }
 
+fn resolve_reflink_mode(arg: &Option<String>) -> (bool, bool) {
+    let mode_str = arg
+        .as_deref()
+        .unwrap_or(&crate::config::CONFIG.copy.reflink);
+    match mode_str.to_lowercase().as_str() {
+        "force" => (true, true),
+        "disable" | "never" => (false, false),
+        _ => (true, false),
+    }
+}
+
+fn resolve_sparse_mode(arg: &Option<String>) -> SparseMode {
+    let mode_str = arg
+        .as_deref()
+        .unwrap_or(&crate::config::CONFIG.copy.sparse);
+    match mode_str.to_lowercase().as_str() {
+        "force" => SparseMode::Always,
+        "disable" | "never" => SparseMode::Never,
+        _ => SparseMode::Auto,
+    }
+}
+
+/// Context for finalize — avoids repeating 10 parameters across call sites.
+struct FinalizeCtx<'a> {
+    write_target: &'a Path,
+    dst: &'a Path,
+    src: &'a Path,
+    use_atomic: bool,
+    guard: &'a mut Option<TempFileGuard>,
+    sync: bool,
+    preserve: bool,
+    verify: bool,
+}
+
+impl<'a> FinalizeCtx<'a> {
+    async fn run(self, dst_file: fs::File, inline_hash: Option<blake3::Hash>) -> std::result::Result<(), BcmrError> {
+        super::copy_strategies::finalize(
+            dst_file,
+            self.write_target,
+            self.dst,
+            self.src,
+            self.use_atomic,
+            self.guard,
+            self.sync,
+            self.preserve,
+            self.verify,
+            inline_hash,
+        )
+        .await
+    }
+}
+
 async fn copy_file<F>(
     src: &Path,
     dst: &Path,
@@ -747,8 +808,8 @@ where
         strict,
         append,
         sync,
-        reflink_arg,
-        sparse_arg,
+        ref reflink_arg,
+        ref sparse_arg,
         test_mode,
     } = opts;
 
@@ -758,38 +819,10 @@ where
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-
     (callback.on_new_file)(&file_name, file_size);
 
-    let config_reflink = &crate::config::CONFIG.copy.reflink;
-    let (try_reflink, fail_on_error) = if let Some(mode) = reflink_arg {
-        match mode.to_lowercase().as_str() {
-            "force" => (true, true),
-            "disable" => (false, false),
-            _ => (true, false),
-        }
-    } else {
-        match config_reflink.to_lowercase().as_str() {
-            "disable" | "never" => (false, false),
-            "force" => (true, true),
-            _ => (true, false),
-        }
-    };
-
-    let config_sparse = &crate::config::CONFIG.copy.sparse;
-    let sparse_mode = if let Some(mode) = sparse_arg {
-        match mode.to_lowercase().as_str() {
-            "force" => SparseMode::Always,
-            "disable" => SparseMode::Never,
-            _ => SparseMode::Auto,
-        }
-    } else {
-        match config_sparse.to_lowercase().as_str() {
-            "force" => SparseMode::Always,
-            "disable" | "never" => SparseMode::Never,
-            _ => SparseMode::Auto,
-        }
-    };
+    let (try_reflink, fail_on_error) = resolve_reflink_mode(reflink_arg);
+    let sparse_mode = resolve_sparse_mode(sparse_arg);
 
     if let Some(parent) = dst.parent() {
         if !parent.exists() {
@@ -811,6 +844,8 @@ where
     } else {
         write_target = dst.to_path_buf();
     }
+
+    // Fast path 1: reflink (CoW)
     if super::copy_strategies::try_reflink(
         src,
         &write_target,
@@ -822,51 +857,27 @@ where
     )
     .await?
     {
-        return super::copy_strategies::finalize(
-            fs::File::open(&write_target).await?,
-            &write_target,
-            dst,
-            src,
-            use_atomic,
-            &mut guard,
-            sync,
-            preserve,
-            verify,
-            None,
-        )
-        .await;
+        let ctx = FinalizeCtx { write_target: &write_target, dst, src, use_atomic, guard: &mut guard, sync, preserve, verify };
+        return ctx.run(fs::File::open(&write_target).await?, None).await;
     }
+
+    // Fast path 2: copy_file_range (Linux)
     #[cfg(target_os = "linux")]
     if use_atomic && matches!(test_mode, TestMode::None) && matches!(sparse_mode, SparseMode::Never)
     {
         match try_copy_file_range(src, &write_target, file_size, &callback.callback).await {
             Some(Ok(())) => {
-                return super::copy_strategies::finalize(
-                    fs::File::open(&write_target).await?,
-                    &write_target,
-                    dst,
-                    src,
-                    use_atomic,
-                    &mut guard,
-                    sync,
-                    preserve,
-                    verify,
-                    None,
-                )
-                .await;
+                let ctx = FinalizeCtx { write_target: &write_target, dst, src, use_atomic, guard: &mut guard, sync, preserve, verify };
+                return ctx.run(fs::File::open(&write_target).await?, None).await;
             }
             Some(Err(e)) => return Err(e),
             None => {}
         }
     }
+
+    // Slow path: streaming copy with optional resume
     let resume_state = crate::core::resume::resolve(
-        src,
-        dst,
-        file_size,
-        resume,
-        strict,
-        append,
-        &callback.callback,
+        src, dst, file_size, resume, strict, append, &callback.callback,
     )
     .await?;
 
@@ -905,15 +916,9 @@ where
             }
         }
     }
+
     let mut session = super::copy_strategies::create_session(
-        src,
-        dst,
-        file_size,
-        start_offset,
-        resume,
-        append,
-        strict,
-        &loaded_session,
+        src, dst, file_size, start_offset, resume, append, strict, &loaded_session,
     );
 
     let inline_src_hash = match test_mode {
@@ -952,30 +957,15 @@ where
         }
         TestMode::None => {
             super::copy_strategies::streaming_copy(
-                &mut src_file,
-                &mut dst_file,
-                &mut session,
-                &sparse_mode,
-                start_offset,
-                &callback.callback,
+                &mut src_file, &mut dst_file, &mut session,
+                &sparse_mode, start_offset, &callback.callback,
             )
             .await?
         }
     };
 
-    super::copy_strategies::finalize(
-        dst_file,
-        &write_target,
-        dst,
-        src,
-        use_atomic,
-        &mut guard,
-        sync,
-        preserve,
-        verify,
-        inline_src_hash,
-    )
-    .await
+    let ctx = FinalizeCtx { write_target: &write_target, dst, src, use_atomic, guard: &mut guard, sync, preserve, verify };
+    ctx.run(dst_file, inline_src_hash).await
 }
 
 enum ScanMessage {
@@ -1153,13 +1143,7 @@ where
                 PlanEntry::CopyFile {
                     ref src, ref dst
                 } => {
-                    if dst.exists() && !cli.is_force() && is_normal_write(cli) {
-                        return Err(BcmrError::TargetExists(dst.clone()));
-                    }
-
-                    if dst.exists() && cli.is_force() && !is_normal_write(cli) {
-                        fs::remove_file(dst).await?;
-                    }
+                    check_overwrite(dst, cli).await?;
 
                     copy_file(
                         src,
