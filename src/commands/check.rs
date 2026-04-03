@@ -38,14 +38,14 @@ fn check_sync(
         }
 
         if src.is_file() {
-            let dst_path = if dest_is_dir {
-                dest.join(
-                    src.file_name()
-                        .ok_or_else(|| BcmrError::InvalidInput("Invalid source file name".into()))?,
-                )
-            } else {
-                dest.to_path_buf()
-            };
+            let dst_path =
+                if dest_is_dir {
+                    dest.join(src.file_name().ok_or_else(|| {
+                        BcmrError::InvalidInput("Invalid source file name".into())
+                    })?)
+                } else {
+                    dest.to_path_buf()
+                };
 
             compare_file(src, &dst_path, src, &mut added, &mut modified)?;
         } else if src.is_dir() {

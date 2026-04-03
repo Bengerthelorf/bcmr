@@ -244,15 +244,7 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
         }
 
         for src in sources {
-            commands::r#move::move_path(
-                src,
-                dest,
-                args,
-                &excludes,
-                |_| {},
-                |_, _| {},
-            )
-            .await?;
+            commands::r#move::move_path(src, dest, args, &excludes, |_| {}, |_, _| {}).await?;
         }
 
         if !is_json_mode() {
@@ -312,8 +304,7 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         let file_count = files_to_remove.iter().filter(|f| !f.is_dir).count();
         let dir_count = files_to_remove.iter().filter(|f| f.is_dir).count();
 
-        let runner =
-            ProgressRunner::new(total_size, is_plain_mode(args), true, is_json_mode())?;
+        let runner = ProgressRunner::new(total_size, is_plain_mode(args), true, is_json_mode())?;
         let result = commands::remove::remove_paths(
             paths,
             args,

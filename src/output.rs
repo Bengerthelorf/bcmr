@@ -149,15 +149,11 @@ fn error_kind_from(err: &dyn std::error::Error) -> String {
 }
 
 pub fn print_check_human(r: &CheckResult) {
-    use crossterm::style::{Color, ResetColor, SetForegroundColor};
     use crate::ui::utils::format_bytes;
+    use crossterm::style::{Color, ResetColor, SetForegroundColor};
 
     if r.in_sync {
-        println!(
-            "{}In sync.{}",
-            SetForegroundColor(Color::Green),
-            ResetColor
-        );
+        println!("{}In sync.{}", SetForegroundColor(Color::Green), ResetColor);
         return;
     }
 
@@ -173,7 +169,11 @@ pub fn print_check_human(r: &CheckResult) {
     for d in &r.modified {
         let detail = match (d.src_size, d.dst_size) {
             (Some(s), Some(d)) => {
-                format!(" ({} -> {})", format_bytes(s as f64), format_bytes(d as f64))
+                format!(
+                    " ({} -> {})",
+                    format_bytes(s as f64),
+                    format_bytes(d as f64)
+                )
             }
             _ => String::new(),
         };

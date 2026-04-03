@@ -422,7 +422,12 @@ async fn handle_remote_upload(
         append: args.is_append(),
     };
 
-    let runner = ProgressRunner::new(total_size, is_plain_mode(args), false, crate::config::is_json_mode())?;
+    let runner = ProgressRunner::new(
+        total_size,
+        is_plain_mode(args),
+        false,
+        crate::config::is_json_mode(),
+    )?;
     runner.progress().lock().set_operation_type("Uploading");
     let multi_source = sources.len() > 1;
 
@@ -554,7 +559,12 @@ async fn handle_remote_download(
         append: args.is_append(),
     };
 
-    let runner = ProgressRunner::new(total_size, is_plain_mode(args), false, crate::config::is_json_mode())?;
+    let runner = ProgressRunner::new(
+        total_size,
+        is_plain_mode(args),
+        false,
+        crate::config::is_json_mode(),
+    )?;
     runner.progress().lock().set_operation_type("Downloading");
 
     if parallel > 1 {
@@ -696,7 +706,12 @@ async fn handle_serve_upload(
         }
     }
 
-    let runner = ProgressRunner::new(total_size, is_plain_mode(args), false, crate::config::is_json_mode())?;
+    let runner = ProgressRunner::new(
+        total_size,
+        is_plain_mode(args),
+        false,
+        crate::config::is_json_mode(),
+    )?;
     runner
         .progress()
         .lock()
@@ -853,7 +868,12 @@ async fn handle_serve_download(
         }
     }
 
-    let runner = ProgressRunner::new(total_size, is_plain_mode(args), false, crate::config::is_json_mode())?;
+    let runner = ProgressRunner::new(
+        total_size,
+        is_plain_mode(args),
+        false,
+        crate::config::is_json_mode(),
+    )?;
     runner
         .progress()
         .lock()

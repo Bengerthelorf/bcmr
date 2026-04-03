@@ -316,10 +316,7 @@ fn determine_dry_run_action(
 }
 
 pub enum PlanEntry {
-    CreateDir {
-        src: PathBuf,
-        dst: PathBuf,
-    },
+    CreateDir { src: PathBuf, dst: PathBuf },
     CopyFile { src: PathBuf, dst: PathBuf },
 }
 
@@ -346,14 +343,14 @@ fn scan_sources(
         }
 
         if src.is_file() {
-            let dst_path = if dst_is_dir {
-                dst.join(
-                    src.file_name()
-                        .ok_or_else(|| BcmrError::InvalidInput("Invalid source file name".into()))?,
-                )
-            } else {
-                dst.to_path_buf()
-            };
+            let dst_path =
+                if dst_is_dir {
+                    dst.join(src.file_name().ok_or_else(|| {
+                        BcmrError::InvalidInput("Invalid source file name".into())
+                    })?)
+                } else {
+                    dst.to_path_buf()
+                };
 
             let size = src.metadata()?.len();
             on_entry(
@@ -779,9 +776,7 @@ fn resolve_reflink_mode(arg: &Option<String>) -> (bool, bool) {
 }
 
 fn resolve_sparse_mode(arg: &Option<String>) -> SparseMode {
-    let mode_str = arg
-        .as_deref()
-        .unwrap_or(&crate::config::CONFIG.copy.sparse);
+    let mode_str = arg.as_deref().unwrap_or(&crate::config::CONFIG.copy.sparse);
     match mode_str.to_lowercase().as_str() {
         "force" => SparseMode::Always,
         "disable" | "never" => SparseMode::Never,
@@ -802,7 +797,11 @@ struct FinalizeCtx<'a> {
 }
 
 impl<'a> FinalizeCtx<'a> {
-    async fn run(self, dst_file: fs::File, inline_hash: Option<blake3::Hash>) -> std::result::Result<(), BcmrError> {
+    async fn run(
+        self,
+        dst_file: fs::File,
+        inline_hash: Option<blake3::Hash>,
+    ) -> std::result::Result<(), BcmrError> {
         super::copy_strategies::finalize(
             dst_file,
             self.write_target,
@@ -884,7 +883,16 @@ where
     )
     .await?
     {
-        let ctx = FinalizeCtx { write_target: &write_target, dst, src, use_atomic, guard: &mut guard, sync, preserve, verify };
+        let ctx = FinalizeCtx {
+            write_target: &write_target,
+            dst,
+            src,
+            use_atomic,
+            guard: &mut guard,
+            sync,
+            preserve,
+            verify,
+        };
         return ctx.run(fs::File::open(&write_target).await?, None).await;
     }
 
@@ -894,7 +902,16 @@ where
     {
         match try_copy_file_range(src, &write_target, file_size, &callback.callback).await {
             Some(Ok(())) => {
-                let ctx = FinalizeCtx { write_target: &write_target, dst, src, use_atomic, guard: &mut guard, sync, preserve, verify };
+                let ctx = FinalizeCtx {
+                    write_target: &write_target,
+                    dst,
+                    src,
+                    use_atomic,
+                    guard: &mut guard,
+                    sync,
+                    preserve,
+                    verify,
+                };
                 return ctx.run(fs::File::open(&write_target).await?, None).await;
             }
             Some(Err(e)) => return Err(e),
@@ -904,7 +921,13 @@ where
 
     // Slow path: streaming copy with optional resume
     let resume_state = crate::core::resume::resolve(
-        src, dst, file_size, resume, strict, append, &callback.callback,
+        src,
+        dst,
+        file_size,
+        resume,
+        strict,
+        append,
+        &callback.callback,
     )
     .await?;
 
@@ -945,7 +968,14 @@ where
     }
 
     let mut session = super::copy_strategies::create_session(
-        src, dst, file_size, start_offset, resume, append, strict, &loaded_session,
+        src,
+        dst,
+        file_size,
+        start_offset,
+        resume,
+        append,
+        strict,
+        &loaded_session,
     );
 
     let inline_src_hash = match test_mode {
@@ -984,14 +1014,27 @@ where
         }
         TestMode::None => {
             super::copy_strategies::streaming_copy(
-                &mut src_file, &mut dst_file, &mut session,
-                &sparse_mode, start_offset, &callback.callback,
+                &mut src_file,
+                &mut dst_file,
+                &mut session,
+                &sparse_mode,
+                start_offset,
+                &callback.callback,
             )
             .await?
         }
     };
 
-    let ctx = FinalizeCtx { write_target: &write_target, dst, src, use_atomic, guard: &mut guard, sync, preserve, verify };
+    let ctx = FinalizeCtx {
+        write_target: &write_target,
+        dst,
+        src,
+        use_atomic,
+        guard: &mut guard,
+        sync,
+        preserve,
+        verify,
+    };
     ctx.run(dst_file, inline_src_hash).await
 }
 
@@ -1069,9 +1112,7 @@ where
                     }
                     dir_entries.push((src.clone(), dst.clone()));
                 }
-                PlanEntry::CopyFile {
-                    ref src, ref dst
-                } => {
+                PlanEntry::CopyFile { ref src, ref dst } => {
                     check_overwrite(dst, cli).await?;
 
                     copy_file(

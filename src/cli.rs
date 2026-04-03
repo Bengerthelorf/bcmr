@@ -295,9 +295,7 @@ impl Commands {
 
     pub fn should_prompt_for_overwrite(&self) -> bool {
         match self {
-            Commands::Copy { args, .. } | Commands::Move { args, .. } => {
-                args.force && !args.yes
-            }
+            Commands::Copy { args, .. } | Commands::Move { args, .. } => args.force && !args.yes,
             Commands::Remove {
                 force, interactive, ..
             } => !*force && *interactive,
@@ -392,7 +390,13 @@ impl Commands {
     }
 
     pub fn is_interactive(&self) -> bool {
-        matches!(self, Commands::Remove { interactive: true, .. })
+        matches!(
+            self,
+            Commands::Remove {
+                interactive: true,
+                ..
+            }
+        )
     }
 
     pub fn is_verbose(&self) -> bool {

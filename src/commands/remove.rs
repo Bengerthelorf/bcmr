@@ -141,11 +141,7 @@ async fn confirm_remove(
     Ok(input.trim().eq_ignore_ascii_case("y") || input.trim().eq_ignore_ascii_case("yes"))
 }
 
-async fn report_progress(
-    size: u64,
-    test_mode: &TestMode,
-    callback: &(impl Fn(u64) + Send + Sync),
-) {
+async fn report_progress(size: u64, test_mode: &TestMode, callback: &(impl Fn(u64) + Send + Sync)) {
     if size == 0 {
         return;
     }

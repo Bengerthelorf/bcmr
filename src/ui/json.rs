@@ -147,7 +147,8 @@ impl ProgressRenderer for JsonProgress {
     }
 
     fn update_worker(&mut self, slot: usize, file_name: &str, file_size: u64, progress: u64) {
-        self.data.update_worker(slot, file_name, file_size, progress);
+        self.data
+            .update_worker(slot, file_name, file_size, progress);
     }
 
     fn finish_worker(&mut self, slot: usize) {
@@ -179,8 +180,7 @@ impl ProgressRenderer for JsonProgress {
         };
 
         let mut stdout = io::stdout().lock();
-        serde_json::to_writer(&mut stdout, &line)
-            .map_err(io::Error::other)?;
+        serde_json::to_writer(&mut stdout, &line).map_err(io::Error::other)?;
         stdout.write_all(b"\n")?;
         stdout.flush()
     }
