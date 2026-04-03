@@ -36,6 +36,7 @@
 - ⚡ **默认高性能** — Reflink (写时复制)、Linux `copy_file_range`、稀疏文件检测、流水线扫描+复制、独立 SSH 连接的并行传输
 - 🛡️ **安全操作** — 干运行预览、覆盖提示、正则排除、原子写入与持久 fsync (macOS 使用 `F_FULLFSYNC`)
 - 🔄 **自更新** — `bcmr update` 原地更新；每次运行自动后台检查新版本
+- 🤖 **AI Agent 友好** — `--json` 输出 NDJSON 流式进度和结构化结果。`check` 子命令对比源与目标差异
 - 🎨 **可配置** — 通过 TOML 自定义颜色渐变、进度条字符、边框样式
 
 ## 安装
@@ -98,6 +99,13 @@ bcmr copy user@host:/remote/file.txt ./
 # 并行 SCP 传输（4 个工作线程）
 bcmr copy -P 4 *.bin user@host:/backup/
 bcmr copy -P 8 -r project/ user@host:/backup/
+
+# 对比源与目标差异
+bcmr check -r src/ dst/
+
+# JSON 输出（适用于 AI Agent / 脚本）
+bcmr copy --json -r src/ dst/         # NDJSON 流式进度
+bcmr check --json -r src/ dst/        # 结构化差异输出
 ```
 
 ### Shell 集成

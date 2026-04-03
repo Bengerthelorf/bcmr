@@ -36,6 +36,7 @@ Installation, shell integration, CLI reference, configuration, and more.
 - ⚡ **Fast by Default** — Reflink (CoW), `copy_file_range` on Linux, sparse file detection, pipeline scan+copy, per-worker SSH connections for parallel transfers
 - 🛡️ **Safe Operations** — Dry-run preview, overwrite prompts, regex exclusions, atomic writes with durable fsync (`F_FULLFSYNC` on macOS)
 - 🔄 **Self-Update** — `bcmr update` to update in place; background update check on every run
+- 🤖 **AI-Agent Friendly** — `--json` flag for NDJSON streaming progress and structured results. `check` subcommand to diff source vs destination
 - 🎨 **Configurable** — Custom color gradients, bar characters, border styles via TOML config
 
 ## Install
@@ -98,6 +99,13 @@ bcmr copy user@host:/remote/file.txt ./
 # Parallel SCP transfers (4 workers)
 bcmr copy -P 4 *.bin user@host:/backup/
 bcmr copy -P 8 -r project/ user@host:/backup/
+
+# Check differences between source and destination
+bcmr check -r src/ dst/
+
+# JSON output for AI agents / scripts
+bcmr copy --json -r src/ dst/         # streaming NDJSON progress
+bcmr check --json -r src/ dst/        # structured diff output
 ```
 
 ### Shell Integration
