@@ -1,5 +1,6 @@
 use crate::core::error::BcmrError;
 use crate::core::remote::{self, parse_remote_path};
+use crate::core::serve_client::ServeClient;
 use crate::core::traversal;
 use crate::output::{CheckResult, CheckSummary, FileDiff, Status};
 
@@ -44,7 +45,6 @@ pub async fn run(
             return Err(BcmrError::SourceNotFound(src.clone()));
         }
 
-        // Determine the resolved destination subdirectory
         let (src_entries, dst_entries) = collect_both(
             src,
             dest,
@@ -76,7 +76,6 @@ async fn collect_both(
     let src_str = src.to_string_lossy();
     let dest_str = dest.to_string_lossy();
 
-    // Resolve source name for destination subdirectory
     let src_name = if is_remote_src {
         let rp = parse_remote_path(&src_str).unwrap();
         rp.path.rsplit('/').next().unwrap_or(&rp.path).to_string()
@@ -87,7 +86,6 @@ async fn collect_both(
             .to_string()
     };
 
-    // Check if source is a directory
     let src_is_dir = if is_remote_src {
         let rp = parse_remote_path(&src_str).unwrap();
         let info = remote::remote_stat(&rp).await?;
@@ -107,6 +105,7 @@ async fn collect_both(
     let src_entries = if is_remote_src {
         let rp = parse_remote_path(&src_str).unwrap();
         if src_is_dir {
+            emit_scanning(&rp.display());
             collect_remote_entries(&rp).await?
         } else {
             let info = remote::remote_stat(&rp).await?;
@@ -127,7 +126,7 @@ async fn collect_both(
         }]
     };
 
-    // Resolve destination path (append source dir name if dest is a directory)
+    // Collect destination entries
     let dst_entries = if is_remote_dest {
         let rdest = parse_remote_path(&dest_str).unwrap();
         let rdest_sub = if src_is_dir {
@@ -135,6 +134,7 @@ async fn collect_both(
         } else {
             rdest
         };
+        emit_scanning(&rdest_sub.display());
         collect_remote_entries(&rdest_sub).await.unwrap_or_default()
     } else {
         let dest_is_dir = dest.exists() && dest.is_dir();
@@ -165,6 +165,22 @@ async fn collect_both(
     Ok((src_entries, dst_entries))
 }
 
+fn emit_scanning(target: &str) {
+    if crate::config::is_json_mode() {
+        let line = serde_json::json!({"type": "scanning", "target": target});
+        println!("{}", line);
+    } else {
+        eprint!("Scanning {}...", target);
+    }
+}
+
+fn emit_scanning_done(count: usize) {
+    if crate::config::is_json_mode() {
+        return; // JSON result will contain the data
+    }
+    eprintln!(" {} entries", count);
+}
+
 /// Collect entries from a local directory.
 fn collect_local_entries(root: &Path, excludes: &[regex::Regex]) -> Result<Vec<Entry>, BcmrError> {
     let mut entries = Vec::new();
@@ -182,15 +198,42 @@ fn collect_local_entries(root: &Path, excludes: &[regex::Regex]) -> Result<Vec<E
     Ok(entries)
 }
 
-/// Collect entries from a remote directory via SSH.
+/// Collect entries from a remote directory.
+/// Tries bcmr serve protocol first (fast binary listing), falls back to SSH find.
 async fn collect_remote_entries(remote: &remote::RemotePath) -> Result<Vec<Entry>, BcmrError> {
+    // Try serve protocol first
+    if let Ok(entries) = collect_via_serve(remote).await {
+        emit_scanning_done(entries.len());
+        return Ok(entries);
+    }
+
+    // Fallback: SSH find
     let files = remote::remote_list_files(remote).await?;
-    Ok(files
+    let entries: Vec<Entry> = files
         .into_iter()
         .map(|(rel_path, size, is_dir)| Entry {
             rel_path,
             size,
             is_dir,
+        })
+        .collect();
+    emit_scanning_done(entries.len());
+    Ok(entries)
+}
+
+/// Collect entries using the bcmr serve binary protocol (much faster than SSH find).
+async fn collect_via_serve(remote: &remote::RemotePath) -> Result<Vec<Entry>, BcmrError> {
+    let ssh_target = remote.ssh_target();
+    let mut client = ServeClient::connect(&ssh_target).await?;
+    let entries = client.list(&remote.path).await?;
+    client.close().await?;
+
+    Ok(entries
+        .into_iter()
+        .map(|e| Entry {
+            rel_path: e.path,
+            size: e.size,
+            is_dir: e.is_dir,
         })
         .collect())
 }
@@ -204,8 +247,6 @@ fn diff_entries(src: Vec<Entry>, dst: Vec<Entry>) -> (Vec<FileDiff>, Vec<FileDif
     let mut modified = Vec::new();
     let mut missing = Vec::new();
 
-    // Files in source but not in destination → added
-    // Files in both but different size → modified
     for s in &src {
         match dst_map.get(s.rel_path.as_str()) {
             None => {
@@ -226,11 +267,10 @@ fn diff_entries(src: Vec<Entry>, dst: Vec<Entry>) -> (Vec<FileDiff>, Vec<FileDif
                     is_dir: false,
                 });
             }
-            _ => {} // in sync
+            _ => {}
         }
     }
 
-    // Files in destination but not in source → missing
     for d in &dst {
         if !src_map.contains_key(d.rel_path.as_str()) {
             missing.push(FileDiff {
