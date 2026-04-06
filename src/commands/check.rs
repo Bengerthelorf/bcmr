@@ -97,8 +97,15 @@ async fn collect_both(
     let src_str = src.to_string_lossy();
     let dest_str = dest.to_string_lossy();
 
-    let src_name = if is_remote_src {
-        let rp = parse_remote_path(&src_str).unwrap();
+    let remote_src = if is_remote_src {
+        Some(parse_remote_path(&src_str).ok_or_else(|| {
+            BcmrError::InvalidInput(format!("Invalid remote path: {}", src.display()))
+        })?)
+    } else {
+        None
+    };
+
+    let src_name = if let Some(ref rp) = remote_src {
         rp.path.rsplit('/').next().unwrap_or(&rp.path).to_string()
     } else {
         src.file_name()
@@ -107,10 +114,8 @@ async fn collect_both(
             .to_string()
     };
 
-    // Stat source — use serve if available, else SSH
-    let src_is_dir = if is_remote_src {
-        let rp = parse_remote_path(&src_str).unwrap();
-        remote_is_dir(&rp, serve).await?
+    let src_is_dir = if let Some(ref rp) = remote_src {
+        remote_is_dir(rp, serve).await?
     } else {
         src.is_dir()
     };
@@ -122,16 +127,14 @@ async fn collect_both(
         )));
     }
 
-    // Collect source entries
-    let src_entries = if is_remote_src {
-        let rp = parse_remote_path(&src_str).unwrap();
+    let src_entries = if let Some(ref rp) = remote_src {
         if src_is_dir {
             emit_scanning(&rp.display());
-            let entries = collect_remote_entries(&rp, serve).await?;
+            let entries = collect_remote_entries(rp, serve).await?;
             emit_scanning_done(entries.len());
             entries
         } else {
-            let size = remote_size(&rp, serve).await?;
+            let size = remote_size(rp, serve).await?;
             vec![Entry {
                 rel_path: src_name.clone(),
                 size,
@@ -149,9 +152,10 @@ async fn collect_both(
         }]
     };
 
-    // Collect destination entries
     let dst_entries = if is_remote_dest {
-        let rdest = parse_remote_path(&dest_str).unwrap();
+        let rdest = parse_remote_path(&dest_str).ok_or_else(|| {
+            BcmrError::InvalidInput(format!("Invalid remote path: {}", dest.display()))
+        })?;
         let rdest_sub = if src_is_dir {
             rdest.join(&src_name)
         } else {
