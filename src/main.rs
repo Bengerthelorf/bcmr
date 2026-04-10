@@ -310,6 +310,33 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
     let excludes = args.compile_excludes()?;
     let paths = args.get_remove_paths().map_err(anyhow::Error::msg)?;
 
+    // In JSON mode, start the progress runner BEFORE scanning so that the
+    // ticker writes heartbeat events to the log while check_removes walks
+    // the tree. Without this, long scans on slow filesystems (NFS, HPC,
+    // many files) look like a frozen job — the descriptor line is all the
+    // log ever shows until the scan finishes.
+    let early_runner = if is_json_mode() {
+        let runner = ProgressRunner::new(
+            0,
+            is_plain_mode(args),
+            false,
+            true,
+            commands::copy::cleanup_partial_files,
+        )?;
+        {
+            let mut p = runner.progress().lock();
+            p.set_operation_type("Removing");
+            p.set_scanning(true);
+            if let Some(first_path) = paths.first() {
+                let display_name = first_path.file_name().unwrap_or_default().to_string_lossy();
+                p.set_current_file(&display_name, 0);
+            }
+        }
+        Some(runner)
+    } else {
+        None
+    };
+
     let files_to_remove =
         commands::remove::check_removes(paths, args.is_recursive(), args, &excludes).await?;
 
@@ -322,13 +349,22 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         let file_count = files_to_remove.iter().filter(|f| !f.is_dir).count();
         let dir_count = files_to_remove.iter().filter(|f| f.is_dir).count();
 
-        let runner = ProgressRunner::new(
-            total_size,
-            is_plain_mode(args),
-            true,
-            is_json_mode(),
-            commands::copy::cleanup_partial_files,
-        )?;
+        let runner = if let Some(r) = early_runner {
+            {
+                let mut p = r.progress().lock();
+                p.set_total_bytes(total_size);
+                p.set_scanning(false);
+            }
+            r
+        } else {
+            ProgressRunner::new(
+                total_size,
+                is_plain_mode(args),
+                true,
+                is_json_mode(),
+                commands::copy::cleanup_partial_files,
+            )?
+        };
         let result = commands::remove::remove_paths(
             paths,
             args,
@@ -363,24 +399,35 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         return Err(BcmrError::Cancelled.into());
     }
 
-    let total_size = files_to_remove.iter().map(|f| f.size).sum();
-    let runner = ProgressRunner::new(
-        total_size,
-        is_plain_mode(args),
-        args.is_dry_run(),
-        is_json_mode(),
-        commands::copy::cleanup_partial_files,
-    )?;
-
-    runner.progress().lock().set_operation_type("Removing");
-
-    if let Some(first_path) = paths.first() {
-        let display_name = first_path.file_name().unwrap_or_default().to_string_lossy();
-        runner
-            .progress()
-            .lock()
-            .set_current_file(&display_name, total_size);
-    }
+    let total_size: u64 = files_to_remove.iter().map(|f| f.size).sum();
+    let runner = if let Some(r) = early_runner {
+        {
+            let mut p = r.progress().lock();
+            p.set_total_bytes(total_size);
+            p.set_scanning(false);
+            if let Some(first_path) = paths.first() {
+                let display_name = first_path.file_name().unwrap_or_default().to_string_lossy();
+                p.set_current_file(&display_name, total_size);
+            }
+        }
+        r
+    } else {
+        let r = ProgressRunner::new(
+            total_size,
+            is_plain_mode(args),
+            args.is_dry_run(),
+            is_json_mode(),
+            commands::copy::cleanup_partial_files,
+        )?;
+        r.progress().lock().set_operation_type("Removing");
+        if let Some(first_path) = paths.first() {
+            let display_name = first_path.file_name().unwrap_or_default().to_string_lossy();
+            r.progress()
+                .lock()
+                .set_current_file(&display_name, total_size);
+        }
+        r
+    };
 
     commands::remove::remove_paths(
         paths,

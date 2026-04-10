@@ -16,7 +16,7 @@ use std::time::Instant;
 /// Output goes to a log file (detach mode) or stdout (stream mode).
 pub struct JsonProgress {
     data: ProgressData,
-    last_emit: Instant,
+    last_emit: Option<Instant>,
     finished: bool,
     writer: JsonWriter,
 }
@@ -102,7 +102,7 @@ impl JsonProgress {
     pub fn new(total_bytes: u64) -> Self {
         Self {
             data: ProgressData::new(total_bytes),
-            last_emit: Instant::now(),
+            last_emit: None,
             finished: false,
             writer: JsonWriter::Stdout,
         }
@@ -116,7 +116,7 @@ impl JsonProgress {
             .open(path)?;
         Ok(Self {
             data: ProgressData::new(total_bytes),
-            last_emit: Instant::now(),
+            last_emit: None,
             finished: false,
             writer: JsonWriter::File(BufWriter::new(file)),
         })
@@ -124,10 +124,12 @@ impl JsonProgress {
 
     fn emit_progress(&mut self) {
         let now = Instant::now();
-        if now.duration_since(self.last_emit).as_millis() < EMIT_INTERVAL_MS {
-            return;
+        if let Some(last) = self.last_emit {
+            if now.duration_since(last).as_millis() < EMIT_INTERVAL_MS {
+                return;
+            }
         }
-        self.last_emit = now;
+        self.last_emit = Some(now);
 
         let speed_mib = self.data.calculate_speed();
         let speed_bps = (speed_mib * 1024.0 * 1024.0) as u64;

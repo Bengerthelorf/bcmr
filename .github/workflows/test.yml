@@ -178,6 +178,72 @@ jobs:
           test ! -d /tmp/bcmr-rm-test/
           echo "Remove tests passed"
 
+      - name: Test --json background mode (remove)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          # Regression test for: --json bg mode writing nothing to the log
+          # when check_removes took a long time. The child must emit a
+          # scanning heartbeat before the scan completes, and the log must
+          # contain a terminal "result" line after the job finishes.
+          set -eu
+
+          root=/tmp/bcmr-json-bg
+          rm -rf "$root"
+          mkdir -p "$root"
+          # ~5k files across many dirs so scanning is non-trivial.
+          for i in $(seq 1 100); do
+            mkdir -p "$root/dir$i"
+            for j in $(seq 1 50); do
+              echo "x$j" > "$root/dir$i/f$j.txt"
+            done
+          done
+
+          # Build targets list (26 paths to mirror the reported bug).
+          targets=""
+          for i in $(seq 1 26); do targets="$targets $root/dir$i"; done
+
+          desc=$(cargo run --quiet -- remove -rfy --json $targets)
+          echo "descriptor: $desc"
+
+          job_id=$(echo "$desc" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["job_id"])')
+          log=$(echo "$desc" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["log"])')
+          echo "job_id=$job_id log=$log"
+
+          # Wait up to 30s for the result line to appear.
+          for _ in $(seq 1 60); do
+            if grep -q '"type":"result"' "$log" 2>/dev/null; then
+              break
+            fi
+            sleep 0.5
+          done
+
+          echo "--- log contents ---"
+          cat "$log"
+          echo "--- end log ---"
+
+          # The log must contain at least one progress line AND a terminal
+          # result line. A regression of the scan-blocks-writer bug would
+          # leave the log with only the descriptor.
+          grep -q '"type":"progress"' "$log" || { echo "FAIL: no progress line"; exit 1; }
+          grep -q '"type":"result"' "$log" || { echo "FAIL: no result line"; exit 1; }
+          grep -q '"status":"success"' "$log" || { echo "FAIL: job did not succeed"; exit 1; }
+
+          # All 26 target dirs should be gone.
+          for i in $(seq 1 26); do
+            if [ -e "$root/dir$i" ]; then
+              echo "FAIL: $root/dir$i still exists"
+              exit 1
+            fi
+          done
+
+          # bcmr status should find the job and report complete.
+          status=$(cargo run --quiet -- status "$job_id" --json)
+          echo "status: $status"
+          echo "$status" | grep -q '"type":"result"' || { echo "FAIL: status did not return result"; exit 1; }
+
+          echo "--json background mode remove test passed"
+
       - name: Test version and help
         shell: bash
         run: |
