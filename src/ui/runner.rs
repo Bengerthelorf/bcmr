@@ -36,7 +36,7 @@ impl ProgressRunner {
         tokio::spawn(async move {
             if let Ok(()) = ctrl_c().await {
                 on_interrupt();
-                let _ = signal.lock().finish();
+                let _ = signal.lock().finish_err("interrupted");
                 std::process::exit(130);
             }
         });
@@ -78,7 +78,17 @@ impl ProgressRunner {
 
     pub fn finish_err(self, msg: String) -> Result<()> {
         self.ticker_handle.abort();
-        let _ = self.progress.lock().finish();
+        let _ = self.progress.lock().finish_err(&msg);
         bail!("{}", msg);
+    }
+
+    /// Emit the error terminal event without returning an Err. Use at the
+    /// handler boundary when you want to propagate an existing error up
+    /// the stack while still making sure the log file gets a terminal
+    /// "error" line. Unlike `finish_err`, this consumes self and leaves
+    /// the caller to re-raise the original error.
+    pub fn finish_with_error(self, msg: &str) {
+        self.ticker_handle.abort();
+        let _ = self.progress.lock().finish_err(msg);
     }
 }

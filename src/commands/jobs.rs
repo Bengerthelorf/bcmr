@@ -2,6 +2,33 @@ use serde::Serialize;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// High-level state of a background job, derived from the log file and
+/// the process liveness. `done` means the job emitted a success result;
+/// `failed` means it emitted an error result; `interrupted` means the
+/// process died after the descriptor was written but before any terminal
+/// event reached the log (crash, SIGKILL, OOM, etc).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JobState {
+    Scanning,
+    Running,
+    Done,
+    Failed,
+    Interrupted,
+}
+
+impl JobState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JobState::Scanning => "scanning",
+            JobState::Running => "running",
+            JobState::Done => "done",
+            JobState::Failed => "failed",
+            JobState::Interrupted => "interrupted",
+        }
+    }
+}
+
 /// Generate a short hex job ID based on timestamp + pid.
 pub fn new_job_id() -> String {
     let ts = SystemTime::now()
@@ -37,21 +64,74 @@ pub struct JobInfo {
     pub log: String,
 }
 
-/// Read the latest line from a job's log file.
-pub fn read_latest_status(job_id: &str) -> Result<String, String> {
+/// Classify a job from its log file and process liveness. `latest_line`
+/// is the last non-empty line of the log (or an empty string). The
+/// descriptor line (first line, carries pid+job_id) is distinguished
+/// from progress/result by the presence of the `type` field.
+pub fn classify_job(latest_line: &str, pid_alive: bool) -> JobState {
+    let v: serde_json::Value = match serde_json::from_str(latest_line) {
+        Ok(v) => v,
+        Err(_) => {
+            // Malformed tail — treat like no event yet.
+            return if pid_alive {
+                JobState::Scanning
+            } else {
+                JobState::Interrupted
+            };
+        }
+    };
+
+    let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    match event_type {
+        "result" => match v.get("status").and_then(|s| s.as_str()) {
+            Some("success") => JobState::Done,
+            _ => JobState::Failed,
+        },
+        "progress" => {
+            let scanning = v.get("scanning").and_then(|s| s.as_bool()).unwrap_or(false);
+            if pid_alive {
+                if scanning {
+                    JobState::Scanning
+                } else {
+                    JobState::Running
+                }
+            } else {
+                JobState::Interrupted
+            }
+        }
+        _ => {
+            // Descriptor or unknown event.
+            if pid_alive {
+                JobState::Scanning
+            } else {
+                JobState::Interrupted
+            }
+        }
+    }
+}
+
+/// Look up a job's state from its id. Errors if the job log can't be read.
+pub fn job_state(job_id: &str) -> Result<(JobState, String), String> {
     let path = log_path(job_id);
     if !path.exists() {
         return Err(format!("job '{}' not found", job_id));
     }
-
     let content = std::fs::read_to_string(&path).map_err(|e| format!("cannot read log: {}", e))?;
 
-    content
+    let pid = content.lines().next().and_then(|l| {
+        let v: serde_json::Value = serde_json::from_str(l).ok()?;
+        v.get("pid")?.as_u64().map(|p| p as u32)
+    });
+    let alive = pid.is_some_and(is_pid_alive);
+
+    let latest = content
         .lines()
         .rev()
         .find(|l| !l.trim().is_empty())
-        .map(|l| l.to_string())
-        .ok_or_else(|| "log file is empty".to_string())
+        .unwrap_or("")
+        .to_string();
+
+    Ok((classify_job(&latest, alive), latest))
 }
 
 /// Check if a process is still running.
@@ -68,8 +148,15 @@ pub fn is_pid_alive(pid: u32) -> bool {
     }
 }
 
+/// A single job entry for listing purposes.
+pub struct JobEntry {
+    pub id: String,
+    pub state: JobState,
+    pub latest: String,
+}
+
 /// List all jobs (active and recent).
-pub fn list_jobs() -> Vec<(String, String, bool)> {
+pub fn list_jobs() -> Vec<JobEntry> {
     let dir = jobs_dir();
     let mut jobs = Vec::new();
 
@@ -90,7 +177,6 @@ pub fn list_jobs() -> Vec<(String, String, bool)> {
             Err(_) => continue,
         };
 
-        // Find the latest line
         let latest = content
             .lines()
             .rev()
@@ -98,7 +184,6 @@ pub fn list_jobs() -> Vec<(String, String, bool)> {
             .unwrap_or("")
             .to_string();
 
-        // Check if there's a PID line (first line should be job start info)
         let pid_alive = content
             .lines()
             .next()
@@ -108,7 +193,12 @@ pub fn list_jobs() -> Vec<(String, String, bool)> {
             })
             .is_some_and(is_pid_alive);
 
-        jobs.push((job_id, latest, pid_alive));
+        let state = classify_job(&latest, pid_alive);
+        jobs.push(JobEntry {
+            id: job_id,
+            state,
+            latest,
+        });
     }
 
     jobs

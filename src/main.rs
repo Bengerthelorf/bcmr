@@ -205,13 +205,25 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
             None
         };
 
-        let plan = commands::copy::plan_copy(sources, dest, args.is_recursive(), &excludes).await?;
+        let plan =
+            match commands::copy::plan_copy(sources, dest, args.is_recursive(), &excludes).await {
+                Ok(p) => p,
+                Err(e) => {
+                    if let Some(r) = early {
+                        r.finish_with_error(&e.to_string());
+                    }
+                    return Err(e.into());
+                }
+            };
 
         if args.is_force()
             && !plan.overwrites.is_empty()
             && args.should_prompt_for_overwrite()
             && !confirm_overwrite(&plan.overwrites)?
         {
+            if let Some(r) = early {
+                r.finish_with_error("cancelled by user");
+            }
             return Err(BcmrError::Cancelled.into());
         }
 
@@ -317,29 +329,50 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
     }
 
     let first_display = first_display_name(sources);
-    // Start a scanning runner before check_overwrites + get_total_size so
-    // that JSON mode emits heartbeats while those recursive walks run.
     let early = if !args.is_dry_run() {
         start_scanning_runner(args, "Moving", first_display.as_deref())?
     } else {
         None
     };
 
+    // Any Err before the runner is constructed must go through this
+    // closure so the early scanning runner (if any) emits a terminal
+    // error event to the log before we propagate.
+    let bail_early = |early: Option<ProgressRunner>, e: anyhow::Error| -> Result<()> {
+        if let Some(r) = early {
+            r.finish_with_error(&e.to_string());
+        }
+        Err(e)
+    };
+
     if args.is_force() {
-        let files_to_overwrite =
-            commands::r#move::check_overwrites(sources, dest, args.is_recursive(), args, &excludes)
-                .await?;
+        let files_to_overwrite = match commands::r#move::check_overwrites(
+            sources,
+            dest,
+            args.is_recursive(),
+            args,
+            &excludes,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => return bail_early(early, e.into()),
+        };
 
         if !files_to_overwrite.is_empty()
             && args.should_prompt_for_overwrite()
             && !confirm_overwrite(&files_to_overwrite)?
         {
-            return Err(BcmrError::Cancelled.into());
+            return bail_early(early, BcmrError::Cancelled.into());
         }
     }
 
     let total_size =
-        commands::r#move::get_total_size(sources, args.is_recursive(), args, &excludes).await?;
+        match commands::r#move::get_total_size(sources, args.is_recursive(), args, &excludes).await
+        {
+            Ok(v) => v,
+            Err(e) => return bail_early(early, e.into()),
+        };
 
     if args.is_dry_run() {
         if !is_json_mode() {
@@ -384,7 +417,7 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
             if !is_json_mode() {
                 eprintln!("Error moving '{}': {}", src.display(), e);
             }
-            return runner.finish_err("Move operation encountered errors.".into());
+            return runner.finish_err(format!("Error moving '{}': {}", src.display(), e));
         }
     }
 
@@ -399,7 +432,15 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
     let early = start_scanning_runner(args, "Removing", first_display.as_deref())?;
 
     let files_to_remove =
-        commands::remove::check_removes(paths, args.is_recursive(), args, &excludes).await?;
+        match commands::remove::check_removes(paths, args.is_recursive(), args, &excludes).await {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(r) = early {
+                    r.finish_with_error(&e.to_string());
+                }
+                return Err(e.into());
+            }
+        };
 
     if args.is_dry_run() {
         if !is_json_mode() {
@@ -429,9 +470,15 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         )
         .await;
 
-        runner.finish_ok()?;
-
-        result?;
+        match result {
+            Ok(()) => {
+                runner.finish_ok()?;
+            }
+            Err(e) => {
+                runner.finish_with_error(&e.to_string());
+                return Err(e.into());
+            }
+        }
 
         if !is_json_mode() {
             print!("\nSummary: {} files", file_count);
@@ -449,6 +496,9 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         && (!args.is_interactive() || files_to_remove.len() > 1)
         && !confirm_removal(&files_to_remove)?
     {
+        if let Some(r) = early {
+            r.finish_with_error("cancelled by user");
+        }
         return Err(BcmrError::Cancelled.into());
     }
 
@@ -462,7 +512,7 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         false,
     )?;
 
-    commands::remove::remove_paths(
+    let result = commands::remove::remove_paths(
         paths,
         args,
         &excludes,
@@ -471,9 +521,15 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         Box::new(runner.file_callback()),
         files_to_remove.len(),
     )
-    .await?;
+    .await;
 
-    runner.finish_ok()
+    match result {
+        Ok(()) => runner.finish_ok(),
+        Err(e) => {
+            runner.finish_with_error(&e.to_string());
+            Err(e.into())
+        }
+    }
 }
 
 async fn handle_check_command(args: &Commands) -> Result<output::CheckResult> {
@@ -673,38 +729,87 @@ fn maybe_detach(cli: &cli::Cli) -> Result<bool> {
     Ok(true) // parent exits
 }
 
+fn status_detail(latest: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(latest)
+        .ok()
+        .and_then(|v| {
+            let ty = v.get("type")?.as_str()?;
+            match ty {
+                "progress" => v
+                    .get("percent")
+                    .and_then(|p| p.as_f64())
+                    .map(|p| format!("{:.1}%", p)),
+                "result" => match v.get("status").and_then(|s| s.as_str()) {
+                    Some("success") => Some("complete".to_string()),
+                    Some(_) => v
+                        .get("error")
+                        .and_then(|e| e.as_str())
+                        .map(String::from)
+                        .or_else(|| Some("error".to_string())),
+                    None => None,
+                },
+                _ => None,
+            }
+        })
+        .unwrap_or_default()
+}
+
 fn handle_status_command(job_id: &Option<String>) {
     match job_id {
-        Some(id) => match commands::jobs::read_latest_status(id) {
-            Ok(line) => println!("{}", line),
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
+        Some(id) => {
+            let (state, latest) = match commands::jobs::job_state(id) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            if is_json_mode() {
+                // Emit a single JSON object wrapping state + latest line.
+                let latest_val: serde_json::Value =
+                    serde_json::from_str(&latest).unwrap_or(serde_json::Value::Null);
+                let wrapper = serde_json::json!({
+                    "job_id": id,
+                    "state": state.as_str(),
+                    "latest": latest_val,
+                });
+                println!("{}", wrapper);
+            } else {
+                println!("{}\t{}\t{}", id, state.as_str(), status_detail(&latest));
             }
-        },
+        }
         None => {
-            // List all jobs
             let jobs = commands::jobs::list_jobs();
             if jobs.is_empty() {
-                println!("No jobs found.");
+                if !is_json_mode() {
+                    println!("No jobs found.");
+                }
                 return;
             }
-            for (id, latest, alive) in &jobs {
-                let status = if *alive { "running" } else { "done" };
-                // Try to extract percent from latest line
-                let detail = serde_json::from_str::<serde_json::Value>(latest)
-                    .ok()
-                    .and_then(|v| {
-                        if v.get("type")?.as_str()? == "progress" {
-                            Some(format!("{:.1}%", v.get("percent")?.as_f64()?))
-                        } else if v.get("type")?.as_str()? == "result" {
-                            Some("complete".to_string())
-                        } else {
-                            None
-                        }
+            if is_json_mode() {
+                let arr: Vec<_> = jobs
+                    .iter()
+                    .map(|j| {
+                        let latest_val: serde_json::Value =
+                            serde_json::from_str(&j.latest).unwrap_or(serde_json::Value::Null);
+                        serde_json::json!({
+                            "job_id": j.id,
+                            "state": j.state.as_str(),
+                            "latest": latest_val,
+                        })
                     })
-                    .unwrap_or_default();
-                println!("{}\t{}\t{}", id, status, detail);
+                    .collect();
+                println!("{}", serde_json::Value::Array(arr));
+            } else {
+                for j in &jobs {
+                    println!(
+                        "{}\t{}\t{}",
+                        j.id,
+                        j.state.as_str(),
+                        status_detail(&j.latest)
+                    );
+                }
             }
         }
     }

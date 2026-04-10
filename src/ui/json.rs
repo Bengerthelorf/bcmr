@@ -91,6 +91,8 @@ struct ResultLine<'a> {
     duration_secs: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     avg_speed_bps: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'a str>,
 }
 
 // ── Implementation ─────────────────────────────────────────────────────
@@ -236,6 +238,27 @@ impl ProgressRenderer for JsonProgress {
             bytes_total: self.data.current_bytes,
             duration_secs: elapsed.as_secs_f64(),
             avg_speed_bps: avg_bps,
+            error: None,
+        };
+
+        self.writer.write_line_strict(&line)
+    }
+
+    fn finish_err(&mut self, msg: &str) -> io::Result<()> {
+        if self.finished {
+            return Ok(());
+        }
+        self.finished = true;
+
+        let elapsed = self.data.elapsed();
+        let line = ResultLine {
+            r#type: "result",
+            status: "error",
+            operation: &self.data.operation_type,
+            bytes_total: self.data.current_bytes,
+            duration_secs: elapsed.as_secs_f64(),
+            avg_speed_bps: None,
+            error: Some(msg),
         };
 
         self.writer.write_line_strict(&line)

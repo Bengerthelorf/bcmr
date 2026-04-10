@@ -9,6 +9,14 @@ pub trait ProgressRenderer: Send {
     fn inc_current(&mut self, delta: u64);
     fn finish(&mut self) -> io::Result<()>;
 
+    /// Terminate the renderer with a failure status. The default just
+    /// closes the renderer the same way as `finish` — JSON renderers
+    /// override this to emit an explicit error event so bg consumers can
+    /// distinguish failed jobs from successful ones.
+    fn finish_err(&mut self, _msg: &str) -> io::Result<()> {
+        self.finish()
+    }
+
     // -- Optional: metadata setters (no-op by default) --
     fn set_total_items(&mut self, _total: usize) {}
     fn inc_items_processed(&mut self) {}
