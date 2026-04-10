@@ -82,6 +82,86 @@ fn confirm_removal(files: &[commands::remove::FileToRemove]) -> Result<bool> {
     prompt_yes_no("\nDo you want to proceed?")
 }
 
+/// First filename from a list, as a short display label.
+fn first_display_name(paths: &[std::path::PathBuf]) -> Option<String> {
+    paths.first().map(|p| {
+        p.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
+    })
+}
+
+/// In JSON mode, create a ProgressRunner with `scanning=true` so the ticker
+/// emits heartbeat events to the log while the plan/check phase runs. Long
+/// scans on slow filesystems (NFS, HPC, many files) would otherwise leave
+/// the log with only the parent-written descriptor line, making the job
+/// look frozen. Returns `None` in non-JSON mode so interactive handlers
+/// keep their existing prompt flow.
+fn start_scanning_runner(
+    args: &Commands,
+    operation: &str,
+    first_display: Option<&str>,
+) -> Result<Option<ProgressRunner>> {
+    if !is_json_mode() {
+        return Ok(None);
+    }
+    let runner = ProgressRunner::new(
+        0,
+        is_plain_mode(args),
+        false,
+        true,
+        commands::copy::cleanup_partial_files,
+    )?;
+    {
+        let mut p = runner.progress().lock();
+        p.set_operation_type(operation);
+        p.set_scanning(true);
+        if let Some(name) = first_display {
+            p.set_current_file(name, 0);
+        }
+    }
+    Ok(Some(runner))
+}
+
+/// Either take over an early scanning runner (setting total and clearing
+/// `scanning`) or create a fresh runner now that the total is known.
+fn resume_or_new_runner(
+    early: Option<ProgressRunner>,
+    args: &Commands,
+    operation: &str,
+    first_display: Option<&str>,
+    total_size: u64,
+    silent: bool,
+) -> Result<ProgressRunner> {
+    if let Some(r) = early {
+        {
+            let mut p = r.progress().lock();
+            p.set_total_bytes(total_size);
+            p.set_scanning(false);
+            if let Some(name) = first_display {
+                p.set_current_file(name, total_size);
+            }
+        }
+        return Ok(r);
+    }
+    let r = ProgressRunner::new(
+        total_size,
+        is_plain_mode(args),
+        silent,
+        is_json_mode(),
+        commands::copy::cleanup_partial_files,
+    )?;
+    {
+        let mut p = r.progress().lock();
+        p.set_operation_type(operation);
+        if let Some(name) = first_display {
+            p.set_current_file(name, total_size);
+        }
+    }
+    Ok(r)
+}
+
 async fn handle_copy_command(args: &Commands) -> Result<()> {
     use crate::core::remote::parse_remote_path;
 
@@ -115,6 +195,16 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
     let needs_overwrite_prompt = args.is_force() && args.should_prompt_for_overwrite();
 
     if needs_overwrite_prompt || args.is_dry_run() {
+        let first_display = first_display_name(sources);
+        // Only start an early heartbeat runner for the real execute path.
+        // Dry-run in JSON mode already emits nothing to the log; starting
+        // a runner there would leak its ticker task.
+        let early = if !args.is_dry_run() {
+            start_scanning_runner(args, "Copying", first_display.as_deref())?
+        } else {
+            None
+        };
+
         let plan = commands::copy::plan_copy(sources, dest, args.is_recursive(), &excludes).await?;
 
         if args.is_force()
@@ -138,22 +228,14 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
             return Ok(());
         }
 
-        let runner = ProgressRunner::new(
+        let runner = resume_or_new_runner(
+            early,
+            args,
+            "Copying",
+            first_display.as_deref(),
             plan.total_size,
-            is_plain_mode(args),
             false,
-            is_json_mode(),
-            commands::copy::cleanup_partial_files,
         )?;
-
-        {
-            let mut p = runner.progress().lock();
-            p.set_operation_type("Copying");
-            if let Some(first) = sources.first() {
-                let display_name = first.file_name().unwrap_or_default().to_string_lossy();
-                p.set_current_file(&display_name, plan.total_size);
-            }
-        }
 
         let result = commands::copy::execute_plan(
             &plan,
@@ -234,6 +316,15 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
         );
     }
 
+    let first_display = first_display_name(sources);
+    // Start a scanning runner before check_overwrites + get_total_size so
+    // that JSON mode emits heartbeats while those recursive walks run.
+    let early = if !args.is_dry_run() {
+        start_scanning_runner(args, "Moving", first_display.as_deref())?
+    } else {
+        None
+    };
+
     if args.is_force() {
         let files_to_overwrite =
             commands::r#move::check_overwrites(sources, dest, args.is_recursive(), args, &excludes)
@@ -269,20 +360,14 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
         return Ok(());
     }
 
-    let runner = ProgressRunner::new(
+    let runner = resume_or_new_runner(
+        early,
+        args,
+        "Moving",
+        first_display.as_deref(),
         total_size,
-        is_plain_mode(args),
         false,
-        is_json_mode(),
-        commands::copy::cleanup_partial_files,
     )?;
-
-    if let Some(first) = sources.first() {
-        let display_name = first.file_name().unwrap_or_default().to_string_lossy();
-        let mut p = runner.progress().lock();
-        p.set_current_file(&display_name, total_size);
-        p.set_operation_type("Moving");
-    }
 
     for src in sources {
         let result = commands::r#move::move_path(
@@ -310,32 +395,8 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
     let excludes = args.compile_excludes()?;
     let paths = args.get_remove_paths().map_err(anyhow::Error::msg)?;
 
-    // In JSON mode, start the progress runner BEFORE scanning so that the
-    // ticker writes heartbeat events to the log while check_removes walks
-    // the tree. Without this, long scans on slow filesystems (NFS, HPC,
-    // many files) look like a frozen job — the descriptor line is all the
-    // log ever shows until the scan finishes.
-    let early_runner = if is_json_mode() {
-        let runner = ProgressRunner::new(
-            0,
-            is_plain_mode(args),
-            false,
-            true,
-            commands::copy::cleanup_partial_files,
-        )?;
-        {
-            let mut p = runner.progress().lock();
-            p.set_operation_type("Removing");
-            p.set_scanning(true);
-            if let Some(first_path) = paths.first() {
-                let display_name = first_path.file_name().unwrap_or_default().to_string_lossy();
-                p.set_current_file(&display_name, 0);
-            }
-        }
-        Some(runner)
-    } else {
-        None
-    };
+    let first_display = first_display_name(paths);
+    let early = start_scanning_runner(args, "Removing", first_display.as_deref())?;
 
     let files_to_remove =
         commands::remove::check_removes(paths, args.is_recursive(), args, &excludes).await?;
@@ -349,22 +410,14 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
         let file_count = files_to_remove.iter().filter(|f| !f.is_dir).count();
         let dir_count = files_to_remove.iter().filter(|f| f.is_dir).count();
 
-        let runner = if let Some(r) = early_runner {
-            {
-                let mut p = r.progress().lock();
-                p.set_total_bytes(total_size);
-                p.set_scanning(false);
-            }
-            r
-        } else {
-            ProgressRunner::new(
-                total_size,
-                is_plain_mode(args),
-                true,
-                is_json_mode(),
-                commands::copy::cleanup_partial_files,
-            )?
-        };
+        let runner = resume_or_new_runner(
+            early,
+            args,
+            "Removing",
+            first_display.as_deref(),
+            total_size,
+            true,
+        )?;
         let result = commands::remove::remove_paths(
             paths,
             args,
@@ -400,34 +453,14 @@ async fn handle_remove_command(args: &Commands) -> Result<()> {
     }
 
     let total_size: u64 = files_to_remove.iter().map(|f| f.size).sum();
-    let runner = if let Some(r) = early_runner {
-        {
-            let mut p = r.progress().lock();
-            p.set_total_bytes(total_size);
-            p.set_scanning(false);
-            if let Some(first_path) = paths.first() {
-                let display_name = first_path.file_name().unwrap_or_default().to_string_lossy();
-                p.set_current_file(&display_name, total_size);
-            }
-        }
-        r
-    } else {
-        let r = ProgressRunner::new(
-            total_size,
-            is_plain_mode(args),
-            args.is_dry_run(),
-            is_json_mode(),
-            commands::copy::cleanup_partial_files,
-        )?;
-        r.progress().lock().set_operation_type("Removing");
-        if let Some(first_path) = paths.first() {
-            let display_name = first_path.file_name().unwrap_or_default().to_string_lossy();
-            r.progress()
-                .lock()
-                .set_current_file(&display_name, total_size);
-        }
-        r
-    };
+    let runner = resume_or_new_runner(
+        early,
+        args,
+        "Removing",
+        first_display.as_deref(),
+        total_size,
+        false,
+    )?;
 
     commands::remove::remove_paths(
         paths,
