@@ -30,14 +30,16 @@ fn check_removes_sync(
             continue;
         }
 
-        if path.is_file() {
-            let metadata = path.metadata()?;
-            files_to_remove.push(FileToRemove {
-                path: path.to_path_buf(),
-                is_dir: false,
-                size: metadata.len(),
-            });
-        } else if path.is_dir() {
+        // symlink_metadata() doesn't follow symlinks, so dangling symlinks
+        // report Ok and broken-target files aren't accidentally hidden as
+        // "missing".
+        let md = match path.symlink_metadata() {
+            Ok(m) => m,
+            Err(_) if force => continue,
+            Err(_) => return Err(BcmrError::SourceNotFound(path.to_path_buf())),
+        };
+
+        if md.is_dir() {
             if !recursive && !dir_only {
                 return Err(BcmrError::InvalidInput(format!(
                     "Cannot remove '{}': Is a directory (use -r for recursive removal)",
@@ -46,7 +48,6 @@ fn check_removes_sync(
             }
 
             if dir_only {
-                // Use read_dir (blocking syscall, acceptable in spawn_blocking)
                 let mut read_dir = std::fs::read_dir(&path)?;
                 if read_dir.next().is_some() {
                     return Err(BcmrError::InvalidInput(format!(
@@ -65,22 +66,32 @@ fn check_removes_sync(
             if recursive {
                 for entry in traversal::walk(&path, true, true, 0, &excludes) {
                     let entry = entry?;
-                    let path = entry.path();
+                    let entry_path = entry.path();
+                    let ft = entry.file_type();
 
-                    let metadata = entry.metadata()?;
+                    // Only regular files contribute bytes to the total.
+                    // Symlinks, fifos, sockets etc. all count as items to
+                    // remove but have size 0.
+                    let size = if ft.is_file() {
+                        entry.metadata().map(|m| m.len()).unwrap_or(0)
+                    } else {
+                        0
+                    };
                     files_to_remove.push(FileToRemove {
-                        path: path.to_path_buf(),
-                        is_dir: entry.file_type().is_dir(),
-                        size: if entry.file_type().is_file() {
-                            metadata.len()
-                        } else {
-                            0
-                        },
+                        path: entry_path.to_path_buf(),
+                        is_dir: ft.is_dir(),
+                        size,
                     });
                 }
             }
-        } else if !force {
-            return Err(BcmrError::SourceNotFound(path.to_path_buf()));
+        } else {
+            // Regular file, symlink (valid or dangling), or any other
+            // non-directory entry. All of these are unlinked the same way.
+            files_to_remove.push(FileToRemove {
+                path: path.to_path_buf(),
+                is_dir: false,
+                size: if md.is_file() { md.len() } else { 0 },
+            });
         }
     }
 
@@ -192,23 +203,30 @@ pub async fn remove_path(
         .to_string_lossy()
         .to_string();
 
-    if path.is_dir() && (cli.is_recursive() || cli.is_dir_only()) {
+    // symlink_metadata so we see the link itself, not what it points at.
+    let md = match path.symlink_metadata() {
+        Ok(m) => m,
+        Err(_) if cli.is_force() => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+
+    if md.is_dir() && (cli.is_recursive() || cli.is_dir_only()) {
         on_new_file(&file_name, 0);
 
         for entry in traversal::walk(path, true, true, 0, excludes) {
             let entry = entry?;
             let entry_path = entry.path();
+            let ft = entry.file_type();
 
-            let size = if entry.file_type().is_file() {
-                let metadata = entry.metadata()?;
-                metadata.len()
+            let size = if ft.is_file() {
+                entry.metadata()?.len()
             } else {
                 0
             };
 
             if cli.is_interactive()
                 && !cli.is_force()
-                && !confirm_remove(entry_path, entry.file_type().is_dir(), is_tui).await?
+                && !confirm_remove(entry_path, ft.is_dir(), is_tui).await?
             {
                 continue;
             }
@@ -222,16 +240,18 @@ pub async fn remove_path(
             on_new_file(&entry_name, size);
 
             if !cli.is_dry_run() {
-                if entry.file_type().is_file() {
-                    fs::remove_file(entry_path).await?;
-                } else if entry.file_type().is_dir() {
+                if ft.is_dir() {
                     fs::remove_dir(entry_path).await?;
+                } else {
+                    // Files, symlinks (valid or dangling), fifos, sockets:
+                    // unlink() handles all non-directories uniformly.
+                    fs::remove_file(entry_path).await?;
                 }
             } else {
                 print_dry_run(ActionType::Remove, &entry_path.to_string_lossy(), None);
             }
 
-            if entry.file_type().is_file() {
+            if ft.is_file() {
                 report_progress(size, &test_mode, &progress_callback).await;
             }
 
@@ -244,16 +264,27 @@ pub async fn remove_path(
                 println!("removed {}", entry_path.display());
             }
         }
-    } else if path.is_file() {
+    } else if md.is_dir() {
+        // Non-recursive directory: the earlier check in check_removes_sync
+        // would have rejected this for normal remove; dir_only / rmdir is
+        // handled by the caller's dry-run branch via remove_paths.
+        return Err(BcmrError::InvalidInput(format!(
+            "Cannot remove '{}': Is a directory (use -r for recursive removal)",
+            path.display()
+        )));
+    } else {
+        // Regular file or symlink (any kind).
         if cli.is_dry_run() {
             print_dry_run(ActionType::Remove, &path.to_string_lossy(), None);
             return Ok(());
         }
 
-        let size = path.metadata()?.len();
+        let size = if md.is_file() { md.len() } else { 0 };
         on_new_file(&file_name, size);
 
-        report_progress(size, &test_mode, &progress_callback).await;
+        if size > 0 {
+            report_progress(size, &test_mode, &progress_callback).await;
+        }
 
         fs::remove_file(path).await?;
         progress_state.lock().inc_processed();
@@ -261,8 +292,6 @@ pub async fn remove_path(
         if cli.is_verbose() {
             println!("removed {}", path.display());
         }
-    } else {
-        return Err(BcmrError::SourceNotFound(path.to_path_buf()));
     }
 
     Ok(())
