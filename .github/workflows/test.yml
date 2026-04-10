@@ -178,6 +178,81 @@ jobs:
           test ! -d /tmp/bcmr-rm-test/
           echo "Remove tests passed"
 
+      - name: Test remove with symlinks
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          # Regression test for: remove_path only handled is_file/is_dir and
+          # silently skipped symlinks, which then made rmdir on the parent
+          # fail with ENOTEMPTY. This covers both valid and dangling links
+          # plus the top-level symlink case.
+          set -eu
+          root=/tmp/bcmr-symlink-test
+          rm -rf "$root"
+          mkdir -p "$root/dir"
+
+          echo content > "$root/target.txt"
+          ln -s "$root/target.txt" "$root/dir/valid_link"
+          ln -s /nonexistent/path "$root/dir/dangling_link"
+          echo real > "$root/dir/real_file"
+
+          cargo run -- remove -rf "$root/dir"
+          test ! -e "$root/dir" || { echo "FAIL: dir not removed"; exit 1; }
+          test -f "$root/target.txt" || { echo "FAIL: symlink target was followed"; exit 1; }
+
+          # Top-level dangling symlink
+          ln -s /nonexistent "$root/top_dangling"
+          cargo run -- remove -f "$root/top_dangling"
+          test ! -e "$root/top_dangling" || { echo "FAIL: top-level symlink not removed"; exit 1; }
+
+          echo "Symlink remove tests passed"
+
+      - name: Test --json error event and status state machine
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          # Regression test for: errors after runner creation produced no
+          # terminal event in the log, so bcmr status reported "done" for
+          # jobs that had actually failed. Also covers the done/failed/
+          # interrupted state machine.
+          set -eu
+          root=/tmp/bcmr-status-sm
+          rm -rf "$root"
+          mkdir -p "$root/sub"
+          echo x > "$root/sub/a.txt"
+
+          # --- happy path: status should be "done" ---
+          rm -rf "$root/ok"
+          mkdir -p "$root/ok"
+          echo ok > "$root/ok/f.txt"
+          desc=$(cargo run --quiet -- remove -rfy --json "$root/ok")
+          jid=$(echo "$desc" | python3 -c 'import json,sys;print(json.loads(sys.stdin.read())["job_id"])')
+          log=$(echo "$desc" | python3 -c 'import json,sys;print(json.loads(sys.stdin.read())["log"])')
+          for _ in $(seq 1 60); do
+            if grep -q '"type":"result"' "$log" 2>/dev/null; then break; fi
+            sleep 0.5
+          done
+          cargo run --quiet -- status "$jid" --json | grep -q '"state":"done"' \
+            || { echo "FAIL: happy path not done"; cat "$log"; exit 1; }
+
+          # --- error path: non-recursive remove of a non-empty dir ---
+          # Must terminate the log with a status:"error" result and
+          # status must report "failed".
+          desc=$(cargo run --quiet -- remove --json "$root/sub" 2>&1 | head -1)
+          jid=$(echo "$desc" | python3 -c 'import json,sys;print(json.loads(sys.stdin.read())["job_id"])')
+          log=$(echo "$desc" | python3 -c 'import json,sys;print(json.loads(sys.stdin.read())["log"])')
+          for _ in $(seq 1 60); do
+            if grep -q '"type":"result"' "$log" 2>/dev/null; then break; fi
+            sleep 0.5
+          done
+          cat "$log"
+          grep -q '"status":"error"' "$log" \
+            || { echo "FAIL: error path did not write error result"; exit 1; }
+          cargo run --quiet -- status "$jid" --json | grep -q '"state":"failed"' \
+            || { echo "FAIL: status did not report failed"; exit 1; }
+
+          echo "Error event + state machine tests passed"
+
       - name: Test --json background mode (remove)
         if: runner.os != 'Windows'
         shell: bash
