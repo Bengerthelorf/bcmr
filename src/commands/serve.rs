@@ -333,6 +333,13 @@ where
     let mut next: Option<Message> = first;
 
     if let Some(Message::HaveBlocks { hashes, .. }) = next {
+        // Trim CAS before processing so this PUT doesn't push the
+        // store further past the cap. Failure here is non-fatal —
+        // worst case the disk fills up later.
+        if let Some(cap) = cas::cap_bytes() {
+            let _ = tokio::task::spawn_blocking(move || cas::evict_to_cap(cap)).await;
+        }
+
         let mut bits = vec![0u8; hashes.len().div_ceil(8)];
         for (i, h) in hashes.iter().enumerate() {
             if !cas::has(h) {
