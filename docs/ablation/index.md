@@ -427,36 +427,137 @@ protocol version bump is needed.
 
 ---
 
-## Open Questions
+---
 
-Items in this list surfaced during the Experiment 7--9 sweep but
-were deferred to future revisions because the measurement wasn't yet
-conclusive or the scope was outside this release.
+## Experiments 10--12 (v0.5.8)
 
-- **Content-addressed resumable transfer**. bcmr already computes a
-  BLAKE3 hash per 4 MiB block during SCC. If we first send the block
-  hashes and let the receiver diff them against a local
-  content-addressable cache, repeated transfers of almost-identical
-  trees reduce to "send only the blocks the receiver has never
-  seen". This is rsync's core idea but with a stronger hash and at
-  fixed block boundaries. Needs a design for the receiver-side
-  cache (size cap, eviction, garbage collection).
-- **Zero-copy serve path**. GET currently reads 4 MiB into a buffer,
-  copies again into `Message::Data { payload: Vec<u8> }`, encodes,
-  writes. On Linux, `splice(2)` from the input fd to the socket
-  bypasses both copies. Protocol-level framing makes this
-  non-trivial (we need the length prefix before the payload), but
-  the 8 MB/s "extra memcpy" cost shows up at $\geq$ 10 Gbps links.
-- **io_uring read path on Linux**. The copy loop is
-  `read.await` + `write.await` + hash. Each await trips a syscall.
-  `io_uring` batches these and would likely help on NVMe at $> 5$
-  GB/s sequential throughput.
-- **Pipelined hashing**. Moving BLAKE3 to a channel-fed task so it
-  overlaps with the next read would help on macOS where BLAKE3
-  throughput (~1 GB/s NEON) is within spitting distance of APFS.
-  On Linux AVX-512 (5.4 GB/s) the hash is already I/O-hidden, so
-  the win is macOS-only.
-- **xattr / ACL preservation**. bcmr currently preserves mtime and
-  mode but drops extended attributes, file flags, and ACLs. Not a
-  performance question but a correctness gap for users copying
-  between filesystems that support them.
+### Experiment 10: Whole-Source BLAKE3 on the I/O Thread
+
+**Hypothesis**: `streaming_copy` updates two BLAKE3 hashers per byte
+--- the per-block hasher (needed at the next checkpoint to populate
+the session) and the whole-source hasher. On macOS NEON BLAKE3 runs
+at ~1 GB/s, so the doubled hash work effectively serialises 2 GB/s
+worth of CPU against ~2 GB/s of APFS write throughput. The whole-
+source hash is only consumed when `--verify` is set or when a
+session is being persisted across runs; for a one-shot copy of a
+small file with neither flag, it's pure overhead.
+
+**Method**: Streaming-path 32 MiB file copy on macOS APFS. Five runs
+each, hyperfine.
+
+| Mode | Mean (ms) | Δ vs cp |
+|------|----------:|--------:|
+| `cp` (no hash) | 18 | 1.00x |
+| `bcmr stream` (block hash only, after fix) | 205 | 11.4x slower |
+| `bcmr stream -V` (block + source hash, after fix) | 285 | 15.9x slower |
+| `bcmr stream` (block + source hash, before fix) | ~285 | 15.9x slower |
+
+The skip is gated on `verify || session.is_some()`. For files >= 64
+MiB or with `--resume`/`--strict`/`--append` set, the source hash is
+needed and computed. The 28 % saving (285 ms → 205 ms) on the no-
+hash path is the upper bound for the no-verify case --- the rest of
+the gap to `cp` is the per-block hash itself, the per-checkpoint
+`posix_fadvise`, and tokio I/O scheduling overhead, which a future
+revision can pick at separately.
+
+### Experiment 11: Content-Addressed Dedup for Repeat PUT
+
+**Hypothesis**: For dev workflows where the same artifact is uploaded
+to a remote host repeatedly, the second-and-onward upload can avoid
+the wire entirely if the receiver remembers what it has seen.
+BLAKE3 is already computed per 4 MiB block, so a tiny pre-flight
+that exchanges hashes lets the server short-circuit to a local CAS
+read.
+
+**Design**: Negotiate `CAP_DEDUP` in the Hello/Welcome caps byte.
+When active and the file is at least 16 MiB:
+
+1. Client hashes the source in 4 MiB blocks (re-reads the file ---
+   we don't keep the bytes around).
+2. Client sends `HaveBlocks { block_size, hashes }`.
+3. Server checks each hash against `~/.local/share/bcmr/cas/<aa>/<bb>/<rest>.blk`,
+   replies `MissingBlocks { bits }` (1 = needed on the wire).
+4. Client streams only the missing blocks via the existing Data /
+   DataCompressed path.
+5. For each block the server receives, it both writes it to the dst
+   file *and* deposits it in the CAS for future reuse. For each
+   block the server already had, it reads the cached copy at the
+   right point in the stream.
+
+The composite hash returned in `Ok` covers the full file regardless
+of which blocks took which path. The 16 MiB threshold protects
+small uploads from the round-trip cost of HaveBlocks/MissingBlocks
+itself.
+
+**Method**: 64 MiB pseudo-random file uploaded twice from macOS to a
+Linux host (`4090_J`, ~30 ms RTT, ~10 MB/s effective WAN bandwidth).
+Cold cache via `rm -rf ~/.local/share/bcmr/cas` between runs.
+
+| Run | Wall (s) | Notes |
+|-----|---------:|-------|
+| 1 (cold cache) | 18.96 | full 64 MiB on the wire |
+| 2 (warm cache) | 12.93 | every block a CAS hit; ~6 s saved |
+
+The savings track the eliminated wire bytes: 64 MiB at ~10 MB/s ≈
+6 s, which matches the observed delta. The remaining 13 s is local
+hash + CAS read + dst write + protocol round trips, all on either
+side of the network. For higher-bandwidth links the relative win
+shrinks; for slower / metered ones (cellular tethering, transoceanic
+SSH) it grows.
+
+**Correctness check**: SHA-256 of source matches both destinations
+across the two runs.
+
+### Experiment 12: Wire Compression Across Real Hosts
+
+The earlier Experiment 9 measured codec ratios in isolation; this
+one re-runs the protocol over real SSH connections to confirm the
+prediction. 64 MiB of source-text-like content from this MacBook to
+three peers, three runs each.
+
+| Peer | None (s) | LZ4 (s) | Zstd (s) | Zstd vs None |
+|------|---------:|--------:|---------:|-------------:|
+| 4090_J (WAN, ~10 MB/s) | 18.18 | 10.22 | 3.25 | **5.59x** |
+| A100_J (WAN, ~10 MB/s) | 8.14 | 4.36 | 3.28 | 2.48x |
+| mini_m2 (LAN, gigabit) | 9.58 | 3.26 | 1.82 | 5.28x |
+
+Zstd-3 wins on every link. LZ4 wins over None but loses to Zstd
+because the bandwidth saving from Zstd's extra ratio more than pays
+for the lower encode throughput. The A100_J peer's smaller relative
+win comes from the path's variance dominating the small absolute
+duration --- the absolute saving is similar to the others.
+
+---
+
+## Open Questions (still)
+
+After Experiments 10--12 the items below are still on the list,
+intentionally deferred because each needs design work that didn't
+fit this release.
+
+- **Zero-copy serve path**. `splice(2)` from the source fd into a
+  pipe and then into stdout would bypass two userspace memcpys per
+  4 MiB block. The blocker is that `splice` doesn't expose the bytes
+  to userspace, so the inline BLAKE3 we use to populate the `Ok
+  { hash }` response can't run. Likely shape: a `CAP_FAST` cap that
+  trades server-side hashing for splice. Users who care about
+  integrity stay on the current path or pass `-V` (which re-hashes
+  the dst on the client anyway).
+- **io_uring read path on Linux**. Each `read.await` trips a
+  syscall; batching via `io_uring` would help when sequential
+  throughput is at the syscall ceiling rather than the device. Need
+  to evaluate `tokio-uring` vs raw `io-uring` --- the former still
+  gates everything through tokio's reactor. Likely modest single-
+  digit-percent win on NVMe; bigger on parallel-many-files when
+  combined with the existing `--jobs`.
+- **CAS eviction / cap**. Today the dedup CAS grows monotonically
+  under `~/.local/share/bcmr/cas`. The cleanest design is an LRU
+  with a configurable byte cap (default ~1 GiB?), garbage-collected
+  on the next dedup-enabled PUT.
+- **Pipelined hashing for the streaming-copy hot path**. We tried
+  the obvious move-to-channel approach in v0.5.8 and the channel
+  send + Vec allocation per 4 MiB block actually slowed things
+  down. A useful version would need a buffer pool (e.g. `Bytes`)
+  and probably also `update_rayon` --- the wins on the existing
+  serial path are small enough that "skip the hash entirely when
+  it's not needed" (Experiment 10) was the better lever.
