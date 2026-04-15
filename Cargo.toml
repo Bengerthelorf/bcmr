@@ -42,6 +42,10 @@ blake3 = "1.5"
 reflink-copy = "0.1.28"
 signal-hook = "0.3.18"
 self_update = { version = "0.43", default-features = false, features = ["archive-tar", "archive-zip", "compression-flate2", "reqwest", "rustls"] }
+futures = "0.3"
+num_cpus = "1.16"
+lz4_flex = { version = "0.11", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
+zstd = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
@@ -51,3 +55,7 @@ codegen-units = 1
 lto = true
 opt-level = 3
 strip = true
+
+[[example]]
+name = "compress_probe"
+path = "bench/compress_probe.rs"

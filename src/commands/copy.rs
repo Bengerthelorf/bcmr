@@ -505,29 +505,46 @@ where
         on_new_file: Box::new(on_new_file),
     };
 
+    // Directories must exist before we spawn concurrent file copies into
+    // them. They're cheap, so we take them in the plan's DFS order.
     for entry in &plan.entries {
-        match entry {
-            PlanEntry::CreateDir { dst, .. } => {
-                if !dst.exists() {
-                    fs::create_dir_all(dst).await?;
-                }
-            }
-            PlanEntry::CopyFile { src, dst } => {
-                check_overwrite(dst, cli).await?;
-
-                copy_file(
-                    src,
-                    dst,
-                    CopyFileOptions::from_cli(cli, test_mode.clone()),
-                    &callback,
-                )
-                .await?;
-
-                if cli.is_verbose() {
-                    eprintln!("'{}' -> '{}'", src.display(), dst.display());
-                }
+        if let PlanEntry::CreateDir { dst, .. } = entry {
+            if !dst.exists() {
+                fs::create_dir_all(dst).await?;
             }
         }
+    }
+
+    use futures::stream::{self, StreamExt};
+
+    let jobs = cli.local_jobs();
+    let verbose = cli.is_verbose();
+
+    let file_entries: Vec<(&PathBuf, &PathBuf)> = plan
+        .entries
+        .iter()
+        .filter_map(|e| match e {
+            PlanEntry::CopyFile { src, dst } => Some((src, dst)),
+            _ => None,
+        })
+        .collect();
+
+    let stream = stream::iter(file_entries).map(|(src, dst)| {
+        let cb = &callback;
+        let opts = CopyFileOptions::from_cli(cli, test_mode.clone());
+        async move {
+            check_overwrite(dst, cli).await?;
+            copy_file(src, dst, opts, cb).await?;
+            if verbose {
+                eprintln!("'{}' -> '{}'", src.display(), dst.display());
+            }
+            Ok::<(), BcmrError>(())
+        }
+    });
+
+    let mut buf = stream.buffer_unordered(jobs);
+    while let Some(res) = buf.next().await {
+        res?;
     }
 
     if cli.is_preserve() {

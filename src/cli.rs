@@ -109,6 +109,11 @@ pub struct CopyMoveArgs {
     /// Sync data to disk after operation (fsync)
     #[arg(long, default_value_t = false)]
     pub sync: bool,
+
+    /// Number of parallel local file copies (default: CPU count, capped at 8).
+    /// For remote transfers, see --parallel on the Copy subcommand.
+    #[arg(short = 'j', long = "jobs")]
+    pub jobs: Option<usize>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -357,6 +362,13 @@ impl Commands {
         self.copy_move_args().is_some_and(|a| a.sync)
     }
 
+    /// Desired concurrency for local multi-file operations.
+    pub fn local_jobs(&self) -> usize {
+        self.copy_move_args()
+            .and_then(|a| a.jobs)
+            .unwrap_or_else(|| num_cpus::get().clamp(1, 8))
+    }
+
     pub fn get_reflink_mode(&self) -> Option<String> {
         match self {
             Commands::Copy { reflink, .. } => reflink.clone(),
@@ -501,6 +513,7 @@ mod tests {
             strict: false,
             append: false,
             sync: false,
+            jobs: None,
         }
     }
 
