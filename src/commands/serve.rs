@@ -1,6 +1,7 @@
+use crate::core::cas;
 use crate::core::compress;
 use crate::core::protocol::{
-    self, CompressionAlgo, ListEntry, Message, CAP_LZ4, CAP_ZSTD, PROTOCOL_VERSION,
+    self, CompressionAlgo, ListEntry, Message, CAP_DEDUP, CAP_LZ4, CAP_ZSTD, PROTOCOL_VERSION,
 };
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
@@ -9,9 +10,9 @@ use tokio::io::{self, AsyncWriteExt};
 
 const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
 
-/// The server advertises both algorithms it can handle; the client picks
-/// the preferred one via CompressionAlgo::negotiate.
-const SERVER_CAPS: u8 = CAP_LZ4 | CAP_ZSTD;
+/// The server advertises both compression algorithms and dedup; the
+/// client picks what it wants by intersecting with its own caps.
+const SERVER_CAPS: u8 = CAP_LZ4 | CAP_ZSTD | CAP_DEDUP;
 
 /// Validate and canonicalize a path from the client.
 /// Prevents directory traversal attacks (e.g. "../../../etc/shadow").
@@ -157,7 +158,9 @@ pub async fn run() -> Result<()> {
                 Err(e) => Err(e),
             },
             Message::Put { path, size } => match validate_path(&path) {
-                Ok(p) => handle_put(p.to_str().unwrap_or(&path), size, &mut stdin).await,
+                Ok(p) => {
+                    handle_put(p.to_str().unwrap_or(&path), size, &mut stdout, &mut stdin).await
+                }
                 Err(e) => Err(e),
             },
             Message::Mkdir { path } => match validate_path(&path) {
@@ -301,8 +304,16 @@ where
 }
 
 /// Receive Data messages until Done, write to file, fsync, compute hash.
-async fn handle_put<R>(path: &str, _size: u64, reader: &mut R) -> Result<Message>
+///
+/// When the client opens a put with HaveBlocks (CAP_DEDUP negotiated), we
+/// short-circuit by serving any blocks already in the local CAS without
+/// the wire transfer. New blocks are written to the file *and* deposited
+/// in the CAS for future requests. The composite hash returned in Ok
+/// still covers the entire file regardless of whether each byte arrived
+/// over the wire or came out of the cache.
+async fn handle_put<W, R>(path: &str, _size: u64, out: &mut W, reader: &mut R) -> Result<Message>
 where
+    W: tokio::io::AsyncWrite + Unpin,
     R: tokio::io::AsyncRead + Unpin,
 {
     let parent = Path::new(path).parent();
@@ -315,27 +326,60 @@ where
     let mut file = fs::File::create(path).await?;
     let mut hasher = blake3::Hasher::new();
 
-    loop {
-        match protocol::read_message(reader).await? {
-            Some(Message::Data { payload }) => {
-                hasher.update(&payload);
-                file.write_all(&payload).await?;
+    // Peek at the first message: the client might open with HaveBlocks
+    // (dedup mode) or jump straight to Data (legacy / dedup-disabled).
+    let first = protocol::read_message(reader).await?;
+    let mut dedup_state: Option<DedupState> = None;
+    let mut next: Option<Message> = first;
+
+    if let Some(Message::HaveBlocks { hashes, .. }) = next {
+        let mut bits = vec![0u8; hashes.len().div_ceil(8)];
+        for (i, h) in hashes.iter().enumerate() {
+            if !cas::has(h) {
+                bits[i / 8] |= 1 << (i % 8);
             }
-            Some(Message::DataCompressed {
+        }
+        protocol::write_message(out, &Message::MissingBlocks { bits: bits.clone() }).await?;
+        out.flush().await?;
+        dedup_state = Some(DedupState {
+            hashes,
+            bits,
+            cursor: 0,
+        });
+        next = None;
+    }
+
+    let mut msg = next;
+    loop {
+        let m = match msg.take() {
+            Some(m) => m,
+            None => match protocol::read_message(reader).await? {
+                Some(m) => m,
+                None => break,
+            },
+        };
+        match m {
+            Message::Data { payload } => {
+                consume_block(&payload, &mut file, &mut hasher, dedup_state.as_mut()).await?;
+            }
+            Message::DataCompressed {
                 algo,
                 original_size,
                 payload,
-            }) => {
+            } => {
                 let decoded = compress::decode_block(algo, original_size, &payload)?;
-                hasher.update(&decoded);
-                file.write_all(&decoded).await?;
+                consume_block(&decoded, &mut file, &mut hasher, dedup_state.as_mut()).await?;
             }
-            Some(Message::Done) => break,
-            Some(other) => {
-                return Err(anyhow::anyhow!("put: unexpected message {other:?}"));
-            }
-            None => break, // EOF treated as implicit Done
+            Message::Done => break,
+            other => return Err(anyhow::anyhow!("put: unexpected message {other:?}")),
         }
+    }
+
+    // Serve any trailing blocks that weren't sent because the CAS already
+    // had them. We do this *after* draining the wire so the server's
+    // stream of writes follows source order.
+    if let Some(state) = dedup_state.as_mut() {
+        flush_remaining_cas_blocks(state, &mut file, &mut hasher).await?;
     }
 
     file.flush().await?;
@@ -344,6 +388,68 @@ where
 
     let hash = hasher.finalize().to_hex().to_string();
     Ok(Message::Ok { hash: Some(hash) })
+}
+
+struct DedupState {
+    hashes: Vec<[u8; 32]>,
+    bits: Vec<u8>,
+    cursor: usize,
+}
+
+impl DedupState {
+    fn is_missing(&self, idx: usize) -> bool {
+        (self.bits.get(idx / 8).copied().unwrap_or(0) >> (idx % 8)) & 1 == 1
+    }
+}
+
+async fn consume_block(
+    block: &[u8],
+    file: &mut tokio::fs::File,
+    hasher: &mut blake3::Hasher,
+    dedup: Option<&mut DedupState>,
+) -> Result<()> {
+    if let Some(state) = dedup {
+        // Walk the cursor over any cached blocks ahead of the wire bytes.
+        while state.cursor < state.hashes.len() && !state.is_missing(state.cursor) {
+            let cached = cas::read(&state.hashes[state.cursor])?;
+            hasher.update(&cached);
+            file.write_all(&cached).await?;
+            state.cursor += 1;
+        }
+        // The just-arrived bytes correspond to the next missing index.
+        if state.cursor < state.hashes.len() && state.is_missing(state.cursor) {
+            // Deposit into CAS for future runs.
+            let mut h = [0u8; 32];
+            h.copy_from_slice(blake3::hash(block).as_bytes());
+            // Best-effort write; serving the file matters more than caching.
+            let _ = cas::write(&h, block);
+            state.cursor += 1;
+        }
+    }
+    hasher.update(block);
+    file.write_all(block).await?;
+    Ok(())
+}
+
+async fn flush_remaining_cas_blocks(
+    state: &mut DedupState,
+    file: &mut tokio::fs::File,
+    hasher: &mut blake3::Hasher,
+) -> Result<()> {
+    while state.cursor < state.hashes.len() {
+        if state.is_missing(state.cursor) {
+            // Should have been delivered over the wire already.
+            return Err(anyhow::anyhow!(
+                "client said block {} was missing but never sent it",
+                state.cursor
+            ));
+        }
+        let cached = cas::read(&state.hashes[state.cursor])?;
+        hasher.update(&cached);
+        file.write_all(&cached).await?;
+        state.cursor += 1;
+    }
+    Ok(())
 }
 
 async fn handle_mkdir(path: &str) -> Result<Message> {

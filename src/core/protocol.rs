@@ -13,6 +13,7 @@ const TYPE_PUT: u8 = 0x06;
 const TYPE_MKDIR: u8 = 0x07;
 const TYPE_RESUME: u8 = 0x08;
 const TYPE_DONE: u8 = 0x09;
+const TYPE_HAVE_BLOCKS: u8 = 0x0a;
 
 const TYPE_WELCOME: u8 = 0x81;
 const TYPE_OK: u8 = 0x82;
@@ -23,6 +24,12 @@ const TYPE_HASH_RESPONSE: u8 = 0x86;
 const TYPE_LIST_RESPONSE: u8 = 0x87;
 const TYPE_RESUME_RESPONSE: u8 = 0x88;
 const TYPE_DATA_COMPRESSED: u8 = 0x89;
+const TYPE_MISSING_BLOCKS: u8 = 0x8a;
+
+/// Capability bit advertised in Hello/Welcome to enable content-addressed
+/// dedup. When negotiated, PUT operations first exchange block hashes and
+/// only the hashes the server doesn't already have go on the wire.
+pub const CAP_DEDUP: u8 = 0x04;
 
 /// Capability bits advertised in Hello/Welcome.
 ///
@@ -139,6 +146,21 @@ pub enum Message {
         algo: u8,
         original_size: u32,
         payload: Vec<u8>,
+    },
+    /// Sent by the client before streaming Data frames during a PUT,
+    /// when both peers advertised CAP_DEDUP. Each entry is the BLAKE3
+    /// hash of one 4 MiB block of the source file (the last entry may
+    /// represent a smaller tail block --- order is significant).
+    HaveBlocks {
+        block_size: u32,
+        hashes: Vec<[u8; 32]>,
+    },
+    /// Server's response to HaveBlocks: the bitset of indices for which
+    /// the server has no local copy and therefore expects raw bytes.
+    /// `bits.len()` equals (hashes.len() + 7) / 8 with bit i (LSB-first
+    /// in byte i/8) set iff hash[i] is missing.
+    MissingBlocks {
+        bits: Vec<u8>,
     },
     StatResponse {
         size: u64,
@@ -287,6 +309,18 @@ pub fn encode_message(msg: &Message) -> Vec<u8> {
             write_u8(&mut payload, *algo);
             write_u32_le(&mut payload, *original_size);
             write_bytes(&mut payload, data);
+        }
+        Message::HaveBlocks { block_size, hashes } => {
+            write_u8(&mut payload, TYPE_HAVE_BLOCKS);
+            write_u32_le(&mut payload, *block_size);
+            write_u32_le(&mut payload, hashes.len() as u32);
+            for h in hashes {
+                payload.extend_from_slice(h);
+            }
+        }
+        Message::MissingBlocks { bits } => {
+            write_u8(&mut payload, TYPE_MISSING_BLOCKS);
+            write_bytes(&mut payload, bits);
         }
         Message::StatResponse {
             size,
@@ -465,6 +499,22 @@ pub fn decode_message(data: &[u8]) -> Option<Message> {
             algo: p.read_u8()?,
             original_size: p.read_u32_le()?,
             payload: p.read_bytes()?,
+        },
+        TYPE_HAVE_BLOCKS => {
+            let block_size = p.read_u32_le()?;
+            let count = p.read_u32_le()? as usize;
+            let mut hashes = Vec::with_capacity(count);
+            for _ in 0..count {
+                let mut h = [0u8; 32];
+                for byte in &mut h {
+                    *byte = p.read_u8()?;
+                }
+                hashes.push(h);
+            }
+            Message::HaveBlocks { block_size, hashes }
+        }
+        TYPE_MISSING_BLOCKS => Message::MissingBlocks {
+            bits: p.read_bytes()?,
         },
         TYPE_STAT_RESPONSE => Message::StatResponse {
             size: p.read_u64_le()?,

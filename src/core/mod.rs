@@ -1,3 +1,4 @@
+pub mod cas;
 pub mod checksum;
 pub mod compress;
 pub mod error;

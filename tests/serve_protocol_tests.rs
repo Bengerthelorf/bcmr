@@ -55,6 +55,32 @@ fn test_data_compressed_roundtrip() {
 }
 
 #[test]
+fn test_have_blocks_roundtrip() {
+    let msg = Message::HaveBlocks {
+        block_size: 4 * 1024 * 1024,
+        hashes: vec![[0xab; 32], [0xcd; 32], [0xef; 32]],
+    };
+    assert_eq!(roundtrip(msg.clone()), msg);
+}
+
+#[test]
+fn test_have_blocks_empty() {
+    let msg = Message::HaveBlocks {
+        block_size: 4 * 1024 * 1024,
+        hashes: vec![],
+    };
+    assert_eq!(roundtrip(msg.clone()), msg);
+}
+
+#[test]
+fn test_missing_blocks_roundtrip() {
+    let msg = Message::MissingBlocks {
+        bits: vec![0b0000_0001, 0b1010_0000, 0xff],
+    };
+    assert_eq!(roundtrip(msg.clone()), msg);
+}
+
+#[test]
 fn test_list_roundtrip() {
     let msg = Message::List {
         path: "/home/user/docs".to_string(),

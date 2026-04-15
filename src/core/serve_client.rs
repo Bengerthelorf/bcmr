@@ -7,20 +7,26 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use crate::core::compress;
 use crate::core::error::BcmrError;
 use crate::core::protocol::{
-    self, CompressionAlgo, ListEntry, Message, CAP_LZ4, CAP_ZSTD, PROTOCOL_VERSION,
+    self, CompressionAlgo, ListEntry, Message, CAP_DEDUP, CAP_LZ4, CAP_ZSTD, PROTOCOL_VERSION,
 };
 
 /// What the client is willing to speak. The user's --compress flag
 /// intersects this before the Hello is sent so users can force "raw" for
 /// debugging or to disable compression on trusted LANs where the CPU
 /// cost outweighs the bandwidth savings.
-const CLIENT_CAPS: u8 = CAP_LZ4 | CAP_ZSTD;
+const CLIENT_CAPS: u8 = CAP_LZ4 | CAP_ZSTD | CAP_DEDUP;
+
+/// Files smaller than this skip the dedup pre-flight: the round-trip
+/// cost of HaveBlocks/MissingBlocks dominates for tiny payloads.
+const DEDUP_MIN_FILE_SIZE: u64 = 16 * 1024 * 1024;
+const DEDUP_BLOCK_SIZE: usize = 4 * 1024 * 1024;
 
 pub struct ServeClient {
     child: Child,
     stdin: Option<ChildStdin>,
     stdout: ChildStdout,
     algo: CompressionAlgo,
+    dedup_enabled: bool,
 }
 
 impl ServeClient {
@@ -120,6 +126,7 @@ impl ServeClient {
             stdin: Some(stdin),
             stdout,
             algo: CompressionAlgo::None,
+            dedup_enabled: false,
         }
     }
 
@@ -134,6 +141,7 @@ impl ServeClient {
                 caps: server_caps, ..
             } => {
                 self.algo = CompressionAlgo::negotiate(caps, server_caps);
+                self.dedup_enabled = (caps & server_caps & CAP_DEDUP) != 0;
                 Ok(())
             }
             Message::Error { message } => Err(BcmrError::InvalidInput(message)),
@@ -253,15 +261,10 @@ impl ServeClient {
         })
         .await?;
 
-        let mut file = File::open(data).await?;
-        let mut buf = vec![0u8; 4 * 1024 * 1024];
-        loop {
-            let n = file.read(&mut buf).await?;
-            if n == 0 {
-                break;
-            }
-            let frame = compress::encode_block(self.algo, buf[..n].to_vec());
-            self.send(&frame).await?;
+        if self.dedup_enabled && size >= DEDUP_MIN_FILE_SIZE {
+            self.put_with_dedup(data, size).await?;
+        } else {
+            self.put_streaming(data).await?;
         }
         self.send(&Message::Done).await?;
 
@@ -275,6 +278,67 @@ impl ServeClient {
                 "unexpected put response: {other:?}"
             ))),
         }
+    }
+
+    async fn put_streaming(&mut self, data: &Path) -> Result<(), BcmrError> {
+        let mut file = File::open(data).await?;
+        let mut buf = vec![0u8; DEDUP_BLOCK_SIZE];
+        loop {
+            let n = file.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            let frame = compress::encode_block(self.algo, buf[..n].to_vec());
+            self.send(&frame).await?;
+        }
+        Ok(())
+    }
+
+    async fn put_with_dedup(&mut self, data: &Path, size: u64) -> Result<(), BcmrError> {
+        // Compute one hash per block. We re-read the file later for the
+        // actual transfer of missing blocks; the alternative (hash and
+        // buffer everything in memory) caps file size at RAM.
+        let hashes = compute_block_hashes(data, size).await?;
+        let n_blocks = hashes.len();
+
+        self.send(&Message::HaveBlocks {
+            block_size: DEDUP_BLOCK_SIZE as u32,
+            hashes,
+        })
+        .await?;
+
+        let bits = match self.recv().await? {
+            Message::MissingBlocks { bits } => bits,
+            Message::Error { message } => return Err(BcmrError::InvalidInput(message)),
+            other => {
+                return Err(BcmrError::InvalidInput(format!(
+                    "expected MissingBlocks, got {other:?}"
+                )))
+            }
+        };
+
+        let mut file = File::open(data).await?;
+        let mut buf = vec![0u8; DEDUP_BLOCK_SIZE];
+        for idx in 0..n_blocks {
+            // tokio's read() may return short; loop until we have a full
+            // block or hit EOF (last block can be partial).
+            let mut filled = 0;
+            while filled < DEDUP_BLOCK_SIZE {
+                let n = file.read(&mut buf[filled..]).await?;
+                if n == 0 {
+                    break;
+                }
+                filled += n;
+            }
+            if filled == 0 {
+                break;
+            }
+            if (bits.get(idx / 8).copied().unwrap_or(0) >> (idx % 8)) & 1 == 1 {
+                let frame = compress::encode_block(self.algo, buf[..filled].to_vec());
+                self.send(&frame).await?;
+            }
+        }
+        Ok(())
     }
 
     pub async fn mkdir(&mut self, path: &str) -> Result<(), BcmrError> {
@@ -359,6 +423,40 @@ fn decode_hex32(hex: &str) -> Result<[u8; 32], BcmrError> {
         out[i] = (hi << 4) | lo;
     }
     Ok(out)
+}
+
+async fn compute_block_hashes(path: &Path, size: u64) -> Result<Vec<[u8; 32]>, BcmrError> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || -> Result<Vec<[u8; 32]>, std::io::Error> {
+        use std::io::Read;
+        let mut file = std::fs::File::open(&path)?;
+        let n_blocks = (size).div_ceil(DEDUP_BLOCK_SIZE as u64) as usize;
+        let mut hashes = Vec::with_capacity(n_blocks);
+        let mut buf = vec![0u8; DEDUP_BLOCK_SIZE];
+        loop {
+            let mut filled = 0;
+            while filled < DEDUP_BLOCK_SIZE {
+                let n = file.read(&mut buf[filled..])?;
+                if n == 0 {
+                    break;
+                }
+                filled += n;
+            }
+            if filled == 0 {
+                break;
+            }
+            let mut h = [0u8; 32];
+            h.copy_from_slice(blake3::hash(&buf[..filled]).as_bytes());
+            hashes.push(h);
+            if filled < DEDUP_BLOCK_SIZE {
+                break;
+            }
+        }
+        Ok(hashes)
+    })
+    .await
+    .map_err(|e| BcmrError::InvalidInput(format!("hash task panicked: {}", e)))?
+    .map_err(BcmrError::Io)
 }
 
 fn hex_nibble(b: u8) -> Result<u8, BcmrError> {

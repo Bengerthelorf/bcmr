@@ -176,6 +176,33 @@ async fn serve_get_compressible_roundtrip() {
     assert_eq!(data, text.as_bytes());
 }
 
+/// Content-addressed dedup: upload the same 32 MiB file twice. The
+/// second run should populate every block from the local CAS and the
+/// resulting file must still be byte-identical to the source.
+#[tokio::test]
+async fn serve_dedup_repeats_use_cas() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("repeat.bin");
+    let dst1 = dir.path().join("dst1.bin");
+    let dst2 = dir.path().join("dst2.bin");
+    create_file(&src, 32 * 1024 * 1024);
+    let src_hash = checksum::calculate_hash(&src).unwrap();
+
+    // First upload: populates CAS, returns hash.
+    let mut client = ServeClient::connect_local().await.unwrap();
+    let h1 = client.put(dst1.to_str().unwrap(), &src).await.unwrap();
+    client.close().await.unwrap();
+    assert_eq!(bytes_to_hex(&h1), src_hash);
+    assert_eq!(checksum::calculate_hash(&dst1).unwrap(), src_hash);
+
+    // Second upload to a fresh dst: every block should now be a CAS hit.
+    let mut client = ServeClient::connect_local().await.unwrap();
+    let h2 = client.put(dst2.to_str().unwrap(), &src).await.unwrap();
+    client.close().await.unwrap();
+    assert_eq!(bytes_to_hex(&h2), src_hash);
+    assert_eq!(checksum::calculate_hash(&dst2).unwrap(), src_hash);
+}
+
 /// Compressible content via PUT: client compresses, server decompresses,
 /// stored file matches the source byte-for-byte.
 #[tokio::test]
