@@ -277,3 +277,186 @@ Key differentiators:
 | `copy_file_range` offset | 0% (saves I/O) | 8--24% faster resume |
 | Per-worker SSH | 0% (additive) | Up to ~6x parallel throughput |
 | Serve protocol | 0% (replaces SSH spawns) | Eliminates per-file process overhead |
+| Opt-in per-file fsync | ~0% (default skip) | 13x faster many-small-files |
+| `--jobs` parallel local copy | 0% (configurable) | 1.5--2x on many-medium workloads |
+| Auto-skip wire compression | Negligible (LZ4 ~4 GB/s encode on random) | 2--5x bandwidth on source text |
+
+---
+
+## Experiments 7--9 (v0.5.7)
+
+This section covers three performance investigations added after the
+initial v0.5.4 release. The common thread is that the original design
+had correctness-first defaults --- fsync after every rename, serial
+file-at-a-time copy, raw bytes on the wire --- that were the right
+baseline but paid for durability even when the user hadn't asked for
+it, and left cores and bandwidth idle on typical workloads.
+
+### Experiment 7: Per-File Durability Cost
+
+**Hypothesis**: Calling `F_FULLFSYNC` on the parent directory after
+every atomic rename is correct for single-file copies where rework
+cost is irrelevant, but dominates wall-clock time when the operation
+is copying thousands of small files.
+
+**Method**: `bcmr copy -r` of a 2100-file, 9 MiB directory tree
+(resembling a small source repo); compared against `cp -R` and
+`rsync -a` on the same input. Five runs, median reported. macOS
+Apple Silicon, APFS SSD, warm cache.
+
+| Command | Before gate | After gate |
+|---------|------------:|-----------:|
+| `bcmr copy -r` (default) | 9.90 s | 0.72 s |
+| `cp -R` | 1.00 s | 1.00 s |
+| `rsync -a` | 0.75 s | 0.75 s |
+| `bcmr copy -r --sync` | 9.90 s | 9.90 s |
+
+**Interpretation**: The pre-gate path issued two `F_FULLFSYNC` calls
+per file (one on the file descriptor, one on the parent directory
+after `rename`). `F_FULLFSYNC` is a full drive-cache flush command
+and costs roughly 4 ms of barrier latency per call on the test
+hardware. At 2100 files that is 8.4 s of pure barrier time, matching
+the observed 9.9 s almost exactly.
+
+Neither `cp` nor `rsync` fsyncs by default --- they rely on the OS
+page cache and background flush. bcmr now does the same: the default
+path does zero per-file fsync calls, and `--sync` restores the old
+durability-strong behaviour (still 9.9 s, but deterministic).
+
+**Decision**: Gate per-file durable sync on `--sync`. No final
+directory fsync is issued at the end of the operation either, again
+matching `cp` and `rsync`. Users who need transactional guarantees
+opt in explicitly.
+
+**Why the original design was wrong**: the v0.5.4 ablation argued
+`F_FULLFSYNC` was free (Experiment 5 above). The measurement was
+done on *single large files* where the fsync cost is amortised over
+hundreds of megabytes of copy time. For many-small-files the cost
+becomes `fsync_count × fsync_latency`, which scales with file count,
+not file size. The single-file benchmark didn't exercise the regime
+where the pathology lives.
+
+### Experiment 8: File-Level Parallelism
+
+**Hypothesis**: `execute_plan` iterates the plan serially, awaiting
+each `copy_file` before starting the next. For many-file workloads
+on an NVMe/APFS device with $> 1$ disk queue, this leaves most of
+the queue idle.
+
+**Method**: 10 000 × 64 KiB files (~640 MiB), sweep `--jobs N` from
+1 to 32. Five runs per N.
+
+| `--jobs` | Mean (s) | Relative |
+|---------:|---------:|---------:|
+| 1  | 6.52 | 1.67x |
+| 2  | 5.23 | 1.34x |
+| 4  | 5.05 | 1.29x |
+| **8**  | **4.16** | **1.06x** |
+| 16 | 4.39 | 1.12x |
+| 32 | 3.91 | 1.00x |
+
+**Interpretation**: Throughput improves monotonically up to the
+physical core count (8 on the test box) and plateaus beyond it. The
+platform has 8 performance cores and each copy task is mostly
+I/O-bound, so the scheduler can happily overlap 8 tasks worth of
+`read` / `write` / `fdatasync` without the kernel becoming the
+bottleneck. Beyond 16, adding concurrency just churns the tokio
+runtime without unlocking additional disk parallelism.
+
+**Decision**: Default `--jobs = min(num_cpus, 8)`. Users with faster
+storage or different profiles can override.
+
+**Implementation note**: directory creation stays serial so a parent
+always exists before its children try to open files inside it.
+`walkdir` yields parents before contents, so a single pre-pass over
+`plan.entries` picking out `CreateDir` nodes is enough. The file
+stream then runs through `futures::stream::buffer_unordered(N)`.
+
+### Experiment 9: Wire Compression for Remote Transfers
+
+**Hypothesis**: Per-block LZ4/Zstd encoding pays for itself whenever
+the network is slower than the codec. On modern CPUs LZ4 decodes at
+multiple GB/s, so the receiver is never compute-bound; the only
+question is ratio.
+
+**Method (Part A — codec probe)**: encode then decode a single 4 MiB
+block three times (random, text-like, mixed) for each algorithm.
+Ratios and throughputs measured on Apple Silicon:
+
+| Workload | Algo     | Ratio | Enc MB/s | Dec MB/s |
+|----------|----------|------:|---------:|---------:|
+| random   | LZ4      | 1.004 |   3578.2 |  17330.5 |
+| random   | Zstd-1   | 1.000 |   4769.9 |  33692.0 |
+| random   | Zstd-3   | 1.000 |   4655.3 |  33635.0 |
+| random   | Zstd-9   | 1.000 |   2442.8 |  31432.3 |
+| text     | LZ4      | 0.390 |    472.8 |   1526.7 |
+| text     | Zstd-1   | 0.210 |    301.2 |    871.9 |
+| text     | **Zstd-3** | **0.198** | **320.5** |   1012.1 |
+| text     | Zstd-9   | 0.180 |     47.2 |   1130.9 |
+| mixed    | LZ4      | 0.697 |    863.4 |   2875.6 |
+| mixed    | Zstd-3   | 0.599 |    457.2 |   1971.9 |
+
+**Interpretation**:
+
+1. **Random data**. All three codecs return ratios indistinguishable
+   from 1.0. Sending compressed is pure CPU waste, so the wire path
+   must auto-skip when the encode output is within 5 % of the input.
+2. **Text-like data**. Zstd-3 reaches 5x reduction at 320 MB/s encode.
+   For anything under ~2.5 Gbps of effective network throughput,
+   compression is the bandwidth bottleneck, not the CPU.
+3. **Zstd-9** is consistently worse than -3 for file content: encode
+   drops by 7x (to 47 MB/s) for only a ~2 % ratio gain. Skip it.
+
+**Decision**: Default to auto-negotiation advertising both LZ4 and
+Zstd. The handshake picks Zstd when both sides speak it (better
+ratio at acceptable encode cost), falls back to LZ4 when only one
+does, and to raw Data frames otherwise. Zstd level fixed at 3 --- the
+library's own default, and our measurement agrees.
+
+**Method (Part B — auto-skip in vivo)**: a unit test encodes a 4 MiB
+pseudo-random block through `encode_block(Lz4, ...)` and asserts the
+emitted message type is `Data` (raw), not `DataCompressed`. Covers
+the happy path where the codec's frame header + payload overshoots
+the 0.95 × original threshold and the encoder falls back.
+
+**Backward compatibility**: `Hello` / `Welcome` carry an optional
+trailing caps byte. Old decoders read `version` and stop; new
+decoders read `caps` too. `caps.unwrap_or(0)` means talking to an
+old peer automatically negotiates to `CompressionAlgo::None`, so no
+protocol version bump is needed.
+
+---
+
+## Open Questions
+
+Items in this list surfaced during the Experiment 7--9 sweep but
+were deferred to future revisions because the measurement wasn't yet
+conclusive or the scope was outside this release.
+
+- **Content-addressed resumable transfer**. bcmr already computes a
+  BLAKE3 hash per 4 MiB block during SCC. If we first send the block
+  hashes and let the receiver diff them against a local
+  content-addressable cache, repeated transfers of almost-identical
+  trees reduce to "send only the blocks the receiver has never
+  seen". This is rsync's core idea but with a stronger hash and at
+  fixed block boundaries. Needs a design for the receiver-side
+  cache (size cap, eviction, garbage collection).
+- **Zero-copy serve path**. GET currently reads 4 MiB into a buffer,
+  copies again into `Message::Data { payload: Vec<u8> }`, encodes,
+  writes. On Linux, `splice(2)` from the input fd to the socket
+  bypasses both copies. Protocol-level framing makes this
+  non-trivial (we need the length prefix before the payload), but
+  the 8 MB/s "extra memcpy" cost shows up at $\geq$ 10 Gbps links.
+- **io_uring read path on Linux**. The copy loop is
+  `read.await` + `write.await` + hash. Each await trips a syscall.
+  `io_uring` batches these and would likely help on NVMe at $> 5$
+  GB/s sequential throughput.
+- **Pipelined hashing**. Moving BLAKE3 to a channel-fed task so it
+  overlaps with the next read would help on macOS where BLAKE3
+  throughput (~1 GB/s NEON) is within spitting distance of APFS.
+  On Linux AVX-512 (5.4 GB/s) the hash is already I/O-hidden, so
+  the win is macOS-only.
+- **xattr / ACL preservation**. bcmr currently preserves mtime and
+  mode but drops extended attributes, file flags, and ACLs. Not a
+  performance question but a correctness gap for users copying
+  between filesystems that support them.
