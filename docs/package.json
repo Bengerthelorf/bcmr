@@ -7,7 +7,9 @@
   },
   "devDependencies": {
     "markdown-it-mathjax3": "^4.3.2",
-    "vitepress": "^1.6.3"
+    "mermaid": "^11.14.0",
+    "vitepress": "^1.6.3",
+    "vitepress-plugin-mermaid": "^2.0.17"
   },
   "overrides": {
     "esbuild": "^0.25.0"

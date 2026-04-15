@@ -7,24 +7,27 @@ follow-up doesn't start from scratch.
 
 ## Zero-Copy Serve GET via `splice(2)`
 
-`splice(2)` from the source fd into a pipe and then into stdout
-would bypass two userspace memcpys per 4 MiB block on Linux. The
-blocker is that `splice` doesn't expose the bytes to userspace, so
-the inline BLAKE3 we use to populate the `Ok { hash }` response
-can't run.
+`CAP_FAST` shipped in v0.5.9 with a `splice(2)` Linux path
+(see [Wire Experiment 14](/ablation/wire-protocol#experiment-14-cap-fast-real-numbers)),
+but the loopback measurement showed it's actually *slower* than
+the default buffered path because of two implementation problems:
 
-**Likely shape**: a `CAP_FAST` cap that trades server-side hashing
-for splice. Negotiated like the other caps. When active:
+1. **Pipe buffer**: `fcntl(F_SETPIPE_SZ, 4 MiB)` needs the kernel's
+   `pipe-max-size` knob lifted (default 1 MiB on Ubuntu) or root.
+   When it silently fails, each 4 MiB chunk takes ~64 splice rounds
+   instead of the expected 1.
+2. **`spawn_blocking` per chunk**: the splice loop currently
+   dispatches one tokio blocking task per chunk --- the exact
+   anti-pattern Experiment 13 fixed for the local copy path.
 
-- Server uses splice for the file → pipe → stdout path.
-- Server's `Ok` carries `hash: None` instead of the BLAKE3.
-- Clients that asked for `-V` re-hash the dst on the receiving side
-  (which they were already doing for `--verify` semantics), so
-  integrity isn't lost --- it just moves to the client.
+**Fix**: move the entire splice loop into one `spawn_blocking` per
+file; either probe `/proc/sys/fs/pipe-max-size` and use the
+largest allowed value, or fall back to writing the frame header +
+plain `read+write` syscalls inside that one blocking task.
 
-Estimated win: dominant on $\geq$ 10 Gbps LANs where the userspace
-memcpy is the actual bottleneck; modest on the more common WAN
-case where network throughput is well below memcpy rate.
+Until that's done, `--fast` still has a use: it skips the server's
+BLAKE3 computation, which matters for low-spec servers even over
+WAN.
 
 ## io_uring Read Path on Linux
 

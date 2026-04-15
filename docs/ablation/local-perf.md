@@ -1,5 +1,16 @@
 # Local Multi-File Performance
 
+::: info Test hardware
+Two reference machines surface in the experiments below; the same
+codenames are used on the [Wire Protocol](/ablation/wire-protocol)
+page.
+
+| Codename | Class | Notes |
+|----------|-------|-------|
+| host-L | Linux server | x86_64, AVX-512, NVMe ext4, kernel 6.x |
+| host-N | macOS desktop | arm64 M-series, APFS |
+:::
+
 This page covers performance investigations of the *local* hot path
 --- the in-process logic that runs when bcmr is copying or moving
 files on a single host. The common thread is that the v0.5.4 design
@@ -94,6 +105,26 @@ always exists before its children try to open files inside it.
 `plan.entries` picking out `CreateDir` nodes is enough. The file
 stream then runs through `futures::stream::buffer_unordered(N)`.
 
+```mermaid
+flowchart TD
+    P[CopyPlan.entries] -->|filter| D[CreateDir entries]
+    P -->|filter| F[CopyFile entries]
+    D -->|serial,<br/>DFS order| MK["fs::create_dir_all<br/>for each dst"]
+    MK -->|gates| ST[Stream of file copies]
+    F --> ST
+    ST -->|buffer_unordered N| W1[Worker 1: copy_file]
+    ST --> W2[Worker 2: copy_file]
+    ST --> Wn[...Worker N]
+    W1 --> R[Result aggregator<br/>first Err short-circuits]
+    W2 --> R
+    Wn --> R
+
+    classDef serial fill:#fed,stroke:#c83
+    classDef parallel fill:#dfe,stroke:#3c3
+    class D,MK serial
+    class F,ST,W1,W2,Wn parallel
+```
+
 ## Experiment 10: Whole-Source BLAKE3 on the I/O Thread
 
 **Hypothesis**: `streaming_copy` updates two BLAKE3 hashers per byte
@@ -147,7 +178,7 @@ syscall ceiling is much higher than the device, so this overhead
 dominates wall time.
 
 **Method**: Same `bcmr copy --reflink=disable` of a 2 GiB random
-file on the Dell Precision 7920 (Xeon Gold AVX-512, NVMe ext4)
+file on **host-L** (Xeon Gold AVX-512, NVMe ext4, kernel 6.x)
 before and after the refactor.
 
 | Command | Before | After | cp |
@@ -163,6 +194,36 @@ and runs the entire read/write/sparse-detect/checkpoint loop
 inside one `tokio::task::spawn_blocking`. The session is returned
 through the join handle so the outer async function preserves the
 `&mut Option<Session>` contract.
+
+```mermaid
+flowchart TB
+    subgraph Before[Before v0.5.9]
+      direction TB
+      L1["loop iteration k:"]
+      L1 --> R1["src_file.read.await"]
+      R1 -.->|spawn_blocking 1| K1[kernel]
+      K1 -.-> R1
+      R1 --> H1["block + src hash"]
+      H1 --> W1["dst_file.write.await"]
+      W1 -.->|spawn_blocking 2| K2[kernel]
+      K2 -.-> W1
+    end
+    subgraph After[After v0.5.9]
+      direction TB
+      OUT["spawn_blocking once<br/>(owns std::fs::File handles)"]
+      OUT --> L2["loop iteration k:"]
+      L2 --> R2["read syscall"]
+      R2 --> H2["block + src hash"]
+      H2 --> W2["write syscall"]
+    end
+    Before -.->|"1024 ↔ kernel<br/>round trips per 2 GiB"| Note1[~12 s<br/>Linux NVMe]
+    After -.->|"2 ↔ kernel<br/>round trips per file"| Note2[~5 s<br/>Linux NVMe]
+
+    classDef bad fill:#fdd,stroke:#c33
+    classDef good fill:#dfd,stroke:#3c3
+    class Note1 bad
+    class Note2 good
+```
 
 **Decision**: Ship the refactor. It's a 2.3x wall-clock win on
 Linux NVMe and ~1.7x on macOS APFS for the streaming path, with no

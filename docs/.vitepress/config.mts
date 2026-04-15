@@ -1,6 +1,7 @@
 import { defineConfig } from 'vitepress'
+import { withMermaid } from 'vitepress-plugin-mermaid'
 
-export default defineConfig({
+export default withMermaid(defineConfig({
   title: 'BCMR',
   description: 'Better Copy Move Remove — A modern CLI tool for file operations',
   base: '/bcmr/',
@@ -215,4 +216,4 @@ export default defineConfig({
       provider: 'local',
     },
   },
-})
+}))

@@ -176,11 +176,87 @@ async fn serve_get_compressible_roundtrip() {
     assert_eq!(data, text.as_bytes());
 }
 
+/// CAS LRU eviction end-to-end: cap the store small, upload three
+/// dedup-eligible files of distinct content, verify the cap is held
+/// and the freshest file's blocks survived.
+///
+/// File sizes are 24 MiB each (above the 16 MiB dedup threshold) so
+/// each upload exercises the HaveBlocks path. Cap of 32 MiB (8 blocks)
+/// is below the cumulative 18-block total, forcing eviction.
+/// All tests that touch CAS env vars must serialize via this lock,
+/// because std::env::set_var races across tokio's worker threads
+/// and a concurrent ServeClient::connect_local would inherit a
+/// half-set env into its bcmr-serve subprocess.
+static CAS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn cas_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    CAS_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+#[tokio::test]
+async fn serve_cas_lru_eviction_under_load() {
+    let _g = cas_test_lock();
+
+    let dir = tempfile::tempdir().unwrap();
+    let cas_tmp = tempfile::tempdir().unwrap();
+    std::env::set_var("BCMR_CAS_DIR", cas_tmp.path());
+    std::env::set_var("BCMR_CAS_CAP_MB", "32");
+
+    let mut files = Vec::new();
+    for (i, byte) in (1u8..=3).enumerate() {
+        let p = dir.path().join(format!("src{i}.bin"));
+        let buf = vec![byte; 24 * 1024 * 1024];
+        std::fs::write(&p, &buf).unwrap();
+        files.push((p, byte));
+    }
+
+    for (src, _) in &files {
+        let mut client = ServeClient::connect_local().await.unwrap();
+        let dst = dir.path().join(format!(
+            "dst-{}.bin",
+            src.file_name().unwrap().to_string_lossy()
+        ));
+        let _ = client.put(dst.to_str().unwrap(), src).await.unwrap();
+        client.close().await.unwrap();
+    }
+
+    let mut total = 0u64;
+    let mut blob_count = 0;
+    for entry in walkdir::WalkDir::new(cas_tmp.path()).into_iter().flatten() {
+        if entry.file_type().is_file()
+            && entry.path().extension().and_then(|s| s.to_str()) == Some("blk")
+        {
+            total += entry.metadata().unwrap().len();
+            blob_count += 1;
+        }
+    }
+    let cap_bytes = 32 * 1024 * 1024;
+    assert!(
+        total <= cap_bytes,
+        "CAS held {} bytes, cap was {}",
+        total,
+        cap_bytes
+    );
+    // 32 MiB cap = 8 × 4 MiB blocks max.
+    assert!(
+        blob_count <= 8,
+        "expected ≤8 blobs after eviction, got {}",
+        blob_count
+    );
+
+    std::env::remove_var("BCMR_CAS_DIR");
+    std::env::remove_var("BCMR_CAS_CAP_MB");
+}
+
 /// Content-addressed dedup: upload the same 32 MiB file twice. The
 /// second run should populate every block from the local CAS and the
 /// resulting file must still be byte-identical to the source.
 #[tokio::test]
 async fn serve_dedup_repeats_use_cas() {
+    let _g = cas_test_lock();
+    let cas_tmp = tempfile::tempdir().unwrap();
+    std::env::set_var("BCMR_CAS_DIR", cas_tmp.path());
+
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("repeat.bin");
     let dst1 = dir.path().join("dst1.bin");
@@ -201,6 +277,8 @@ async fn serve_dedup_repeats_use_cas() {
     client.close().await.unwrap();
     assert_eq!(bytes_to_hex(&h2), src_hash);
     assert_eq!(checksum::calculate_hash(&dst2).unwrap(), src_hash);
+
+    std::env::remove_var("BCMR_CAS_DIR");
 }
 
 /// Fast-mode GET: server skips its hash, client sees Ok{hash:None},
