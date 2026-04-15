@@ -28,18 +28,23 @@ case where network throughput is well below memcpy rate.
 
 ## io_uring Read Path on Linux
 
-Each `read.await` in `streaming_copy` trips a syscall; batching via
-`io_uring` would help when sequential throughput is at the syscall
-ceiling rather than the device.
+Each `read` in the inner copy loop is a plain `read(2)` syscall
+since v0.5.9 ([Local Perf Experiment 13](/ablation/local-perf#experiment-13-one-spawn-blocking-for-the-whole-loop)
+moved the loop into one spawn_blocking). Batching via `io_uring`
+would replace the read+write pair per chunk with a single
+submission queue entry, saving the round trip through the kernel.
 
 **Decision needed first**: `tokio-uring` vs raw `io-uring` --- the
-former still gates everything through tokio's reactor and may not
-unlock the win, while the latter requires running outside tokio for
-the read loop and reattaching futures around it.
+former still requires its own runtime
+(`tokio_uring::start()`) that doesn't drive standard tokio futures,
+which is a structural problem for bcmr; the latter requires running
+outside tokio for the read loop and reattaching futures around it.
 
-Estimated win: single-digit-percent on NVMe sustained reads; bigger
-when combined with the existing `--jobs` since each worker would
-get its own ring.
+Estimated win after Experiment 13: single-digit-percent on
+sustained NVMe reads. The big multipler that motivated this entry
+in v0.5.7's open list (10x slower than cp) was actually the
+spawn_blocking-per-chunk overhead, which Experiment 13 closed
+without io_uring.
 
 ## CAS LRU / Cap
 

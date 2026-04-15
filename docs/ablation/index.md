@@ -41,6 +41,9 @@ through to the relevant page for the table.
 | Opt-in per-file fsync | [Local Perf](/ablation/local-perf#experiment-7-per-file-durability-cost) | 13× faster many-small-files |
 | `--jobs` parallel local copy | [Local Perf](/ablation/local-perf#experiment-8-file-level-parallelism) | 1.5--2× on many-medium workloads |
 | Skip src hash when unused | [Local Perf](/ablation/local-perf#experiment-10-whole-source-blake3-on-the-i-o-thread) | 28 % off no-verify streaming |
+| Single spawn_blocking copy loop | [Local Perf](/ablation/local-perf#experiment-13-one-spawn-blocking-for-the-whole-loop) | 2.3× faster Linux NVMe streaming |
 | Per-worker SSH connections | [Wire](/ablation/wire-protocol#parallel-ssh-with-independent-connections) | Up to ~6× parallel throughput |
 | Auto-skip wire compression | [Wire](/ablation/wire-protocol#experiment-9-wire-compression-for-data-frames) | 2--5× bandwidth on source text |
 | `CAP_DEDUP` repeat PUT | [Wire](/ablation/wire-protocol#experiment-11-content-addressed-dedup-for-repeat-put) | All wire bytes removed for cached blocks |
+| `CAP_FAST` GET (splice on Linux) | [Wire](/ablation/wire-protocol) | Skip server hash; zero-copy on Linux |
+| CAS LRU cap | [Wire](/ablation/wire-protocol#experiment-11-content-addressed-dedup-for-repeat-put) | Bounded disk usage for the dedup store |

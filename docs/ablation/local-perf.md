@@ -137,6 +137,58 @@ with refcount) plus probably `update_rayon` to parallelise the hash
 itself across cores. That's deferred; see the
 [Open Questions](/ablation/open-questions) page.
 
+## Experiment 13: One spawn_blocking for the Whole Loop
+
+**Hypothesis**: Tokio's async file I/O (`tokio::fs::File::read`,
+`write`, `seek`, `stream_position`) wraps each call in its own
+`spawn_blocking`. For a 2 GiB file at 4 MiB blocks that's ~1024
+round trips through the blocking-thread pool; on Linux NVMe the
+syscall ceiling is much higher than the device, so this overhead
+dominates wall time.
+
+**Method**: Same `bcmr copy --reflink=disable` of a 2 GiB random
+file on the Dell Precision 7920 (Xeon Gold AVX-512, NVMe ext4)
+before and after the refactor.
+
+| Command | Before | After | cp |
+|---------|-------:|------:|---:|
+| Wall (s) | 12.34 | **5.38** | 2.17 |
+| Throughput (MB/s) | 170 | **383** | ~1000 |
+
+**Implementation**: `streaming_copy` now `try_clone()`'s both file
+descriptors into `std::fs::File` handles (which dup the fds, so
+the sync handle and the original `tokio::fs::File` share the same
+open file description), takes ownership of the `Option<Session>`,
+and runs the entire read/write/sparse-detect/checkpoint loop
+inside one `tokio::task::spawn_blocking`. The session is returned
+through the join handle so the outer async function preserves the
+`&mut Option<Session>` contract.
+
+**Decision**: Ship the refactor. It's a 2.3x wall-clock win on
+Linux NVMe and ~1.7x on macOS APFS for the streaming path, with no
+test regressions across the existing 14 e2e copy cases.
+
+**Why not just use `io_uring`?** `tokio-uring` requires its own
+runtime (`tokio_uring::start()`) that can't drive standard tokio
+futures; mixing it into bcmr's existing tokio runtime would
+require a major restructuring. The win this experiment captured
+(2.3x) is most of what `io_uring` would have offered on top of
+`tokio::fs`. `io_uring` remains a larger-scope follow-up; see the
+[Open Questions](/ablation/open-questions) page.
+
+**Remaining gap to `cp`**: ~2.5x (5.4s vs 2.2s on Linux). This is
+now the cost of:
+- The double BLAKE3 (source + per-block) since files >= 64 MiB
+  always create a session.
+- Periodic `fdatasync` at every 64 MiB checkpoint (~32 syscalls
+  for 2 GiB, each ~50 ms on this NVMe).
+- `posix_fadvise(FADV_DONTNEED)` calls for cache eviction.
+
+These are correctness features, not bugs. The next dent in this
+gap will need either pipelined hashing (deferred, see Experiment
+10) or skipping the per-block hash for files that never resume
+(would weaken the resume guarantee).
+
 ---
 
 ## Summary
@@ -146,3 +198,4 @@ itself across cores. That's deferred; see the
 | Opt-in per-file fsync | ~0% (default skip) | 13x faster many-small-files |
 | `--jobs` parallel local copy | 0% (configurable) | 1.5--2x on many-medium workloads |
 | Skip src hash when unused | 0% (saves CPU) | 28% off no-verify streaming |
+| Single spawn_blocking copy loop | One std::fs::File dup per call | 2.3x faster Linux NVMe streaming |
