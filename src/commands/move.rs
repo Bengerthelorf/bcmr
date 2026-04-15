@@ -54,7 +54,7 @@ pub async fn move_path<F>(
     on_new_file: impl Fn(&str, u64) + Send + Sync + 'static + Clone,
 ) -> std::result::Result<(), BcmrError>
 where
-    F: Fn(u64) + Send + Sync + Clone,
+    F: Fn(u64) + Send + Sync + Clone + 'static,
 {
     let recursive = cli.is_recursive();
     if traversal::is_excluded(src, excludes) {

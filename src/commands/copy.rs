@@ -497,7 +497,7 @@ pub async fn execute_plan<F>(
     on_new_file: impl Fn(&str, u64) + Send + Sync + 'static,
 ) -> std::result::Result<(), BcmrError>
 where
-    F: Fn(u64) + Send + Sync,
+    F: Fn(u64) + Send + Sync + Clone + 'static,
 {
     let test_mode = cli.get_test_mode();
     let callback = ProgressCallback {
@@ -573,7 +573,7 @@ pub async fn copy_path<F>(
     on_new_file: impl Fn(&str, u64) + Send + Sync + 'static,
 ) -> std::result::Result<(), BcmrError>
 where
-    F: Fn(u64) + Send + Sync,
+    F: Fn(u64) + Send + Sync + Clone + 'static,
 {
     let test_mode = cli.get_test_mode();
     let callback = ProgressCallback {
@@ -875,7 +875,7 @@ async fn copy_file<F>(
     callback: &ProgressCallback<F>,
 ) -> std::result::Result<(), BcmrError>
 where
-    F: Fn(u64),
+    F: Fn(u64) + Send + Sync + Clone + 'static,
 {
     let CopyFileOptions {
         transfer,
@@ -1124,7 +1124,7 @@ pub async fn pipeline_copy<F>(
     cb: PipelineCallbacks<F>,
 ) -> std::result::Result<(), BcmrError>
 where
-    F: Fn(u64) + Send + Sync,
+    F: Fn(u64) + Send + Sync + Clone + 'static,
 {
     let test_mode = cli.get_test_mode();
     let recursive = cli.is_recursive();
