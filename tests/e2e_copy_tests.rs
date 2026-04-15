@@ -652,3 +652,53 @@ fn e2e_carry_forward_code_path() {
         "final file should match source after carry-forward resume"
     );
 }
+
+/// bcmr copy -p must carry extended attributes across to the destination
+/// when both filesystems support them. Run only on macOS + Linux where
+/// xattr crate compiles; skip if the underlying FS doesn't support
+/// xattrs (we detect by trying to set one on a tempfile first).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn test_xattr_preserved_with_p_flag() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src.txt");
+    let dst = tmp.path().join("dst.txt");
+    fs::write(&src, b"payload").unwrap();
+
+    let xattr_name = "user.bcmr.test";
+    if xattr::set(&src, xattr_name, b"hello-xattr").is_err() {
+        eprintln!("skipping xattr test: filesystem lacks user.* xattr support");
+        return;
+    }
+
+    let (ok, _, stderr) = run_bcmr(&["copy", "-p", src.to_str().unwrap(), dst.to_str().unwrap()]);
+    assert!(ok, "copy -p should succeed: {}", stderr);
+
+    let got = xattr::get(&dst, xattr_name)
+        .expect("xattr::get on dst")
+        .expect("xattr should exist on dst");
+    assert_eq!(got, b"hello-xattr");
+}
+
+/// Binary xattr value (bytes with high bit set) must round-trip
+/// verbatim with -p, since the wire/disk path for xattrs is raw bytes,
+/// not a UTF-8 string.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn test_xattr_preserves_binary_value() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src.bin");
+    let dst = tmp.path().join("dst.bin");
+    fs::write(&src, b"content").unwrap();
+
+    let binary_value = vec![0x00, 0xff, 0x10, 0x80, 0x7f, 0xde, 0xad, 0xbe, 0xef];
+    if xattr::set(&src, "user.bcmr.bin", &binary_value).is_err() {
+        return;
+    }
+
+    let (ok, _, _) = run_bcmr(&["copy", "-p", src.to_str().unwrap(), dst.to_str().unwrap()]);
+    assert!(ok);
+
+    let got = xattr::get(&dst, "user.bcmr.bin").unwrap().unwrap();
+    assert_eq!(got, binary_value);
+}

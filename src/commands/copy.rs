@@ -750,7 +750,45 @@ pub(crate) async fn preserve_attributes(
         let mtime = filetime::FileTime::from_last_modification_time(&src_metadata);
         filetime::set_file_times(dst, atime, mtime)?;
     }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    copy_xattrs(src, dst)?;
+
     Ok(())
+}
+
+/// Best-effort xattr copy. Filesystems that don't support xattrs (e.g.
+/// vfat, exFAT) return ENOTSUP / EOPNOTSUPP which we swallow silently —
+/// matching `cp -p` behaviour on the same target. Permission errors on
+/// specific names (e.g. `security.*` under SELinux) are also soft
+/// failures: the user wanted a copy, not a cryptographic identity.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn copy_xattrs(src: &Path, dst: &Path) -> std::result::Result<(), BcmrError> {
+    let names = match xattr::list(src) {
+        Ok(n) => n,
+        Err(e) if is_unsupported(&e) => return Ok(()),
+        Err(e) => return Err(BcmrError::Io(e)),
+    };
+    for name in names {
+        // `xattr::list` returns raw byte names; copy both the name and
+        // value verbatim so binary-safe attributes round-trip exactly.
+        let value = match xattr::get(src, &name) {
+            Ok(Some(v)) => v,
+            Ok(None) => continue,
+            Err(e) if is_unsupported(&e) => continue,
+            Err(_) => continue,
+        };
+        // On macOS, system-level attrs like `com.apple.rootless` fail
+        // set_xattr with EPERM; we skip rather than abort the whole copy.
+        let _ = xattr::set(dst, &name, &value);
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn is_unsupported(e: &std::io::Error) -> bool {
+    // 95 = ENOTSUP on Linux, 45 = ENOTSUP on macOS, 1 = EPERM.
+    matches!(e.raw_os_error(), Some(95) | Some(45))
 }
 
 struct CopyFileOptions {
@@ -1030,12 +1068,17 @@ where
             None
         }
         TestMode::None => {
+            // We need the src hash whenever -V is set or there's a session
+            // that will outlive this run (resume/strict/append, or any file
+            // big enough that streaming_copy might be re-entered later).
+            let need_src_hash = verify || session.is_some();
             super::copy_strategies::streaming_copy(
                 &mut src_file,
                 &mut dst_file,
                 &mut session,
                 &sparse_mode,
                 start_offset,
+                need_src_hash,
                 &callback.callback,
             )
             .await?
