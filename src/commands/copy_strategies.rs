@@ -29,8 +29,10 @@ pub async fn finalize(
 
     if use_atomic {
         fs::rename(write_target, dst).await?;
-        if let Some(parent) = dst.parent() {
-            durable_io::fsync_dir_async(parent).await;
+        if sync {
+            if let Some(parent) = dst.parent() {
+                durable_io::fsync_dir_async(parent).await;
+            }
         }
         if let Some(ref mut g) = guard {
             g.disarm();

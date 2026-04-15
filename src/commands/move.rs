@@ -110,8 +110,10 @@ where
                 return Err(BcmrError::Io(e));
             }
         } else {
-            if let Some(parent) = dst_path.parent() {
-                durable_io::fsync_dir_async(parent).await;
+            if cli.is_sync() {
+                if let Some(parent) = dst_path.parent() {
+                    durable_io::fsync_dir_async(parent).await;
+                }
             }
             on_new_file(&file_name, file_size);
             progress_callback(file_size);
@@ -205,8 +207,10 @@ where
                     return Err(e.into());
                 }
             } else {
-                if let Some(parent) = new_dst.parent() {
-                    durable_io::fsync_dir_async(parent).await;
+                if cli.is_sync() {
+                    if let Some(parent) = new_dst.parent() {
+                        durable_io::fsync_dir_async(parent).await;
+                    }
                 }
                 // Rename succeeded instantly — report full progress
                 on_new_file(&dir_name, dir_size);
