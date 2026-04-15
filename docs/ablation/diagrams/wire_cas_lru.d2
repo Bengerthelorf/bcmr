@@ -1,0 +1,70 @@
+direction: right
+vars: {
+  d2-config: {
+    layout-engine: elk
+    theme-id: 300
+  }
+}
+
+p1: {
+  label: "PUT file_1\n6 blocks\n(mtime t1)"
+  shape: rectangle
+  style.fill: "#e6f4ff"
+  style.stroke: "#3b82f6"
+}
+
+c1: {
+  label: "CAS\n6 blobs"
+  shape: cylinder
+  style.fill: "#dcfce7"
+}
+
+p2: {
+  label: "PUT file_2\n6 blocks\n(mtime t2)"
+  shape: rectangle
+  style.fill: "#e6f4ff"
+  style.stroke: "#3b82f6"
+}
+
+ev1: {
+  label: "Cap\nexceeded?"
+  shape: diamond
+  style.fill: "#fff4e6"
+  style.stroke: "#e67e22"
+}
+
+c2: {
+  label: "CAS\n8 blobs\n(oldest evicted)"
+  shape: cylinder
+  style.fill: "#dcfce7"
+}
+
+p3: {
+  label: "PUT file_3\n6 blocks\n(mtime t3)"
+  shape: rectangle
+  style.fill: "#e6f4ff"
+  style.stroke: "#3b82f6"
+}
+
+ev2: {
+  label: "Cap\nexceeded?"
+  shape: diamond
+  style.fill: "#fff4e6"
+  style.stroke: "#e67e22"
+}
+
+c3: {
+  label: "CAS\n≤ 8 blobs\nfile_3 all present\nfile_1 evicted"
+  shape: cylinder
+  style.fill: "#dcfce7"
+  style.stroke: "#16a34a"
+  style.bold: true
+}
+
+p1 -> c1
+c1 -> p2
+p2 -> ev1
+ev1 -> c2: "yes, evict\noldest"
+c2 -> p3
+p3 -> ev2
+ev2 -> c3: "yes, evict\noldest"

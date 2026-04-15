@@ -105,25 +105,7 @@ always exists before its children try to open files inside it.
 `plan.entries` picking out `CreateDir` nodes is enough. The file
 stream then runs through `futures::stream::buffer_unordered(N)`.
 
-```mermaid
-flowchart TD
-    P[CopyPlan.entries] -->|filter| D[CreateDir entries]
-    P -->|filter| F[CopyFile entries]
-    D -->|serial,<br/>DFS order| MK["fs::create_dir_all<br/>for each dst"]
-    MK -->|gates| ST[Stream of file copies]
-    F --> ST
-    ST -->|buffer_unordered N| W1[Worker 1: copy_file]
-    ST --> W2[Worker 2: copy_file]
-    ST --> Wn[...Worker N]
-    W1 --> R[Result aggregator<br/>first Err short-circuits]
-    W2 --> R
-    Wn --> R
-
-    classDef serial fill:#fed,stroke:#c83
-    classDef parallel fill:#dfe,stroke:#3c3
-    class D,MK serial
-    class F,ST,W1,W2,Wn parallel
-```
+![Concurrent multi-file copy](/images/ablation/flow/local_concurrent_copy.svg)
 
 ## Experiment 10: Whole-Source BLAKE3 on the I/O Thread
 
@@ -195,35 +177,7 @@ inside one `tokio::task::spawn_blocking`. The session is returned
 through the join handle so the outer async function preserves the
 `&mut Option<Session>` contract.
 
-```mermaid
-flowchart TB
-    subgraph Before[Before v0.5.9]
-      direction TB
-      L1["loop iteration k:"]
-      L1 --> R1["src_file.read.await"]
-      R1 -.->|spawn_blocking 1| K1[kernel]
-      K1 -.-> R1
-      R1 --> H1["block + src hash"]
-      H1 --> W1["dst_file.write.await"]
-      W1 -.->|spawn_blocking 2| K2[kernel]
-      K2 -.-> W1
-    end
-    subgraph After[After v0.5.9]
-      direction TB
-      OUT["spawn_blocking once<br/>(owns std::fs::File handles)"]
-      OUT --> L2["loop iteration k:"]
-      L2 --> R2["read syscall"]
-      R2 --> H2["block + src hash"]
-      H2 --> W2["write syscall"]
-    end
-    Before -.->|"1024 ↔ kernel<br/>round trips per 2 GiB"| Note1[~12 s<br/>Linux NVMe]
-    After -.->|"2 ↔ kernel<br/>round trips per file"| Note2[~5 s<br/>Linux NVMe]
-
-    classDef bad fill:#fdd,stroke:#c33
-    classDef good fill:#dfd,stroke:#3c3
-    class Note1 bad
-    class Note2 good
-```
+![spawn_blocking before vs after](/images/ablation/flow/local_spawn_blocking.svg)
 
 **Decision**: Ship the refactor. It's a 2.3x wall-clock win on
 Linux NVMe and ~1.7x on macOS APFS for the streaming path, with no

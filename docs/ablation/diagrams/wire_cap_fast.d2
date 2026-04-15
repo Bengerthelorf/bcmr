@@ -1,0 +1,70 @@
+direction: right
+vars: {
+  d2-config: {
+    layout-engine: elk
+    theme-id: 300
+  }
+}
+
+server: {
+  label: "Server (Linux, bcmr serve)"
+  direction: right
+  style.fill: "#f0fdf4"
+  style.stroke: "#16a34a"
+
+  file: {
+    label: "Source\nfile fd"
+    shape: cylinder
+    style.fill: "#dcfce7"
+  }
+  pipe: {
+    label: "Pipe\n(4 MiB buffer)"
+    shape: queue
+    style.fill: "#dcfce7"
+  }
+  stdout: {
+    label: "stdout fd"
+    shape: cylinder
+    style.fill: "#dcfce7"
+  }
+  header: {
+    label: "9 B frame header\n(via tokio)"
+    shape: rectangle
+  }
+
+  file -> pipe: "splice(2)" {
+    style.stroke: "#16a34a"
+    style.stroke-width: 2
+  }
+  pipe -> stdout: "splice(2)" {
+    style.stroke: "#16a34a"
+    style.stroke-width: 2
+  }
+  header -> stdout: "before each\npayload" {
+    style.stroke-dash: 4
+  }
+}
+
+ssh: {
+  label: "SSH tunnel"
+  shape: cloud
+}
+
+client: {
+  label: "Client"
+  direction: down
+  rehash: {
+    label: "Optional -V\nrehash dst\nclient-side"
+    shape: rectangle
+    style.fill: "#fff4e6"
+    style.stroke: "#e67e22"
+  }
+  ok: {
+    label: "Ok { hash: None }\n(server skipped BLAKE3)"
+    shape: rectangle
+  }
+  ok -> rehash: "on demand"
+}
+
+server.stdout -> ssh
+ssh -> client

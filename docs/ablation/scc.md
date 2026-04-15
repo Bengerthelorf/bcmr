@@ -34,23 +34,7 @@ BLAKE3 achieves 1--5 GB/s on modern hardware (NEON / AVX-512), which **exceeds t
 
 ### Data Flow
 
-```mermaid
-flowchart LR
-    SRC[Source<br/>file] -->|read 4 MiB| BUF[Userspace<br/>buffer]
-    BUF -->|write| DST[Destination<br/>.bcmr.tmp]
-    BUF -.->|update| SH[src_hasher]
-    BUF -.->|update| BH[block_hasher]
-    BH -.->|every 4 MiB,<br/>finalize| BL[Block hash list]
-    BL -.->|every 16 blocks<br/>= 64 MiB| CK[Checkpoint:<br/>fdatasync dst<br/>+ session.save]
-    CK -.-> SF[(Session file)]
-
-    classDef io fill:#fed,stroke:#c83
-    classDef hash fill:#def,stroke:#37c
-    classDef ckpt fill:#fde,stroke:#c37
-    class SRC,DST,BUF io
-    class SH,BH,BL hash
-    class CK,SF ckpt
-```
+![SCC data flow](/images/ablation/flow/scc_dataflow.svg)
 
 The two hashers run in lockstep: `src_hasher` accumulates a single
 BLAKE3 over the whole file (used for `-V` and for cross-run resume
@@ -102,20 +86,7 @@ If a crash occurs at any point:
 
 No state can be reached where the session claims a block is complete but the block is not on disk.
 
-```mermaid
-stateDiagram-v2
-    direction LR
-    [*] --> WriteData: copy block k
-    WriteData --> FdatasyncDst: write returns
-    FdatasyncDst --> SaveSession: data durable
-    SaveSession --> [*]: session updated
-
-    state "Crash recovery" as CR {
-        WriteData --> Recopy: block in cache,<br/>not on disk
-        FdatasyncDst --> Recopy: block durable,<br/>session stale
-        SaveSession --> Resume: both durable,<br/>resume at k+1
-    }
-```
+![Crash recovery state machine](/images/ablation/flow/scc_crash_safety.svg)
 
 The two recovery branches that recopy a block are wasteful but
 correct; the only forbidden state ("session says k is durable, but

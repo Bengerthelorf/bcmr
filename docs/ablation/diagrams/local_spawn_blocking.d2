@@ -1,0 +1,92 @@
+vars: {
+  d2-config: {
+    layout-engine: elk
+    theme-id: 300
+  }
+}
+
+before: {
+  label: "Before v0.5.9\n~12 s for 2 GiB on Linux NVMe"
+  direction: down
+  style.fill: "#fef2f2"
+  style.stroke: "#b91c1c"
+
+  loop1: {
+    label: "loop iteration k"
+    shape: rectangle
+  }
+  read1: {
+    label: "src_file.read.await"
+    shape: rectangle
+  }
+  kernel1: {
+    label: "kernel"
+    shape: cloud
+  }
+  hash1: {
+    label: "block + src hash"
+    shape: rectangle
+  }
+  write1: {
+    label: "dst_file.write.await"
+    shape: rectangle
+  }
+  kernel2: {
+    label: "kernel"
+    shape: cloud
+  }
+
+  loop1 -> read1
+  read1 -> kernel1: "spawn_blocking 1" {
+    style.stroke: "#b91c1c"
+    style.stroke-dash: 4
+  }
+  kernel1 -> read1: "" {
+    style.stroke: "#b91c1c"
+    style.stroke-dash: 4
+  }
+  read1 -> hash1
+  hash1 -> write1
+  write1 -> kernel2: "spawn_blocking 2" {
+    style.stroke: "#b91c1c"
+    style.stroke-dash: 4
+  }
+  kernel2 -> write1: "" {
+    style.stroke: "#b91c1c"
+    style.stroke-dash: 4
+  }
+}
+
+after: {
+  label: "After v0.5.9\n~5 s for 2 GiB on Linux NVMe"
+  direction: down
+  style.fill: "#f0fdf4"
+  style.stroke: "#16a34a"
+
+  outer: {
+    label: "spawn_blocking once\n(owns std::fs::File handles)"
+    shape: rectangle
+    style.fill: "#dcfce7"
+  }
+  loop2: {
+    label: "loop iteration k"
+    shape: rectangle
+  }
+  read2: {
+    label: "read(2) syscall"
+    shape: rectangle
+  }
+  hash2: {
+    label: "block + src hash"
+    shape: rectangle
+  }
+  write2: {
+    label: "write(2) syscall"
+    shape: rectangle
+  }
+
+  outer -> loop2
+  loop2 -> read2
+  read2 -> hash2
+  hash2 -> write2
+}

@@ -1,0 +1,61 @@
+direction: right
+vars: {
+  d2-config: {
+    layout-engine: elk
+    theme-id: 300
+  }
+}
+
+plan: {
+  label: "CopyPlan.entries"
+  shape: document
+}
+
+dirs: {
+  label: "CreateDir\nentries"
+  shape: rectangle
+  style.fill: "#fff4e6"
+  style.stroke: "#e67e22"
+}
+
+files: {
+  label: "CopyFile\nentries"
+  shape: rectangle
+  style.fill: "#dcfce7"
+  style.stroke: "#16a34a"
+}
+
+mkdir: {
+  label: "fs::create_dir_all\n(serial, DFS order)"
+  shape: rectangle
+  style.fill: "#fff4e6"
+  style.stroke: "#e67e22"
+}
+
+stream: {
+  label: "futures::stream\nbuffer_unordered(N)"
+  shape: hexagon
+  style.fill: "#dcfce7"
+  style.stroke: "#16a34a"
+}
+
+workers: {
+  label: "N concurrent\ncopy_file tasks"
+  shape: rectangle
+  style.multiple: true
+  style.fill: "#dcfce7"
+  style.stroke: "#16a34a"
+}
+
+result: {
+  label: "Result\n(first Err\nshort-circuits)"
+  shape: oval
+}
+
+plan -> dirs: "filter"
+plan -> files: "filter"
+dirs -> mkdir
+mkdir -> stream: "gates start"
+files -> stream
+stream -> workers
+workers -> result

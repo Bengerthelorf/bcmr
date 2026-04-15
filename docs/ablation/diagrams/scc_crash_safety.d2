@@ -1,0 +1,53 @@
+direction: down
+vars: {
+  d2-config: {
+    layout-engine: elk
+    theme-id: 300
+  }
+}
+
+start: {
+  label: "copy block k"
+  shape: oval
+}
+
+write: {
+  label: "1. write(dst, block)\n→ page cache"
+  shape: rectangle
+}
+
+fsync: {
+  label: "2. fdatasync(dst)\n→ block durable"
+  shape: rectangle
+}
+
+save: {
+  label: "3. session.save()\n(write → fsync → rename)"
+  shape: rectangle
+}
+
+done: {
+  label: "block k complete\nresume at k+1"
+  shape: oval
+  style.fill: "#dcfce7"
+}
+
+recopy: {
+  label: "recopy block k\non next run"
+  shape: oval
+  style.fill: "#fef3c7"
+}
+
+start -> write
+write -> fsync
+fsync -> save
+save -> done
+
+write -> recopy: "crash here:\nblock not on disk" {
+  style.stroke: "#b91c1c"
+  style.stroke-dash: 4
+}
+fsync -> recopy: "crash here:\nsession stale" {
+  style.stroke: "#b91c1c"
+  style.stroke-dash: 4
+}

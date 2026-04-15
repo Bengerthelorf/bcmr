@@ -1,0 +1,80 @@
+direction: right
+
+vars: {
+  d2-config: {
+    layout-engine: elk
+    theme-id: 300
+  }
+}
+
+src: {
+  label: "Source\nfile"
+  shape: cylinder
+  style.fill: "#fff4e6"
+  style.stroke: "#e67e22"
+}
+
+buf: {
+  label: "Userspace\nbuffer\n(4 MiB)"
+  shape: rectangle
+  style.fill: "#fff4e6"
+  style.stroke: "#e67e22"
+}
+
+dst: {
+  label: "Destination\n.bcmr.tmp"
+  shape: cylinder
+  style.fill: "#fff4e6"
+  style.stroke: "#e67e22"
+}
+
+src_hasher: {
+  label: "src_hasher\n(whole file)"
+  shape: hexagon
+  style.fill: "#e6f4ff"
+  style.stroke: "#3b82f6"
+}
+
+block_hasher: {
+  label: "block_hasher\n(per 4 MiB)"
+  shape: hexagon
+  style.fill: "#e6f4ff"
+  style.stroke: "#3b82f6"
+}
+
+blocks: {
+  label: "Block hash list"
+  shape: document
+  style.fill: "#e6f4ff"
+  style.stroke: "#3b82f6"
+}
+
+ckpt: {
+  label: "Checkpoint\nevery 16 blocks:\nfdatasync dst\n+ session.save()"
+  shape: diamond
+  style.fill: "#ffe6ea"
+  style.stroke: "#e11d48"
+}
+
+session: {
+  label: "Session file"
+  shape: stored_data
+  style.fill: "#ffe6ea"
+  style.stroke: "#e11d48"
+}
+
+src -> buf: "read 4 MiB"
+buf -> dst: "write"
+buf -> src_hasher: "update" {
+  style.stroke-dash: 3
+}
+buf -> block_hasher: "update" {
+  style.stroke-dash: 3
+}
+block_hasher -> blocks: "finalize every 4 MiB" {
+  style.stroke-dash: 3
+}
+blocks -> ckpt {
+  style.stroke-dash: 3
+}
+ckpt -> session

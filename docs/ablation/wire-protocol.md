@@ -202,23 +202,7 @@ file → stdout payload moves through `splice(2)` with no userspace
 buffer. The server's `Ok` carries `hash: None`; clients that need
 end-to-end integrity get it via `-V` (re-hash dst client-side).
 
-```mermaid
-flowchart LR
-    subgraph S[Server: bcmr serve, Linux]
-      F[Source file fd]
-      P((Pipe<br/>4 MiB buffer))
-      H[Frame header<br/>9 bytes via tokio]
-      F -->|"splice(2)"| P
-      P -->|"splice(2)"| O[stdout fd]
-      H -.->|writes before<br/>each payload| O
-    end
-    O ==> N(((SSH<br/>tunnel)))
-    N ==> R[Client]
-    R -->|"on Ok hash:None,<br/>caller may -V"| V[Optional<br/>client-side rehash]
-
-    classDef zerocopy fill:#dff,stroke:#06c
-    class F,P,O zerocopy
-```
+![CAP_FAST data flow](/images/ablation/flow/wire_cap_fast.svg)
 
 The 4 MiB pipe buffer (set via `fcntl(F_SETPIPE_SZ)`) means each
 chunk needs one `splice` call from the file and one from the pipe
@@ -310,18 +294,7 @@ The mtime touch on `cas::write` and `cas::read` means a block hit
 during PUT N+1 stays warmer than untouched blocks from PUT N,
 matching the dev-loop pattern (re-upload the same artifact).
 
-```mermaid
-flowchart LR
-    P1["PUT file_1<br/>6 blocks"] -->|mtime t1| C1[CAS<br/>6 blobs]
-    P2["PUT file_2<br/>6 blocks"] -->|mtime t2| EV1{Cap<br/>exceeded?}
-    EV1 -->|yes,<br/>evict oldest| C2[CAS<br/>8 blobs]
-    P3["PUT file_3<br/>6 blocks"] -->|mtime t3| EV2{Cap<br/>exceeded?}
-    EV2 -->|yes,<br/>evict oldest| C3[CAS<br/>8 blobs]
-    C3 -->|file_3's blocks<br/>all present;<br/>file_1's evicted| END[End state]
-
-    classDef store fill:#dfe,stroke:#3c3
-    class C1,C2,C3,END store
-```
+![CAS LRU timeline](/images/ablation/flow/wire_cas_lru.svg)
 
 **Decision**: ship the LRU as default. The hit rate degrades
 gracefully as cap shrinks, and the `BCMR_CAS_CAP_MB=0` escape
