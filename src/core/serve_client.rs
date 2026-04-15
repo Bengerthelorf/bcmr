@@ -4,17 +4,34 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
+use crate::core::compress;
 use crate::core::error::BcmrError;
-use crate::core::protocol::{self, ListEntry, Message, PROTOCOL_VERSION};
+use crate::core::protocol::{
+    self, CompressionAlgo, ListEntry, Message, CAP_LZ4, CAP_ZSTD, PROTOCOL_VERSION,
+};
+
+/// What the client is willing to speak. The user's --compress flag
+/// intersects this before the Hello is sent so users can force "raw" for
+/// debugging or to disable compression on trusted LANs where the CPU
+/// cost outweighs the bandwidth savings.
+const CLIENT_CAPS: u8 = CAP_LZ4 | CAP_ZSTD;
 
 pub struct ServeClient {
     child: Child,
     stdin: Option<ChildStdin>,
     stdout: ChildStdout,
+    algo: CompressionAlgo,
 }
 
 impl ServeClient {
+    /// Connect with default capabilities (advertise all compression the
+    /// client supports). Prefer `connect_with_caps` when the caller has
+    /// a user-specified `--compress` value to honour.
     pub async fn connect(ssh_target: &str) -> Result<Self, BcmrError> {
+        Self::connect_with_caps(ssh_target, CLIENT_CAPS).await
+    }
+
+    pub async fn connect_with_caps(ssh_target: &str, caps: u8) -> Result<Self, BcmrError> {
         let mut child = Command::new("ssh")
             .args([
                 "-o",
@@ -39,12 +56,8 @@ impl ServeClient {
             .take()
             .ok_or_else(|| BcmrError::InvalidInput("failed to open child stdout".into()))?;
 
-        let mut client = Self {
-            child,
-            stdin: Some(stdin),
-            stdout,
-        };
-        client.handshake().await?;
+        let mut client = Self::from_child(child, stdin, stdout);
+        client.handshake(caps).await?;
         Ok(client)
     }
 
@@ -96,27 +109,46 @@ impl ServeClient {
             .take()
             .ok_or_else(|| BcmrError::InvalidInput("failed to open child stdout".into()))?;
 
-        let mut client = Self {
-            child,
-            stdin: Some(stdin),
-            stdout,
-        };
-        client.handshake().await?;
+        let mut client = Self::from_child(child, stdin, stdout);
+        client.handshake(CLIENT_CAPS).await?;
         Ok(client)
     }
 
-    async fn handshake(&mut self) -> Result<(), BcmrError> {
+    fn from_child(child: Child, stdin: ChildStdin, stdout: ChildStdout) -> Self {
+        Self {
+            child,
+            stdin: Some(stdin),
+            stdout,
+            algo: CompressionAlgo::None,
+        }
+    }
+
+    async fn handshake(&mut self, caps: u8) -> Result<(), BcmrError> {
         self.send(&Message::Hello {
             version: PROTOCOL_VERSION,
+            caps,
         })
         .await?;
         match self.recv().await? {
-            Message::Welcome { .. } => Ok(()),
+            Message::Welcome {
+                caps: server_caps, ..
+            } => {
+                self.algo = CompressionAlgo::negotiate(caps, server_caps);
+                Ok(())
+            }
             Message::Error { message } => Err(BcmrError::InvalidInput(message)),
             other => Err(BcmrError::InvalidInput(format!(
                 "unexpected handshake response: {other:?}"
             ))),
         }
+    }
+
+    /// Override the caps the client will advertise on the next handshake
+    /// (takes effect only if called before `connect*`, which currently
+    /// isn't exposed — kept as an internal knob for tests).
+    #[allow(dead_code)]
+    pub fn negotiated_algo(&self) -> CompressionAlgo {
+        self.algo
     }
 
     pub async fn stat(&mut self, path: &str) -> Result<(u64, u64, bool), BcmrError> {
@@ -187,6 +219,14 @@ impl ServeClient {
         loop {
             match self.recv().await? {
                 Message::Data { payload } => on_data(&payload),
+                Message::DataCompressed {
+                    algo,
+                    original_size,
+                    payload,
+                } => {
+                    let decoded = compress::decode_block(algo, original_size, &payload)?;
+                    on_data(&decoded);
+                }
                 Message::Ok { hash } => {
                     return match hash {
                         Some(h) => decode_hex32(&h).map(Some),
@@ -220,10 +260,8 @@ impl ServeClient {
             if n == 0 {
                 break;
             }
-            self.send(&Message::Data {
-                payload: buf[..n].to_vec(),
-            })
-            .await?;
+            let frame = compress::encode_block(self.algo, buf[..n].to_vec());
+            self.send(&frame).await?;
         }
         self.send(&Message::Done).await?;
 

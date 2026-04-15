@@ -114,6 +114,12 @@ pub struct CopyMoveArgs {
     /// For remote transfers, see --parallel on the Copy subcommand.
     #[arg(short = 'j', long = "jobs")]
     pub jobs: Option<usize>,
+
+    /// Wire compression for the serve protocol. Modes: auto (default,
+    /// LZ4+Zstd advertised, Zstd chosen when both sides speak it, with
+    /// per-block auto-skip on incompressible data), zstd, lz4, none.
+    #[arg(long, default_value = "auto")]
+    pub compress: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -369,6 +375,23 @@ impl Commands {
             .unwrap_or_else(|| num_cpus::get().clamp(1, 8))
     }
 
+    /// Parse --compress into a capability bitmask for the serve handshake.
+    pub fn compression_caps(&self) -> u8 {
+        use crate::core::protocol::{CAP_LZ4, CAP_ZSTD};
+        match self
+            .copy_move_args()
+            .map(|a| a.compress.as_str())
+            .unwrap_or("auto")
+            .to_lowercase()
+            .as_str()
+        {
+            "none" | "off" | "disable" => 0,
+            "lz4" => CAP_LZ4,
+            "zstd" => CAP_ZSTD,
+            _ => CAP_LZ4 | CAP_ZSTD,
+        }
+    }
+
     pub fn get_reflink_mode(&self) -> Option<String> {
         match self {
             Commands::Copy { reflink, .. } => reflink.clone(),
@@ -514,6 +537,7 @@ mod tests {
             append: false,
             sync: false,
             jobs: None,
+            compress: "auto".to_string(),
         }
     }
 

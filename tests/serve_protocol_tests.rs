@@ -13,13 +13,45 @@ fn test_protocol_version_constant() {
 #[test]
 fn test_hello_welcome_roundtrip() {
     assert_eq!(
-        roundtrip(Message::Hello { version: 1 }),
-        Message::Hello { version: 1 }
+        roundtrip(Message::Hello {
+            version: 1,
+            caps: 0
+        }),
+        Message::Hello {
+            version: 1,
+            caps: 0
+        }
     );
     assert_eq!(
-        roundtrip(Message::Welcome { version: 1 }),
-        Message::Welcome { version: 1 }
+        roundtrip(Message::Welcome {
+            version: 1,
+            caps: 0
+        }),
+        Message::Welcome {
+            version: 1,
+            caps: 0
+        }
     );
+    assert_eq!(
+        roundtrip(Message::Hello {
+            version: 1,
+            caps: 3
+        }),
+        Message::Hello {
+            version: 1,
+            caps: 3
+        }
+    );
+}
+
+#[test]
+fn test_data_compressed_roundtrip() {
+    let msg = Message::DataCompressed {
+        algo: 1,
+        original_size: 4096,
+        payload: vec![0xAA; 1024],
+    };
+    assert_eq!(roundtrip(msg.clone()), msg);
 }
 
 #[test]
@@ -233,7 +265,10 @@ async fn test_async_write_read_roundtrip() {
     use tokio::io::duplex;
 
     let messages = vec![
-        Message::Hello { version: 1 },
+        Message::Hello {
+            version: 1,
+            caps: 0,
+        },
         Message::List {
             path: "/tmp".to_string(),
         },

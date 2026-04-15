@@ -1,10 +1,17 @@
-use crate::core::protocol::{self, ListEntry, Message, PROTOCOL_VERSION};
+use crate::core::compress;
+use crate::core::protocol::{
+    self, CompressionAlgo, ListEntry, Message, CAP_LZ4, CAP_ZSTD, PROTOCOL_VERSION,
+};
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::{self, AsyncWriteExt};
 
 const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
+
+/// The server advertises both algorithms it can handle; the client picks
+/// the preferred one via CompressionAlgo::negotiate.
+const SERVER_CAPS: u8 = CAP_LZ4 | CAP_ZSTD;
 
 /// Validate and canonicalize a path from the client.
 /// Prevents directory traversal attacks (e.g. "../../../etc/shadow").
@@ -47,8 +54,8 @@ pub async fn run() -> Result<()> {
     let mut stdout = io::stdout();
 
     // --- Handshake ---
-    match protocol::read_message(&mut stdin).await? {
-        Some(Message::Hello { version }) => {
+    let effective_caps = match protocol::read_message(&mut stdin).await? {
+        Some(Message::Hello { version, caps }) => {
             if version != PROTOCOL_VERSION {
                 protocol::write_message(
                     &mut stdout,
@@ -62,6 +69,7 @@ pub async fn run() -> Result<()> {
                 stdout.flush().await?;
                 return Ok(());
             }
+            SERVER_CAPS & caps
         }
         Some(other) => {
             protocol::write_message(
@@ -75,12 +83,18 @@ pub async fn run() -> Result<()> {
             return Ok(());
         }
         None => return Ok(()), // clean EOF before handshake
-    }
+    };
+
+    // Server and client both call negotiate(caps, caps) with this shared
+    // intersection so they land on the same algorithm without a second
+    // round trip.
+    let algo = CompressionAlgo::negotiate(effective_caps, effective_caps);
 
     protocol::write_message(
         &mut stdout,
         &Message::Welcome {
             version: PROTOCOL_VERSION,
+            caps: effective_caps,
         },
     )
     .await?;
@@ -101,7 +115,7 @@ pub async fn run() -> Result<()> {
                 match validate_path(&path) {
                     Ok(p) => {
                         if let Err(e) =
-                            handle_get(p.to_str().unwrap_or(&path), offset, &mut stdout).await
+                            handle_get(p.to_str().unwrap_or(&path), offset, algo, &mut stdout).await
                         {
                             eprintln!("serve: handler error: {e}");
                             protocol::write_message(
@@ -257,7 +271,7 @@ async fn handle_hash(path: &str, offset: u64, limit: Option<u64>) -> Result<Mess
 /// Streams file data as Data messages, then writes Ok with hash directly.
 /// Returns Result<()> because it writes responses directly to the output —
 /// the dispatch loop must NOT write another response for Get commands.
-async fn handle_get<W>(path: &str, offset: u64, out: &mut W) -> Result<()>
+async fn handle_get<W>(path: &str, offset: u64, algo: CompressionAlgo, out: &mut W) -> Result<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
@@ -277,13 +291,8 @@ where
             break;
         }
         hasher.update(&buf[..n]);
-        protocol::write_message(
-            out,
-            &Message::Data {
-                payload: buf[..n].to_vec(),
-            },
-        )
-        .await?;
+        let frame = compress::encode_block(algo, buf[..n].to_vec());
+        protocol::write_message(out, &frame).await?;
     }
 
     let hash = hasher.finalize().to_hex().to_string();
@@ -311,6 +320,15 @@ where
             Some(Message::Data { payload }) => {
                 hasher.update(&payload);
                 file.write_all(&payload).await?;
+            }
+            Some(Message::DataCompressed {
+                algo,
+                original_size,
+                payload,
+            }) => {
+                let decoded = compress::decode_block(algo, original_size, &payload)?;
+                hasher.update(&decoded);
+                file.write_all(&decoded).await?;
             }
             Some(Message::Done) => break,
             Some(other) => {

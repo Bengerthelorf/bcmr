@@ -615,7 +615,7 @@ async fn handle_serve_upload(
     ssh_target: &str,
     excludes: &[regex::Regex],
 ) -> Result<()> {
-    let mut client = ServeClient::connect(ssh_target)
+    let mut client = ServeClient::connect_with_caps(ssh_target, args.compression_caps())
         .await
         .map_err(|e| anyhow::anyhow!("serve unavailable: {}", e))?;
 
@@ -724,7 +724,7 @@ async fn handle_serve_download(
     ssh_target: &str,
     excludes: &[regex::Regex],
 ) -> Result<()> {
-    let mut client = ServeClient::connect(ssh_target)
+    let mut client = ServeClient::connect_with_caps(ssh_target, args.compression_caps())
         .await
         .map_err(|e| anyhow::anyhow!("serve unavailable: {}", e))?;
 

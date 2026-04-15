@@ -144,6 +144,59 @@ async fn serve_get_download() {
     }
 }
 
+/// Compressible content: the server's GET path must produce DataCompressed
+/// frames that the client decompresses back to the exact source bytes.
+#[tokio::test]
+async fn serve_get_compressible_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.txt");
+    // Highly compressible repeated pattern.
+    let text = "the quick brown fox jumps over the lazy dog\n".repeat(100_000);
+    fs::write(&src, text.as_bytes()).unwrap();
+
+    let received: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let received_clone = Arc::clone(&received);
+
+    let mut client = ServeClient::connect_local().await.unwrap();
+    let algo = client.negotiated_algo();
+    assert_ne!(
+        algo,
+        bcmr::core::protocol::CompressionAlgo::None,
+        "client and server should negotiate a compression algorithm"
+    );
+    client
+        .get(src.to_str().unwrap(), 0, move |chunk| {
+            received_clone.lock().unwrap().extend_from_slice(chunk);
+        })
+        .await
+        .unwrap();
+    client.close().await.unwrap();
+
+    let data = Arc::try_unwrap(received).unwrap().into_inner().unwrap();
+    assert_eq!(data, text.as_bytes());
+}
+
+/// Compressible content via PUT: client compresses, server decompresses,
+/// stored file matches the source byte-for-byte.
+#[tokio::test]
+async fn serve_put_compressible_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("upload.txt");
+    let dst = dir.path().join("dst.txt");
+    let text = "function foo() { return 42; }\n".repeat(50_000);
+    fs::write(&src, text.as_bytes()).unwrap();
+
+    let local_hash = checksum::calculate_hash(&src).unwrap();
+
+    let mut client = ServeClient::connect_local().await.unwrap();
+    let server_hash = client.put(dst.to_str().unwrap(), &src).await.unwrap();
+    client.close().await.unwrap();
+
+    assert_eq!(bytes_to_hex(&server_hash), local_hash);
+    let dst_hash = checksum::calculate_hash(&dst).unwrap();
+    assert_eq!(dst_hash, local_hash);
+}
+
 #[tokio::test]
 async fn serve_put_upload() {
     let dir = tempfile::tempdir().unwrap();

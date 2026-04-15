@@ -22,6 +22,58 @@ const TYPE_STAT_RESPONSE: u8 = 0x85;
 const TYPE_HASH_RESPONSE: u8 = 0x86;
 const TYPE_LIST_RESPONSE: u8 = 0x87;
 const TYPE_RESUME_RESPONSE: u8 = 0x88;
+const TYPE_DATA_COMPRESSED: u8 = 0x89;
+
+/// Capability bits advertised in Hello/Welcome.
+///
+/// Caps are an optional trailing byte appended after the version. A peer
+/// that doesn't understand caps sends a shorter Hello/Welcome; decoders
+/// treat the absence as "no caps supported", which is the safe default
+/// and gives v1 clients talking to v2 servers (and vice versa) automatic
+/// fallback to uncompressed Data frames.
+pub const CAP_LZ4: u8 = 0x01;
+pub const CAP_ZSTD: u8 = 0x02;
+
+/// Which compression algorithm a peer has advertised/selected for Data
+/// frames. Negotiation picks the highest bit both peers set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompressionAlgo {
+    None,
+    Lz4,
+    Zstd,
+}
+
+impl CompressionAlgo {
+    pub fn from_byte(b: u8) -> Self {
+        match b {
+            1 => CompressionAlgo::Lz4,
+            2 => CompressionAlgo::Zstd,
+            _ => CompressionAlgo::None,
+        }
+    }
+
+    pub fn to_byte(self) -> u8 {
+        match self {
+            CompressionAlgo::None => 0,
+            CompressionAlgo::Lz4 => 1,
+            CompressionAlgo::Zstd => 2,
+        }
+    }
+
+    /// Pick the preferred algorithm both peers support. Zstd wins if
+    /// both offer it (better ratio for typical file content); LZ4 is the
+    /// fallback when only one peer speaks zstd.
+    pub fn negotiate(local: u8, remote: u8) -> Self {
+        let both = local & remote;
+        if both & CAP_ZSTD != 0 {
+            CompressionAlgo::Zstd
+        } else if both & CAP_LZ4 != 0 {
+            CompressionAlgo::Lz4
+        } else {
+            CompressionAlgo::None
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct ListEntry {
@@ -35,6 +87,7 @@ pub enum Message {
     // Requests (client → server)
     Hello {
         version: u8,
+        caps: u8,
     },
     List {
         path: String,
@@ -66,6 +119,7 @@ pub enum Message {
     // Responses (server → client)
     Welcome {
         version: u8,
+        caps: u8,
     },
     Ok {
         hash: Option<String>,
@@ -74,6 +128,16 @@ pub enum Message {
         message: String,
     },
     Data {
+        payload: Vec<u8>,
+    },
+    /// Compressed Data frame. `algo` matches `CompressionAlgo::to_byte`.
+    /// `original_size` is the decompressed payload length so the receiver
+    /// can pre-allocate. Consumers that see this type without having
+    /// negotiated it during Hello/Welcome should treat it as a protocol
+    /// error.
+    DataCompressed {
+        algo: u8,
+        original_size: u32,
         payload: Vec<u8>,
     },
     StatResponse {
@@ -153,9 +217,10 @@ pub fn encode_message(msg: &Message) -> Vec<u8> {
     let mut payload = Vec::new();
 
     match msg {
-        Message::Hello { version } => {
+        Message::Hello { version, caps } => {
             write_u8(&mut payload, TYPE_HELLO);
             write_u8(&mut payload, *version);
+            write_u8(&mut payload, *caps);
         }
         Message::List { path } => {
             write_u8(&mut payload, TYPE_LIST);
@@ -196,9 +261,10 @@ pub fn encode_message(msg: &Message) -> Vec<u8> {
         Message::Done => {
             write_u8(&mut payload, TYPE_DONE);
         }
-        Message::Welcome { version } => {
+        Message::Welcome { version, caps } => {
             write_u8(&mut payload, TYPE_WELCOME);
             write_u8(&mut payload, *version);
+            write_u8(&mut payload, *caps);
         }
         Message::Ok { hash } => {
             write_u8(&mut payload, TYPE_OK);
@@ -210,6 +276,16 @@ pub fn encode_message(msg: &Message) -> Vec<u8> {
         }
         Message::Data { payload: data } => {
             write_u8(&mut payload, TYPE_DATA);
+            write_bytes(&mut payload, data);
+        }
+        Message::DataCompressed {
+            algo,
+            original_size,
+            payload: data,
+        } => {
+            write_u8(&mut payload, TYPE_DATA_COMPRESSED);
+            write_u8(&mut payload, *algo);
+            write_u32_le(&mut payload, *original_size);
             write_bytes(&mut payload, data);
         }
         Message::StatResponse {
@@ -344,6 +420,7 @@ pub fn decode_message(data: &[u8]) -> Option<Message> {
     let msg = match msg_type {
         TYPE_HELLO => Message::Hello {
             version: p.read_u8()?,
+            caps: p.read_u8().unwrap_or(0),
         },
         TYPE_LIST => Message::List {
             path: p.read_string()?,
@@ -373,6 +450,7 @@ pub fn decode_message(data: &[u8]) -> Option<Message> {
         TYPE_DONE => Message::Done,
         TYPE_WELCOME => Message::Welcome {
             version: p.read_u8()?,
+            caps: p.read_u8().unwrap_or(0),
         },
         TYPE_OK => Message::Ok {
             hash: p.read_opt_string()?,
@@ -381,6 +459,11 @@ pub fn decode_message(data: &[u8]) -> Option<Message> {
             message: p.read_string()?,
         },
         TYPE_DATA => Message::Data {
+            payload: p.read_bytes()?,
+        },
+        TYPE_DATA_COMPRESSED => Message::DataCompressed {
+            algo: p.read_u8()?,
+            original_size: p.read_u32_le()?,
             payload: p.read_bytes()?,
         },
         TYPE_STAT_RESPONSE => Message::StatResponse {
