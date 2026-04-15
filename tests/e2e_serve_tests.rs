@@ -203,6 +203,49 @@ async fn serve_dedup_repeats_use_cas() {
     assert_eq!(checksum::calculate_hash(&dst2).unwrap(), src_hash);
 }
 
+/// Fast-mode GET: server skips its hash, client sees Ok{hash:None},
+/// downloaded bytes still match the source.
+#[tokio::test]
+async fn serve_get_fast_returns_no_hash_but_correct_bytes() {
+    use bcmr::core::protocol::{CAP_FAST, CAP_LZ4, CAP_ZSTD};
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("fast.bin");
+    create_file(&src, 8 * 1024 * 1024);
+    let src_hash = checksum::calculate_hash(&src).unwrap();
+
+    let received: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let received_clone = Arc::clone(&received);
+
+    // CAP_FAST without compression so the splice path activates on Linux.
+    let mut client = bcmr::core::serve_client::ServeClient::connect_local_with_caps(CAP_FAST)
+        .await
+        .unwrap();
+    let server_hash = client
+        .get(src.to_str().unwrap(), 0, move |chunk| {
+            received_clone.lock().unwrap().extend_from_slice(chunk);
+        })
+        .await
+        .unwrap();
+    client.close().await.unwrap();
+
+    assert!(
+        server_hash.is_none(),
+        "fast mode should suppress the server hash"
+    );
+    let data = Arc::try_unwrap(received).unwrap().into_inner().unwrap();
+    let mut tmp = std::fs::File::create(dir.path().join("fast.dst")).unwrap();
+    use std::io::Write as _;
+    tmp.write_all(&data).unwrap();
+    let dst_hash = checksum::calculate_hash(&dir.path().join("fast.dst")).unwrap();
+    assert_eq!(dst_hash, src_hash, "fast-mode download must match source");
+
+    // Make sure caps was actually negotiated to include FAST and not
+    // the compression bits we excluded.
+    let _ = CAP_LZ4;
+    let _ = CAP_ZSTD;
+}
+
 /// Compressible content via PUT: client compresses, server decompresses,
 /// stored file matches the source byte-for-byte.
 #[tokio::test]

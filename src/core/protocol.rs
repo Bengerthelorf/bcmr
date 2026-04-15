@@ -31,6 +31,15 @@ const TYPE_MISSING_BLOCKS: u8 = 0x8a;
 /// only the hashes the server doesn't already have go on the wire.
 pub const CAP_DEDUP: u8 = 0x04;
 
+/// "Fast" mode: client opts out of server-side BLAKE3 hashing in
+/// exchange for higher GET throughput. The server's Ok response carries
+/// hash:None instead of the digest, so the client must verify integrity
+/// itself if it wants to (typically via -V which re-hashes the dst).
+/// On Linux the server additionally uses splice(2) for the file-to-stdout
+/// path, bypassing the userspace memcpy that would otherwise be needed
+/// to fill the Data frame buffer.
+pub const CAP_FAST: u8 = 0x08;
+
 /// Capability bits advertised in Hello/Welcome.
 ///
 /// Caps are an optional trailing byte appended after the version. A peer

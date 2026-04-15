@@ -120,6 +120,14 @@ pub struct CopyMoveArgs {
     /// per-block auto-skip on incompressible data), zstd, lz4, none.
     #[arg(long, default_value = "auto")]
     pub compress: String,
+
+    /// Fast remote mode: client opts out of server-side BLAKE3 on GET
+    /// and accepts hash:None in the Ok response. On Linux the server
+    /// also uses splice(2) for the file→stdout path. Use only when the
+    /// caller verifies integrity another way (e.g. -V which re-hashes
+    /// the dst client-side).
+    #[arg(long, default_value_t = false)]
+    pub fast: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -392,6 +400,18 @@ impl Commands {
         }
     }
 
+    /// Build the full caps byte sent in Hello: compression bits OR'd
+    /// with CAP_DEDUP (default on; dedup activates only on file size
+    /// threshold), plus CAP_FAST if the user passed --fast.
+    pub fn protocol_caps(&self) -> u8 {
+        use crate::core::protocol::{CAP_DEDUP, CAP_FAST};
+        let mut caps = self.compression_caps() | CAP_DEDUP;
+        if self.copy_move_args().is_some_and(|a| a.fast) {
+            caps |= CAP_FAST;
+        }
+        caps
+    }
+
     pub fn get_reflink_mode(&self) -> Option<String> {
         match self {
             Commands::Copy { reflink, .. } => reflink.clone(),
@@ -538,6 +558,7 @@ mod tests {
             sync: false,
             jobs: None,
             compress: "auto".to_string(),
+            fast: false,
         }
     }
 

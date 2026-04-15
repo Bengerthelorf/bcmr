@@ -1,7 +1,8 @@
 use crate::core::cas;
 use crate::core::compress;
 use crate::core::protocol::{
-    self, CompressionAlgo, ListEntry, Message, CAP_DEDUP, CAP_LZ4, CAP_ZSTD, PROTOCOL_VERSION,
+    self, CompressionAlgo, ListEntry, Message, CAP_DEDUP, CAP_FAST, CAP_LZ4, CAP_ZSTD,
+    PROTOCOL_VERSION,
 };
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
@@ -10,9 +11,11 @@ use tokio::io::{self, AsyncWriteExt};
 
 const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
 
-/// The server advertises both compression algorithms and dedup; the
-/// client picks what it wants by intersecting with its own caps.
-const SERVER_CAPS: u8 = CAP_LZ4 | CAP_ZSTD | CAP_DEDUP;
+/// Server advertises every cap it knows; the client picks by intersecting
+/// with its own. CAP_FAST is always offered — the actual implementation
+/// either skips inline hashing (any platform) or also uses splice(2) on
+/// Linux. Either way the client opts in via --fast.
+const SERVER_CAPS: u8 = CAP_LZ4 | CAP_ZSTD | CAP_DEDUP | CAP_FAST;
 
 /// Validate and canonicalize a path from the client.
 /// Prevents directory traversal attacks (e.g. "../../../etc/shadow").
@@ -90,6 +93,7 @@ pub async fn run() -> Result<()> {
     // intersection so they land on the same algorithm without a second
     // round trip.
     let algo = CompressionAlgo::negotiate(effective_caps, effective_caps);
+    let fast = (effective_caps & CAP_FAST) != 0;
 
     protocol::write_message(
         &mut stdout,
@@ -116,7 +120,8 @@ pub async fn run() -> Result<()> {
                 match validate_path(&path) {
                     Ok(p) => {
                         if let Err(e) =
-                            handle_get(p.to_str().unwrap_or(&path), offset, algo, &mut stdout).await
+                            handle_get(p.to_str().unwrap_or(&path), offset, algo, fast, &mut stdout)
+                                .await
                         {
                             eprintln!("serve: handler error: {e}");
                             protocol::write_message(
@@ -274,10 +279,27 @@ async fn handle_hash(path: &str, offset: u64, limit: Option<u64>) -> Result<Mess
 /// Streams file data as Data messages, then writes Ok with hash directly.
 /// Returns Result<()> because it writes responses directly to the output —
 /// the dispatch loop must NOT write another response for Get commands.
-async fn handle_get<W>(path: &str, offset: u64, algo: CompressionAlgo, out: &mut W) -> Result<()>
+async fn handle_get<W>(
+    path: &str,
+    offset: u64,
+    algo: CompressionAlgo,
+    fast: bool,
+    out: &mut W,
+) -> Result<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
+    // The Linux splice fast path skips compression too — by definition
+    // we don't have userspace bytes to feed the encoder. fall back to
+    // the buffered path whenever compression is active or we're not on
+    // Linux. CAP_FAST without splice still wins from skipping the hash.
+    #[cfg(target_os = "linux")]
+    {
+        if fast && algo == CompressionAlgo::None {
+            return handle_get_splice_linux(path, offset, out).await;
+        }
+    }
+
     use tokio::io::AsyncReadExt;
 
     let mut file = fs::File::open(path).await?;
@@ -286,20 +308,143 @@ where
         file.seek(std::io::SeekFrom::Start(offset)).await?;
     }
 
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = (!fast).then(blake3::Hasher::new);
     let mut buf = vec![0u8; CHUNK_SIZE];
     loop {
         let n = file.read(&mut buf).await?;
         if n == 0 {
             break;
         }
-        hasher.update(&buf[..n]);
+        if let Some(h) = hasher.as_mut() {
+            h.update(&buf[..n]);
+        }
         let frame = compress::encode_block(algo, buf[..n].to_vec());
         protocol::write_message(out, &frame).await?;
     }
 
-    let hash = hasher.finalize().to_hex().to_string();
-    protocol::write_message(out, &Message::Ok { hash: Some(hash) }).await?;
+    let hash = hasher.map(|h| h.finalize().to_hex().to_string());
+    protocol::write_message(out, &Message::Ok { hash }).await?;
+    Ok(())
+}
+
+/// Linux zero-copy GET: file → pipe → stdout via splice(2). Skips the
+/// userspace memcpy that the buffered path needs to fill the Data
+/// frame's Vec<u8>. Each Data frame's 9-byte header (4B length + 1B
+/// type + 4B payload-len) is still written through the normal tokio
+/// path; only the payload bytes go through splice.
+#[cfg(target_os = "linux")]
+async fn handle_get_splice_linux<W>(path: &str, offset: u64, out: &mut W) -> Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+    use tokio::io::AsyncWriteExt;
+
+    let path = path.to_owned();
+    let mut std_file = tokio::task::spawn_blocking(move || std::fs::File::open(&path)).await??;
+
+    if offset > 0 {
+        use std::io::Seek;
+        std_file.seek(std::io::SeekFrom::Start(offset))?;
+    }
+    let total_size = std_file.metadata()?.len() - offset;
+
+    // Create a pipe and grow it to the chunk size so each splice round
+    // moves up to 4 MiB without bouncing through the default 64 KiB
+    // pipe buffer. F_SETPIPE_SZ is best-effort; Linux silently caps at
+    // /proc/sys/fs/pipe-max-size for non-root.
+    let mut fds = [0i32; 2];
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    if rc < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let pipe_r = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+    let pipe_w = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+    unsafe {
+        libc::fcntl(
+            pipe_w.as_raw_fd(),
+            libc::F_SETPIPE_SZ,
+            CHUNK_SIZE as libc::c_int,
+        );
+    }
+
+    let mut remaining = total_size;
+    let stdout_fd = libc::STDOUT_FILENO;
+    let file_fd = std_file.as_raw_fd();
+    let pipe_w_fd = pipe_w.as_raw_fd();
+    let pipe_r_fd = pipe_r.as_raw_fd();
+
+    while remaining > 0 {
+        let chunk = remaining.min(CHUNK_SIZE as u64) as usize;
+
+        // Frame header: [4B payload_len_total][1B TYPE_DATA][4B payload_len].
+        // payload_len_total = 1 + 4 + chunk = 5 + chunk.
+        let mut header = Vec::with_capacity(9);
+        header.extend_from_slice(&((5 + chunk) as u32).to_le_bytes());
+        header.push(0x84); // TYPE_DATA
+        header.extend_from_slice(&(chunk as u32).to_le_bytes());
+        out.write_all(&header).await?;
+        out.flush().await?;
+
+        // Now splice `chunk` bytes through the pipe. Each splice may
+        // move fewer bytes than requested, so we loop until the chunk
+        // is drained. spawn_blocking keeps the syscall off the tokio
+        // reactor threads.
+        let to_move = chunk;
+        let r = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            let mut moved = 0usize;
+            while moved < to_move {
+                let want = to_move - moved;
+                let n = unsafe {
+                    libc::splice(
+                        file_fd,
+                        std::ptr::null_mut(),
+                        pipe_w_fd,
+                        std::ptr::null_mut(),
+                        want,
+                        libc::SPLICE_F_MOVE | libc::SPLICE_F_MORE,
+                    )
+                };
+                if n < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if n == 0 {
+                    break;
+                }
+                let mut drained = 0usize;
+                while drained < n as usize {
+                    let n2 = unsafe {
+                        libc::splice(
+                            pipe_r_fd,
+                            std::ptr::null_mut(),
+                            stdout_fd,
+                            std::ptr::null_mut(),
+                            n as usize - drained,
+                            libc::SPLICE_F_MOVE | libc::SPLICE_F_MORE,
+                        )
+                    };
+                    if n2 < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if n2 == 0 {
+                        break;
+                    }
+                    drained += n2 as usize;
+                }
+                moved += drained;
+            }
+            Ok(())
+        })
+        .await?;
+        r?;
+        remaining -= chunk as u64;
+    }
+
+    drop(pipe_r);
+    drop(pipe_w);
+    drop(std_file);
+
+    protocol::write_message(out, &Message::Ok { hash: None }).await?;
     Ok(())
 }
 

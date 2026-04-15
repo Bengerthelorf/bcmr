@@ -10,10 +10,9 @@ use crate::core::protocol::{
     self, CompressionAlgo, ListEntry, Message, CAP_DEDUP, CAP_LZ4, CAP_ZSTD, PROTOCOL_VERSION,
 };
 
-/// What the client is willing to speak. The user's --compress flag
-/// intersects this before the Hello is sent so users can force "raw" for
-/// debugging or to disable compression on trusted LANs where the CPU
-/// cost outweighs the bandwidth savings.
+/// Default client caps: LZ4 + Zstd + dedup. CAP_FAST is opt-in via
+/// `--fast` because the trade-off (no server-side hash) only makes
+/// sense when the user has another way to verify integrity.
 const CLIENT_CAPS: u8 = CAP_LZ4 | CAP_ZSTD | CAP_DEDUP;
 
 /// Files smaller than this skip the dedup pre-flight: the round-trip
@@ -67,8 +66,24 @@ impl ServeClient {
         Ok(client)
     }
 
+    /// Test-only connect that lets the caller dictate the caps byte
+    /// (default `connect_local` advertises everything except CAP_FAST).
+    #[allow(dead_code)]
+    pub async fn connect_local_with_caps(caps: u8) -> Result<Self, BcmrError> {
+        let mut client = Self::spawn_local_serve().await?;
+        client.handshake(caps).await?;
+        Ok(client)
+    }
+
     #[allow(dead_code)] // used by integration tests
     pub async fn connect_local() -> Result<Self, BcmrError> {
+        let mut client = Self::spawn_local_serve().await?;
+        client.handshake(CLIENT_CAPS).await?;
+        Ok(client)
+    }
+
+    #[allow(dead_code)]
+    async fn spawn_local_serve() -> Result<Self, BcmrError> {
         // Find the bcmr binary in the same directory as the test binary.
         // current_exe() returns the test binary itself, not bcmr.
         let exe = std::env::current_exe()?;
@@ -78,8 +93,6 @@ impl ServeClient {
 
         let bin_name = if cfg!(windows) { "bcmr.exe" } else { "bcmr" };
 
-        // Try: same directory (release builds), then parent (cargo test puts
-        // test binaries in deps/ while the main binary is one level up).
         let candidates = [
             bin_dir.join(bin_name),
             bin_dir
@@ -115,9 +128,7 @@ impl ServeClient {
             .take()
             .ok_or_else(|| BcmrError::InvalidInput("failed to open child stdout".into()))?;
 
-        let mut client = Self::from_child(child, stdin, stdout);
-        client.handshake(CLIENT_CAPS).await?;
-        Ok(client)
+        Ok(Self::from_child(child, stdin, stdout))
     }
 
     fn from_child(child: Child, stdin: ChildStdin, stdout: ChildStdout) -> Self {
