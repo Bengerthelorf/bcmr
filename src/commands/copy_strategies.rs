@@ -126,19 +126,26 @@ pub fn create_session(
 }
 
 /// Returns the inline source hash if the full file was copied (start_offset == 0).
+///
+/// `need_src_hash` controls whether we compute the whole-source BLAKE3 at
+/// all. Verify (-V) needs it, and so do file-level resumes (the session
+/// stores it to detect source-changed-between-runs). Otherwise it's pure
+/// overhead --- on macOS NEON BLAKE3 runs at ~1 GB/s, so the unused source
+/// hash doubled wall time on streaming copies of large files.
 pub async fn streaming_copy(
     src_file: &mut tokio::fs::File,
     dst_file: &mut tokio::fs::File,
     session: &mut Option<Session>,
     sparse_mode: &SparseMode,
     start_offset: u64,
+    need_src_hash: bool,
     callback: &impl Fn(u64),
 ) -> Result<Option<blake3::Hash>, BcmrError> {
     const SPARSE_DETECT_SIZE: usize = 4096;
 
     let mut buffer = vec![0u8; COPY_BLOCK_SIZE as usize];
     let mut pending_hole = 0u64;
-    let mut src_hasher = blake3::Hasher::new();
+    let mut src_hasher = need_src_hash.then(blake3::Hasher::new);
     let mut block_hasher = blake3::Hasher::new();
     let mut bytes_in_block = 0u64;
     let mut blocks_since_checkpoint = 0u32;
@@ -149,7 +156,9 @@ pub async fn streaming_copy(
             break;
         }
 
-        src_hasher.update(&buffer[..n]);
+        if let Some(h) = src_hasher.as_mut() {
+            h.update(&buffer[..n]);
+        }
         block_hasher.update(&buffer[..n]);
         bytes_in_block += n as u64;
 
@@ -237,13 +246,13 @@ pub async fn streaming_copy(
         dst_file.set_len(current_pos + pending_hole).await?;
     }
 
-    let final_hash = src_hasher.finalize();
+    let final_hash = src_hasher.map(|h| h.finalize());
     if start_offset == 0 {
-        if let Some(ref mut s) = session {
-            s.set_src_hash(*final_hash.as_bytes());
+        if let (Some(ref mut s), Some(h)) = (session.as_mut(), final_hash) {
+            s.set_src_hash(*h.as_bytes());
             let _ = s.save();
         }
-        Ok(Some(final_hash))
+        Ok(final_hash)
     } else {
         Ok(None)
     }
