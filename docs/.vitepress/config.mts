@@ -58,7 +58,11 @@ export default defineConfig({
             {
               text: 'Internals',
               items: [
-                { text: 'Streaming Checkpoint Copy', link: '/ablation/' },
+                { text: 'Overview', link: '/ablation/' },
+                { text: 'Streaming Checkpoint Copy', link: '/ablation/scc' },
+                { text: 'Local Multi-File Performance', link: '/ablation/local-perf' },
+                { text: 'Wire Protocol & Remote', link: '/ablation/wire-protocol' },
+                { text: 'Open Questions', link: '/ablation/open-questions' },
               ],
             },
           ],
