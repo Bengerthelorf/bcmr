@@ -1,7 +1,18 @@
-/// End-to-end integration tests for bcmr serve (local loopback).
-///
-/// Each test spins up a local `bcmr serve` subprocess via `ServeClient::connect_local()`
-/// and exercises a single protocol operation against it.
+#![cfg(unix)]
+//! End-to-end integration tests for bcmr serve (local loopback).
+//!
+//! Each test spins up a local `bcmr serve` subprocess via
+//! `ServeClient::connect_local()` and exercises a single protocol op
+//! against it.
+//!
+//! `cfg(unix)` on the whole file: bcmr serve is invoked over SSH, which on
+//! Windows means OpenSSH-on-Windows behaves differently enough that we
+//! don't claim Windows as a serve target. The subprocess+stdio dance also
+//! trips on Windows path semantics (`--root /` doesn't canonicalize on
+//! Windows, so connect_local's spawn would crash the child). Pure
+//! protocol encoding/decoding is covered by `serve_protocol_tests.rs`
+//! which runs on every platform.
+
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -46,7 +57,6 @@ async fn serve_handshake() {
 /// rejected. The connect_local helper uses `--root /` so the default
 /// test path is unrestricted; this test explicitly spawns a serve
 /// with a narrower root and confirms writes outside it fail.
-#[cfg(unix)]
 #[tokio::test]
 async fn serve_root_jail_rejects_escape() {
     let jail = tempfile::tempdir().unwrap();
@@ -119,29 +129,16 @@ async fn serve_root_jail_rejects_escape() {
 
 /// Security: PUT must refuse data beyond the declared size. Without
 /// this bound a malicious client could declare size=1 and send TBs.
-#[cfg(unix)]
 #[tokio::test]
 async fn serve_put_size_bound_rejects_oversized() {
     let dir = tempfile::tempdir().unwrap();
     let dst = dir.path().join("capped.bin");
 
     use bcmr::core::protocol::{read_message, write_message, Message};
-    let mut client = ServeClient::connect_local().await.unwrap();
-    // Reach into the raw protocol: send Put declaring 10 bytes then
-    // a 100-byte Data frame. The server should Error after the first
-    // bound-exceeding block.
-    //
-    // We can't drive the raw protocol through the high-level
-    // `put()` method because it honestly reads the source file and
-    // sends the true size. So mimic the subset we need here.
-    //
-    // Because ServeClient doesn't expose its stdin directly, we
-    // approximate by calling put() on a file larger than declared,
-    // which is the normal client path - and should succeed because
-    // the client declares the true size. That test isn't what we
-    // want. Re-spawn a raw child instead.
-    let _ = client.close().await;
-
+    // Reach into the raw protocol: send Put declaring 10 bytes then a
+    // 100-byte Data frame. The server should Error after the first
+    // bound-exceeding block. ServeClient::put() honestly sends the
+    // source size, so we drive the raw stdin/stdout instead.
     use std::process::Stdio;
     let exe = std::env::current_exe().unwrap();
     let bin_name = if cfg!(windows) { "bcmr.exe" } else { "bcmr" };
