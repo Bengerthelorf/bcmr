@@ -95,35 +95,38 @@ round-trip, client streams only what's missing across the whole
 tree) would be the natural follow-up to Experiment 11. Saves $N - 1$
 extra round-trips for $N$ files.
 
-## Client-Side Request Pipelining for Serve
+## Closing the 1 GiB Single-File Gap to scp
 
-After [Experiment 17](/ablation/wire-protocol#experiment-17-per-file-fsync-as-the-many-files-tax)
-closed the per-file fsync gap, bcmr serve still trails `scp -r`
-by ~2× on the 10000-small-files loopback bench (6.35 s vs
-3.11 s). The reason: bcmr's client-side loop is strict
-request-response — `for item in &items { client.put(...).await }`
-in `remote_copy.rs:712`. SFTP (which scp uses) keeps a
-window of N outstanding requests at all times, hiding per-file
-RTT.
+After [Experiment 18](/ablation/wire-protocol#experiment-18-client-side-request-pipelining)
+closed many-files to 1.18× scp, the single-1-GiB workload still
+runs at ~2× scp (`--fast` 4.61 s vs scp 2.41 s). The remaining
+overhead is structural:
 
-The server's dispatch loop already processes requests in FIFO
-order, so no protocol change is needed. The work is purely
-client-side: split `ServeClient` into a writer half (drains a
-bounded `mpsc::channel` of pending requests) and a reader half
-(reads `Ok`/`Error` frames in send order), then add
-`pipelined_put_files` / `pipelined_get_files` methods that
-keep N (=8) requests in flight.
+1. **Per-block BLAKE3** (~1 GB/s NEON / AVX-512). For 1 GiB
+   that's ~1 second of pure hash CPU. Scp computes nothing.
+2. **Frame overhead**. Each Data frame has a 9-byte header per
+   4 MiB chunk. Negligible bytes but each `write_message`
+   crosses the tokio scheduler. ~256 frames per GiB.
+3. **Tokio I/O scheduling**. Per Experiment 13, `tokio::fs`
+   reads do `spawn_blocking` per call; we partially fixed this
+   for the local copy path but the serve send-loop still goes
+   through `protocol::write_message().await` per frame.
 
-Risks: drop / cancel ordering for the two tasks, error
-propagation when file K fails server-side and files K+1..N are
-already in the SSH stdin buffer (recommended: continue draining
-replies, return per-file `Vec<Result>`), and progress reporting
-(per-file callbacks now fire when the Ok comes back, slightly
-later than the actual on-the-wire moment).
+Possible directions, ordered by cleanness:
+- A `--no-hash` mode that drops integrity entirely (stronger
+  than `--fast` which only skips server-side; this also skips
+  client-side per-block hashing). Would close most of the 1×
+  CPU-second gap.
+- A "bulk" wire mode that sends the body raw after a single
+  Put header — no per-chunk framing during streaming. Server
+  reads `declared_size` bytes; client writes them. Loses the
+  ability to interleave `Error` mid-stream but matches scp's
+  shape exactly.
 
-Expected win: 6.35 → ~3-4 s on host-L loopback, closing the
-remaining gap to scp on small-files. Single-large-file isn't
-helped (already one in-flight by definition).
+Single-file isn't the most common workload for bcmr serve
+(WAN deployments are wire-bound; many-files dominates LAN),
+so this is parked behind any user complaint that actually
+identifies single-file as their bottleneck.
 
 ## Silent Fallback When Path Escapes Server Root
 

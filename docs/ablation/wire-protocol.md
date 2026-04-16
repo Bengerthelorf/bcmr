@@ -389,6 +389,90 @@ shipping.
 
 ---
 
+## Experiment 18: Client-Side Request Pipelining
+
+**Hypothesis**: After Experiment 17 (CAP_SYNC) closed the per-file
+fsync overhead, host-L still showed bcmr serve at 2.04× scp on
+the 10000 × 64 KiB many-files bench. CPU breakdown ruled out
+hash/encode work — the wall time was dominated by RTT-style
+serialization. The single-file `put()` does
+`send Put → send Data* → send Done → await Ok`, then the next
+file. Server's dispatch loop is FIFO and would happily process
+queued requests, but the client never queues more than one. SFTP
+(what `scp -r` uses under the hood) keeps a window of ~64
+in-flight requests; that's the gap.
+
+**Method**: Same 10000 × 64 KiB host-L loopback bench, plus the
+mirror upload direction and a single-1-GiB regression check.
+Three runs each, hyperfine, warm cache.
+
+| Workload | scp | bcmr (post-Phase-0) | bcmr (post-Phase-1) | bcmr ratio vs scp |
+|----------|----:|--------------------:|--------------------:|---------------------:|
+| 10000 × 64 KiB DOWNLOAD | 3.02 s | 6.35 s | **3.58 s** | **1.18×** |
+| 10000 × 64 KiB UPLOAD   | 3.10 s | ~6.4 s (est) | **3.67 s** | **1.18×** |
+| 1 GiB single (`--fast`) | 2.41 s | 4.85 s | 4.61 s | 1.91× |
+| 1 GiB single default    | 2.41 s | 5.13 s | 5.05 s | 2.09× |
+
+**Implementation**: Two new methods on `ServeClient`:
+
+- `pipelined_put_files(files, on_complete)`: takes ownership of
+  `stdin`, spawns a writer task that emits `Put / Data* / Done`
+  for every file in order. The reader task (the caller's task)
+  collects FIFO `Ok` hashes from `stdout`.
+- `pipelined_get_files(files, sync, on_complete)`: mirror — the
+  writer task sends every `Get` request up-front, the reader
+  demuxes the `Data* / Ok` stream into per-file dst handles.
+
+The OS pipe between the client process and the SSH child plus
+SSH's own send window provide natural backpressure when the
+server hasn't drained yet — no explicit channel needed.
+
+**Server unchanged**: the dispatch loop in `serve.rs:159-198`
+already processes requests in FIFO order. Pipelining is purely
+a client-side win.
+
+**The audit catch that almost shipped a deadlock**: if the reader
+bails mid-batch (e.g., server emits `Error` for file K), the
+writer task may still be pushing frames K+1...N into stdin. The
+SSH stdout pipe back to the client fills with replies the reader
+will never read; server blocks on stdout write; stdin buffer at
+the client side fills; writer blocks on stdin write. **Deadlock.**
+First version had this. The fix: both pipelined methods now call
+`writer.abort()` before `writer.await` whenever a recv error is
+set. The connection is left indeterminate after a pipelined
+failure — caller must drop, not retry on the same client.
+
+**Decision**: Ship. Many-files closed from 1.18× scp from 7.86×
+in three steps (CAP_SYNC, then GET pipelining, then PUT
+pipelining). bcmr serve is now within 18 % of scp's wall time on
+the multi-small-files workload, while still offering resume,
+content-addressed dedup, inline integrity, and a progress UI
+that scp doesn't have.
+
+**The 2× single-file gap remains** and isn't what this change
+targets. Per-block BLAKE3 (~1 GB/s on AVX-512) plus the protocol
+frame overhead vs. scp's raw byte stream are structural; closing
+that would mean either (a) a `--no-hash` mode that drops integrity
+entirely (stronger than `--fast`'s server-side skip — also
+client-side skip), or (b) a separate "raw bulk" wire format. Both
+are designable but neither is a small change. Tracked in
+[Open Questions](/ablation/open-questions).
+
+**What I got wrong before**: my first take was "pipelining will
+get us 30 % at best" because I misjudged how much of bcmr's
+wall time was client-serial wait. The actual win was 1.8× on
+many-files (6.43 s → 3.58 s). Lesson: when the CPU breakdown
+shows < 50 % utilization, the ceiling on pipelining wins is
+*exactly* the unused fraction — and on this workload that was
+huge. Also I shipped the wrong direction first (only `put` path
+got pipelined; the bench was a `get`-direction download), which
+showed zero improvement; I noticed only after running the bench
+on the wrong path and looking at the diff. See
+[feedback_release_quality_bar.md](#) — bench must exercise the
+exact path that changed.
+
+---
+
 ## Summary
 
 Each row below states the specific workload behind the number.
@@ -404,3 +488,4 @@ Don't lift this table out of context without the qualifiers.
 | `CAP_FAST` GET | One spawn_blocking + raw write(2) for headers (v0.5.13 fix) | 1.07× on WAN (network-bound); ~1.55× over default on host-L loopback after fix (was 0.78× regression in v0.5.10, see Exp 14) |
 | CAS LRU cap | Walk + sort the CAS dir per PUT (cheap) | Holds store size ≤ cap under 3× 24 MiB repeated uploads (Exp 15) |
 | `CAP_SYNC` per-file fsync gate | Negotiated bit; off by default (matches cp/scp) | 3.9× on 10000 × 64 KiB host-L loopback (24.75 → 6.35 s); ~10 % on 1 GiB single (Exp 17) |
+| Client-side request pipelining | Writer-task spawn per batch; writer.abort() on error path | 1.8× on 10000 × 64 KiB host-L loopback (6.35 → 3.58 s); lands at 1.18× of `scp -r` (Exp 18) |
