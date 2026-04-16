@@ -673,7 +673,7 @@ async fn handle_serve_upload(
             }
             (runner.inc_callback())(size);
         } else if src.is_dir() && args.is_recursive() {
-            serve_upload_dir(&mut client, src, rdest, &runner, excludes).await?;
+            serve_upload_dir(&mut client, src, rdest, &runner, excludes, args.is_verify()).await?;
         }
     }
 
@@ -687,6 +687,7 @@ async fn serve_upload_dir(
     remote_base: &RemotePath,
     runner: &ProgressRunner,
     excludes: &[regex::Regex],
+    verify: bool,
 ) -> Result<()> {
     let dir_name = local_dir.file_name().unwrap_or_default().to_string_lossy();
     let remote_dir = format!("{}/{}", remote_base.path, dir_name);
@@ -711,9 +712,15 @@ async fn serve_upload_dir(
         }
     }
 
+    // Keep the local paths around for an optional post-batch verify pass.
+    // pipelined_put_files consumes the input so we snapshot what we need
+    // before handing it over.
+    let verify_inputs: Option<Vec<PathBuf>> =
+        verify.then(|| files_to_put.iter().map(|(_, p, _)| p.clone()).collect());
+
     let file_cb = runner.file_callback();
     let inc = runner.inc_callback();
-    client
+    let server_hashes = client
         .pipelined_put_files(files_to_put, |_idx, path, size| {
             file_cb(
                 &path.file_name().unwrap_or_default().to_string_lossy(),
@@ -722,6 +729,19 @@ async fn serve_upload_dir(
             inc(size);
         })
         .await?;
+
+    if let Some(local_paths) = verify_inputs {
+        for (local_path, server_hash) in local_paths.iter().zip(server_hashes.iter()) {
+            let p = local_path.clone();
+            let local_hash =
+                tokio::task::spawn_blocking(move || crate::core::checksum::calculate_hash(&p))
+                    .await??;
+            let server_hex: String = server_hash.iter().map(|b| format!("{:02x}", b)).collect();
+            if server_hex != local_hash {
+                bail!("hash mismatch for {}", local_path.display());
+            }
+        }
+    }
     Ok(())
 }
 
