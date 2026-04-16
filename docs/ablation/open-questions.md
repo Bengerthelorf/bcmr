@@ -95,6 +95,54 @@ round-trip, client streams only what's missing across the whole
 tree) would be the natural follow-up to Experiment 11. Saves $N - 1$
 extra round-trips for $N$ files.
 
+## Client-Side Request Pipelining for Serve
+
+After [Experiment 17](/ablation/wire-protocol#experiment-17-per-file-fsync-as-the-many-files-tax)
+closed the per-file fsync gap, bcmr serve still trails `scp -r`
+by ~2× on the 10000-small-files loopback bench (6.35 s vs
+3.11 s). The reason: bcmr's client-side loop is strict
+request-response — `for item in &items { client.put(...).await }`
+in `remote_copy.rs:712`. SFTP (which scp uses) keeps a
+window of N outstanding requests at all times, hiding per-file
+RTT.
+
+The server's dispatch loop already processes requests in FIFO
+order, so no protocol change is needed. The work is purely
+client-side: split `ServeClient` into a writer half (drains a
+bounded `mpsc::channel` of pending requests) and a reader half
+(reads `Ok`/`Error` frames in send order), then add
+`pipelined_put_files` / `pipelined_get_files` methods that
+keep N (=8) requests in flight.
+
+Risks: drop / cancel ordering for the two tasks, error
+propagation when file K fails server-side and files K+1..N are
+already in the SSH stdin buffer (recommended: continue draining
+replies, return per-file `Vec<Result>`), and progress reporting
+(per-file callbacks now fire when the Ok comes back, slightly
+later than the actual on-the-wire moment).
+
+Expected win: 6.35 → ~3-4 s on host-L loopback, closing the
+remaining gap to scp on small-files. Single-large-file isn't
+helped (already one in-flight by definition).
+
+## Silent Fallback When Path Escapes Server Root
+
+The `--root` jail (default `$HOME`) is correct security
+behavior, but when the server rejects a path the client falls
+back silently to a slower transport (legacy per-file SSH).
+Symptom from a user's perspective: "bcmr copy of /tmp/foo
+takes 30 s where scp takes 2 s". Root cause is invisible
+unless you `strace` the server or know to look for the
+`path /... escapes server root` line on stderr. Found while
+benchmarking [Experiment 17](/ablation/wire-protocol#experiment-17-per-file-fsync-as-the-many-files-tax).
+
+Fix shape: when the server returns `Error` for a path-escape
+reason during the initial Stat/List, the client should print a
+clear stderr warning ("falling back to legacy SSH transport
+because $remote rejected $path") and either continue with the
+fallback (current behavior) or exit non-zero (opinionated;
+breaks scripts that didn't realize they were inside a jail).
+
 ## xattr Cross-FS Edge Cases
 
 Today's xattr preservation (see code under `commands/copy.rs`) is

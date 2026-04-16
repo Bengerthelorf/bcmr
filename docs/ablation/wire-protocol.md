@@ -322,12 +322,77 @@ duration --- the absolute saving is similar to the others.
 
 ---
 
+## Experiment 17: Per-File fsync as the Many-Files Tax
+
+**Hypothesis**: bcmr serve was 7.86× slower than `scp -r` on a
+10000 × 64 KiB benchmark on host-L loopback. `--fast` and
+default were both at ~24 s while scp finished in 3 s. The CPU
+breakdown (~3 s total CPU on a 24 s wall) ruled out compute.
+Likely culprit: per-file `fdatasync` in both directions ---
+server `handle_put` calls `file.sync_all()` per file, client
+GET callback calls `dst_file.sync_all()` per file. At ~1-2 ms
+per fdatasync × 10000 files, that's 10-20 s of pure barrier
+time — matching the gap.
+
+cp/rsync/scp don't fsync per file by default. The local
+copy path in bcmr already gates fsync on `--sync` (see
+[Experiment 7](/ablation/local-perf#experiment-7-per-file-durability-cost)).
+The serve path was over-promising durability silently.
+
+**Method**: 10000 × 64 KiB random files, host-L
+loopback ssh (Ubuntu 22.04, NVMe ext4, kernel 6.8). Warm
+cache, hyperfine, 2 runs each.
+
+| Command | Mean (s) | vs scp |
+|---------|---------:|-------:|
+| `scp -r` | 3.11 | 1.00x |
+| `bcmr copy -r` (v0.5.13, before) | 24.75 | 7.96x slower |
+| `bcmr copy -r` (after, default) | **6.35** | **2.04x slower** |
+| `bcmr copy -r --sync` (after) | 15.46 | 4.97x slower |
+
+**Implementation**: New `CAP_SYNC = 0x10` advertised by
+server; client OR's it into Hello caps when `--sync` is set.
+Both sides gate their per-file fsync on the negotiated bit.
+Default is off, matching cp/scp/local-copy default behavior.
+
+**Decision**: Ship. Closes the many-files gap from 7.96x →
+2.04x with no functionality loss — `--sync` users still get
+exactly the durability they asked for (and pay the 5x cost
+they implicitly opted into).
+
+**The single-file path also benefits** — the GET fsync at
+end-of-file was ~0.5 s on a 1 GiB stream:
+
+| Command | Before | After |
+|---------|-------:|------:|
+| `bcmr copy --fast localhost:src dst` | 5.35 s | 4.85 s |
+| `bcmr copy localhost:src dst` (default) | 8.27 s | 5.13 s |
+
+**The path-jail trap that masked this for two iterations**:
+the default server root is `$HOME`. Putting `src1g.bin` under
+`/tmp` made the server reject the GET silently, the client
+fell back to a slower path (`scp` under the hood) and reported
+~32 s for what should have been ~5 s. Took strace on the
+server to spot the `path /tmp/... escapes server root`
+message. **The lesson**: the default jail is correct security
+behavior but the silent fallback hides errors. Tracked in
+[Open Questions](/ablation/open-questions).
+
+**What I got wrong before**: the v0.5.10 audit response added
+`--root` jail + PUT size bound (good) but didn't notice that
+the per-file fsync was the bigger perf cliff. The audit
+flagged "single-large-file is slow"; the real anomaly was
+"many-small-files is catastrophic", and Phase 0 of fixing
+that turned out to also help single-files modestly. Lesson:
+when an audit gives you one symptom, generalize before
+shipping.
+
+---
+
 ## Summary
 
 Each row below states the specific workload behind the number.
-CAP_FAST has a known regression on Linux loopback that the
-summary reflects directly — don't lift this table out of
-context without the qualifiers.
+Don't lift this table out of context without the qualifiers.
 
 | Decision | Measured Cost | Measured Benefit (workload) |
 |----------|-------------|-----------------|
@@ -336,5 +401,6 @@ context without the qualifiers.
 | Auto-skip wire compression | Negligible (LZ4 ~4 GB/s encode on random 4 MiB blocks) | Applies to all Data frames; per-block auto-skip keeps incompressible blocks raw |
 | Wire compression (Zstd-3) | ~320 MB/s encode, ~1 GB/s decode on Apple Silicon | 2.48--5.59× over uncompressed on 64 MiB source-text, ~10 MB/s WAN (Exp 12) |
 | `CAP_DEDUP` repeat PUT | One file re-read client-side + hash all blocks | 32 % faster (18.9 → 12.9 s) on 64 MiB re-upload, ~10 MB/s WAN — savings match eliminated wire bytes |
-| `CAP_FAST` GET | **Currently a regression on Linux loopback**, see Exp 14 | 1.07× on WAN (network-bound); 0.78× on Linux loopback until splice refactor lands |
+| `CAP_FAST` GET | One spawn_blocking + raw write(2) for headers (v0.5.13 fix) | 1.07× on WAN (network-bound); ~1.55× over default on host-L loopback after fix (was 0.78× regression in v0.5.10, see Exp 14) |
 | CAS LRU cap | Walk + sort the CAS dir per PUT (cheap) | Holds store size ≤ cap under 3× 24 MiB repeated uploads (Exp 15) |
+| `CAP_SYNC` per-file fsync gate | Negotiated bit; off by default (matches cp/scp) | 3.9× on 10000 × 64 KiB host-L loopback (24.75 → 6.35 s); ~10 % on 1 GiB single (Exp 17) |
