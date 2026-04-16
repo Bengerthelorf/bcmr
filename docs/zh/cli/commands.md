@@ -28,6 +28,9 @@ bcmr copy [选项] <源路径>... <目标路径>
 | `--reflink <MODE>` | 写时复制：`auto`（默认）、`force`、`disable` |
 | `--sparse <MODE>` | 稀疏文件：`auto`（默认）、`force`、`disable` |
 | `-P`, `--parallel <N>` | 远程复制的并行传输数（默认：配置值） |
+| `-j`, `--jobs <N>` | 本地多文件并发复制数（默认：`min(CPU, 8)`） |
+| `--compress <MODE>` | 远程线路压缩：`auto`（默认，同时通告 LZ4+Zstd）、`zstd`、`lz4`、`none` |
+| `--fast` | 仅远程：跳过服务端 BLAKE3（`Ok { hash: None }`）；Linux 服务端额外启用 `splice(2)`。只有当你通过别的途径确认完整性时（例如 `-V` 在客户端重新哈希）才使用。 |
 
 **示例：**
 
@@ -96,6 +99,9 @@ bcmr move [选项] <源路径>... <目标路径>
 | `-s`, `--strict` | 严格哈希校验续传 |
 | `-a`, `--append` | 跨设备移动的追加模式 |
 | `--sync` | 同步到磁盘（仅跨设备） |
+| `-j`, `--jobs <N>` | 当 move 回退为 copy+delete 时的并发文件数（默认 `min(CPU, 8)`） |
+| `--compress <MODE>` | 远程 move 的线路压缩：`auto`、`zstd`、`lz4`、`none` |
+| `--fast` | 仅远程：跨设备 move 的复制阶段跳过服务端 BLAKE3 |
 
 **示例：**
 
@@ -276,6 +282,41 @@ bcmr check --json -r src/ backup/
 
 ---
 
+## status
+
+查询 `--json` 后台任务的状态（v0.5.4+）。
+
+```
+bcmr status [JOB_ID] [--json]
+```
+
+当 `bcmr copy`、`move`、`remove` 携带 `--json` 运行时，主进程会脱离终端进入后台，进度以 NDJSON 写入 `~/.local/share/bcmr/jobs/<id>.jsonl`。`bcmr status` 读取该日志并把任务分类到五种状态之一：
+
+| 状态 | 含义 |
+|------|------|
+| `scanning` | 进程存活，仍在遍历源或等待首次进度事件 |
+| `running` | 进程存活，处于传输阶段 |
+| `done` | 已结束，`status:"success"` |
+| `failed` | 已结束，`status:"error"`（日志里保留了错误信息） |
+| `interrupted` | 进程已不在了但日志里没有终止事件（崩溃 / 被 kill / OOM） |
+
+**示例：**
+
+```bash
+# 列出最近的所有任务（tab 分隔：id、state、last %）
+bcmr status
+
+# 查单个任务（打印日志最新一行）
+bcmr status 764dee358ff4
+
+# 脚本友好的结构化输出：{ job_id, state, latest }
+bcmr status 764dee358ff4 --json
+```
+
+新任务启动时会自动清理 7 天前的日志。
+
+---
+
 ## 全局标志
 
 以下标志适用于所有命令：
@@ -288,18 +329,30 @@ bcmr check --json -r src/ backup/
 
 ### JSON 输出
 
-传入 `--json` 时，bcmr 抑制所有人类可读输出（进度条、颜色、提示），将换行分隔的 JSON 写入 stdout：
+`copy`、`move`、`remove` 携带 `--json` 时，bcmr 会**脱离终端进入后台**，并在 stdout 打印一行 descriptor：
+
+```json
+{"job_id":"764dee358ff4","pid":36897,"log":"/home/.../jobs/764dee358ff4.jsonl"}
+```
+
+父进程立即退出。进度、错误、最终结果都会追加到日志文件，通过 [`bcmr status <job_id>`](#status) 查询。`check` 的 `--json` 保持前台行为（没有长时间运行的操作需要轮询）。
 
 **进度行**（传输期间约每 200ms 输出一行）：
 
 ```json
-{"type":"progress","operation":"Copying","bytes_done":1048576,"bytes_total":10485760,"percent":10.0,"speed_bps":52428800,"eta_secs":2,"file":"large.bin","file_size":10485760,"file_progress":1048576}
+{"type":"progress","operation":"Copying","bytes_done":1048576,"bytes_total":10485760,"percent":10.0,"speed_bps":52428800,"eta_secs":2,"file":"large.bin","file_size":10485760,"file_progress":1048576,"scanning":false}
 ```
 
-**结果行**（完成时输出）：
+`"scanning":true` 变体在 plan 阶段（遍历源）期间作为心跳发出 — 消费者可以用它确认任务存活，即使还没有任何字节被传输。
+
+**结果行**（成功或失败时发出）：
 
 ```json
 {"type":"result","status":"success","operation":"Copying","bytes_total":10485760,"duration_secs":3.2,"avg_speed_bps":3276800}
+```
+
+```json
+{"type":"result","status":"error","operation":"Removing","bytes_total":0,"duration_secs":0.001,"error":"Cannot remove '/tmp/x': Is a directory (use -r for recursive removal)"}
 ```
 
 **Check 输出**（`bcmr check --json`）：

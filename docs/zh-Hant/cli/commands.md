@@ -28,6 +28,9 @@ bcmr copy [選項] <來源路徑>... <目標路徑>
 | `--reflink <MODE>` | 寫時複製：`auto`（預設）、`force`、`disable` |
 | `--sparse <MODE>` | 稀疏檔案：`auto`（預設）、`force`、`disable` |
 | `-P`, `--parallel <N>` | 遠端複製的並行傳輸數（預設：設定值） |
+| `-j`, `--jobs <N>` | 本機多檔案並發複製數（預設：`min(CPU, 8)`） |
+| `--compress <MODE>` | 遠端線路壓縮：`auto`（預設，同時通告 LZ4+Zstd）、`zstd`、`lz4`、`none` |
+| `--fast` | 僅遠端：跳過伺服端 BLAKE3（`Ok { hash: None }`）；Linux 伺服端額外啟用 `splice(2)`。只有當你透過其他方式確認完整性時（例如 `-V` 在客戶端重新雜湊）才使用。 |
 
 **範例：**
 
@@ -96,6 +99,9 @@ bcmr move [選項] <來源路徑>... <目標路徑>
 | `-s`, `--strict` | 嚴格雜湊校驗續傳 |
 | `-a`, `--append` | 跨裝置移動的追加模式 |
 | `--sync` | 同步到磁碟（僅跨裝置） |
+| `-j`, `--jobs <N>` | 當 move 回退為 copy+delete 時的並發檔案數（預設 `min(CPU, 8)`） |
+| `--compress <MODE>` | 遠端 move 的線路壓縮：`auto`、`zstd`、`lz4`、`none` |
+| `--fast` | 僅遠端：跨裝置 move 的複製階段跳過伺服端 BLAKE3 |
 
 **範例：**
 
@@ -276,6 +282,41 @@ bcmr check --json -r src/ backup/
 
 ---
 
+## status
+
+查詢 `--json` 背景任務的狀態（v0.5.4+）。
+
+```
+bcmr status [JOB_ID] [--json]
+```
+
+當 `bcmr copy`、`move`、`remove` 搭配 `--json` 執行時，主程序會脫離終端進入背景，進度以 NDJSON 寫入 `~/.local/share/bcmr/jobs/<id>.jsonl`。`bcmr status` 讀取該日誌並把任務分類成五種狀態之一：
+
+| 狀態 | 含義 |
+|------|------|
+| `scanning` | 行程存活，仍在遍歷來源或等待首次進度事件 |
+| `running` | 行程存活，處於傳輸階段 |
+| `done` | 已結束，`status:"success"` |
+| `failed` | 已結束，`status:"error"`（日誌保留錯誤訊息） |
+| `interrupted` | 行程已消失但日誌沒有終止事件（崩潰 / 被 kill / OOM） |
+
+**範例：**
+
+```bash
+# 列出最近的所有任務（tab 分隔：id、state、last %）
+bcmr status
+
+# 查看單個任務（列印日誌最新一行）
+bcmr status 764dee358ff4
+
+# 腳本友善的結構化輸出：{ job_id, state, latest }
+bcmr status 764dee358ff4 --json
+```
+
+新任務啟動時會自動清理 7 天前的日誌。
+
+---
+
 ## 全域旗標
 
 以下旗標適用於所有命令：
@@ -288,18 +329,30 @@ bcmr check --json -r src/ backup/
 
 ### JSON 輸出
 
-傳入 `--json` 時，bcmr 抑制所有人類可讀輸出（進度條、色彩、提示），將換行分隔的 JSON 寫入 stdout：
+`copy`、`move`、`remove` 搭配 `--json` 時，bcmr 會**脫離終端進入背景**，並在 stdout 列印一行 descriptor：
+
+```json
+{"job_id":"764dee358ff4","pid":36897,"log":"/home/.../jobs/764dee358ff4.jsonl"}
+```
+
+父程序立即退出。進度、錯誤、最終結果都會追加到日誌檔案，透過 [`bcmr status <job_id>`](#status) 查詢。`check` 的 `--json` 保留前景行為（沒有長時間執行的操作需要輪詢）。
 
 **進度行**（傳輸期間約每 200ms 輸出一行）：
 
 ```json
-{"type":"progress","operation":"Copying","bytes_done":1048576,"bytes_total":10485760,"percent":10.0,"speed_bps":52428800,"eta_secs":2,"file":"large.bin","file_size":10485760,"file_progress":1048576}
+{"type":"progress","operation":"Copying","bytes_done":1048576,"bytes_total":10485760,"percent":10.0,"speed_bps":52428800,"eta_secs":2,"file":"large.bin","file_size":10485760,"file_progress":1048576,"scanning":false}
 ```
 
-**結果行**（完成時輸出）：
+`"scanning":true` 變體在 plan 階段（遍歷來源）期間作為心跳發送 — 消費者可以藉此確認任務存活，即使尚未有任何位元組被傳輸。
+
+**結果行**（成功或失敗時發送）：
 
 ```json
 {"type":"result","status":"success","operation":"Copying","bytes_total":10485760,"duration_secs":3.2,"avg_speed_bps":3276800}
+```
+
+```json
+{"type":"result","status":"error","operation":"Removing","bytes_total":0,"duration_secs":0.001,"error":"Cannot remove '/tmp/x': Is a directory (use -r for recursive removal)"}
 ```
 
 **Check 輸出**（`bcmr check --json`）：

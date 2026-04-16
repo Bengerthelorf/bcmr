@@ -45,7 +45,13 @@ Uploading: [████████░░░░░░░░░░░░░░�
 
 ## Compression
 
-SSH compression can be enabled to reduce transfer time over slow links. Configure in `[scp]`:
+BCMR has **two separate** compression layers. Know the difference:
+
+### SSH-Level (legacy SCP path)
+
+When the remote doesn't have bcmr installed and transfers fall back
+to SCP, the SSH transport can compress with zlib. Configure in
+`[scp]` of the config file:
 
 | Value | Behavior |
 |-------|----------|
@@ -54,6 +60,28 @@ SSH compression can be enabled to reduce transfer time over slow links. Configur
 | `"off"` | Never compress |
 
 In `auto` mode, files with known compressed extensions (`.gz`, `.zip`, `.mp4`, `.jpg`, etc.) are counted as incompressible. If the majority of bytes are already compressed, compression is skipped to avoid CPU overhead.
+
+### Wire-Level (serve protocol, `--compress`)
+
+When both sides speak the [serve protocol](#serve-protocol-accelerated-transfers),
+per-block LZ4 or Zstd compression is negotiated in the handshake.
+This is **separate from and faster than** SSH's zlib — Zstd-3
+runs at ~320 MB/s encode with ~5× reduction on source text, vs
+zlib at roughly a tenth of that.
+
+| `--compress` mode | Caps advertised | Negotiated result |
+|---|---|---|
+| `auto` (default) | LZ4 + Zstd | Zstd-3 if both peers agree, else LZ4, else raw |
+| `zstd` | Zstd only | Zstd-3 if server also has it, else raw |
+| `lz4` | LZ4 only | LZ4 if server also has it, else raw |
+| `none`/`off` | none | raw `Data` frames only |
+
+Each 4 MiB block is auto-skipped (sent raw) when compression would
+bring it to more than 95 % of the original — so already-compressed
+files (`.jpg`, `.zst`, `/dev/urandom`) pay almost nothing for
+having compression enabled. See the
+[Wire Protocol ablation](/ablation/wire-protocol#experiment-12-wire-compression-across-real-hosts)
+for measured ratios and throughput across real links.
 
 ## Serve Protocol (Accelerated Transfers)
 
@@ -92,6 +120,52 @@ bcmr copy -V local_file.txt user@host:/backup/
 # With serve protocol, the server computes the hash after writing
 # and returns it — no need to re-transfer data for verification
 ```
+
+### Content-Addressed Dedup (`CAP_DEDUP`)
+
+The serve protocol includes block-level dedup: uploads ≥ 16 MiB
+first exchange BLAKE3 hashes of each 4 MiB block, and the server
+only asks for the blocks it doesn't already have in its local
+content-addressed store (CAS). The CAS path is governed by
+[`BCMR_CAS_DIR` / `BCMR_CAS_CAP_MB`](/guide/configuration#environment-variables).
+
+This fires automatically on every PUT of a large enough file —
+no flag is needed to enable it. The benefit is obvious only on
+repeat uploads of the same artifact (dev-loop style): the second
+upload skips every block the server already has.
+
+```bash
+# First run: all 64 MiB on the wire
+bcmr copy build/artifact.bin user@host:/deploy/
+
+# Second run: every block is a CAS hit, no bytes on the wire
+bcmr copy build/artifact.bin user@host:/deploy/alt-name.bin
+```
+
+See the [dedup experiment](/ablation/wire-protocol#experiment-11-content-addressed-dedup-for-repeat-put)
+for the protocol trace.
+
+### Fast Mode (`--fast`)
+
+Trades server-side BLAKE3 for lower CPU:
+
+```bash
+# Server's Ok response carries hash:None.
+bcmr copy --fast user@host:/big.bin ./local.bin
+
+# Combine with -V to re-hash the dst client-side:
+bcmr copy --fast -V user@host:/big.bin ./local.bin
+```
+
+When the server is Linux and `--compress=none` is also set,
+`--fast` additionally engages `splice(2)` for the file → stdout
+path. The splice implementation is currently
+[not yet a win in all cases](/ablation/wire-protocol#experiment-14-cap-fast-real-numbers);
+`--fast` is honest about this trade-off and documented in the
+Internals.
+
+Default is always off — `--fast` is an explicit opt-out of
+server-side integrity verification.
 
 ## How It Works
 

@@ -124,3 +124,21 @@ BCMR checks these paths in order:
 3. Platform-specific config directory (via `directories` crate):
    - **macOS:** `~/Library/Application Support/com.bcmr.bcmr/`
    - **Windows:** `%APPDATA%\bcmr\bcmr\`
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BCMR_CAS_DIR` | `$XDG_DATA_HOME/bcmr/cas` | Override the content-addressed store location used by the [remote dedup](/guide/remote-copy#wire-compression-dedup) path. Also honoured by the integration tests — they point it at a tempdir for isolation. |
+| `BCMR_CAS_CAP_MB` | `1024` (1 GiB) | Soft byte cap on the CAS, enforced by LRU eviction before each dedup-enabled PUT. Set to `0` to disable the cap and let the store grow unbounded. Values are whole megabytes. |
+
+**CAS paths by platform** (when `BCMR_CAS_DIR` is unset):
+- Linux: `~/.local/share/bcmr/cas/`
+- macOS: `~/Library/Application Support/bcmr/cas/`
+- Windows: `%APPDATA%\bcmr\cas\`
+
+Block files live under a two-level hex prefix
+(`<aa>/<bb>/<rest>.blk`) so no single directory accumulates more
+than ~65k entries on typical workloads. Clearing the store is
+safe: `rm -rf` the cas directory and the next dedup-enabled PUT
+rebuilds it from the wire.

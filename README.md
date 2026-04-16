@@ -31,12 +31,14 @@ Installation, shell integration, CLI reference, configuration, and more.
 ## Highlights
 
 - 📊 **Progress Display** — Fancy TUI box with gradient bar, ETA, speed, per-file tracking. Plain text mode for logs and pipes
-- 🔄 **Resume & Verify** — Crash-safe resume with session files and O(1) tail-block verification. Always-on BLAKE3 inline hashing for 2-pass verified copy
+- 🔄 **Resume & Verify** — Crash-safe resume with session files and O(1) tail-block verification. BLAKE3 inline hashing for 2-pass verified copy
 - 🌐 **Remote Copy (SSH)** — Upload and download via SSH. Binary `bcmr serve` protocol for fast transfers when both sides have bcmr, automatic fallback to legacy SCP
-- ⚡ **Fast by Default** — Reflink (CoW), `copy_file_range` on Linux, sparse file detection, pipeline scan+copy, per-worker SSH connections for parallel transfers
+- 🗜️ **Wire Compression** — `--compress={auto,zstd,lz4,none}`: per-block Zstd / LZ4 negotiated in the serve handshake, ~5× bandwidth on source-code text, auto-skip on incompressible blocks
+- 🧠 **Content-Addressed Dedup** — uploads ≥ 16 MiB exchange block hashes first; the server only asks for blocks it doesn't already have in its local CAS. `BCMR_CAS_CAP_MB` bounds disk usage via LRU
+- ⚡ **Parallel by Default** — `-j/--jobs` for local multi-file concurrency (default `min(CPU, 8)`); `-P/--parallel` for independent SSH connections; reflink (CoW), `copy_file_range`, `clonefile` on the kernel fast paths
+- 🏷️ **Attribute Preservation** — `-p` carries mode, mtime, and extended attributes (Linux + macOS)
 - 🛡️ **Safe Operations** — Dry-run preview, overwrite prompts, regex exclusions, atomic writes with durable fsync (`F_FULLFSYNC` on macOS)
-- 🔄 **Self-Update** — `bcmr update` to update in place; background update check on every run
-- 🤖 **AI-Agent Friendly** — `--json` flag for NDJSON streaming progress and structured results. `check` subcommand to diff source vs destination
+- 🤖 **AI-Agent Friendly** — `--json` detaches to a background job writing NDJSON to `~/.local/share/bcmr/jobs/<id>.jsonl`; `bcmr status <id>` classifies into `scanning`/`running`/`done`/`failed`/`interrupted`
 - 🎨 **Configurable** — Custom color gradients, bar characters, border styles via TOML config
 
 ## Install

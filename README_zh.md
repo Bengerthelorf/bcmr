@@ -31,12 +31,14 @@
 ## 亮点
 
 - 📊 **进度显示** — 精美 TUI 界面，渐变进度条、ETA、速度、逐文件追踪。也提供纯文本模式
-- 🔄 **断点续传与校验** — 基于会话文件的崩溃安全续传，O(1) 尾块验证。始终在线的 BLAKE3 内联哈希，2-pass 验证复制
+- 🔄 **断点续传与校验** — 基于会话文件的崩溃安全续传，O(1) 尾块验证。BLAKE3 内联哈希，2-pass 验证复制
 - 🌐 **远程复制 (SSH)** — 通过 SSH 上传下载。双端安装 bcmr 时使用二进制 `bcmr serve` 协议加速传输，自动回退至传统 SCP
-- ⚡ **默认高性能** — Reflink (写时复制)、Linux `copy_file_range`、稀疏文件检测、流水线扫描+复制、独立 SSH 连接的并行传输
+- 🗜️ **线路压缩** — `--compress={auto,zstd,lz4,none}`：每块 Zstd / LZ4 在握手时协商，源码类文本可节约 ~5× 带宽，对不可压缩的块自动跳过
+- 🧠 **内容寻址去重** — ≥ 16 MiB 的上传先交换块哈希，服务端只索取本地 CAS 里没有的块。`BCMR_CAS_CAP_MB` 通过 LRU 限制磁盘占用
+- ⚡ **默认并行** — `-j/--jobs` 本地多文件并发（默认 `min(CPU, 8)`）；`-P/--parallel` 独立 SSH 连接；reflink (CoW)、`copy_file_range`、`clonefile` 等内核快速路径
+- 🏷️ **属性保留** — `-p` 同时保留权限、mtime 和扩展属性 (Linux + macOS)
 - 🛡️ **安全操作** — 干运行预览、覆盖提示、正则排除、原子写入与持久 fsync (macOS 使用 `F_FULLFSYNC`)
-- 🔄 **自更新** — `bcmr update` 原地更新；每次运行自动后台检查新版本
-- 🤖 **AI Agent 友好** — `--json` 输出 NDJSON 流式进度和结构化结果。`check` 子命令对比源与目标差异
+- 🤖 **AI Agent 友好** — `--json` 会脱离终端转入后台，进度写入 `~/.local/share/bcmr/jobs/<id>.jsonl`；`bcmr status <id>` 分类为 `scanning`/`running`/`done`/`failed`/`interrupted`
 - 🎨 **可配置** — 通过 TOML 自定义颜色渐变、进度条字符、边框样式
 
 ## 安装

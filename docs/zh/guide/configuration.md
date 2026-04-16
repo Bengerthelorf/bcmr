@@ -124,3 +124,17 @@ BCMR 按以下顺序查找配置文件：
 3. 平台特定的配置目录（通过 `directories` crate）：
    - **macOS：** `~/Library/Application Support/com.bcmr.bcmr/`
    - **Windows：** `%APPDATA%\bcmr\bcmr\`
+
+## 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `BCMR_CAS_DIR` | `$XDG_DATA_HOME/bcmr/cas` | 覆盖 [远程去重](/zh/guide/remote-copy#wire-compression-dedup) 使用的内容寻址存储位置。集成测试也使用它指向 tempdir 做隔离。 |
+| `BCMR_CAS_CAP_MB` | `1024`（1 GiB） | CAS 的软上限（字节数），每次开启去重的 PUT 前通过 LRU 驱逐来维持。设为 `0` 禁用上限，让仓库无限增长。值以 MiB 为单位。 |
+
+**未设置 `BCMR_CAS_DIR` 时的 CAS 路径**：
+- Linux：`~/.local/share/bcmr/cas/`
+- macOS：`~/Library/Application Support/bcmr/cas/`
+- Windows：`%APPDATA%\bcmr\cas\`
+
+块文件放在两级十六进制前缀下（`<aa>/<bb>/<rest>.blk`），这样在常见 workload 下单目录不会超过约 6.5w 条。清理仓库是安全的：`rm -rf` 掉 cas 目录，下次开启去重的 PUT 会从线路重新构建。
