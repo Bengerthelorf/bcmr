@@ -46,6 +46,7 @@ async fn serve_handshake() {
 /// rejected. The connect_local helper uses `--root /` so the default
 /// test path is unrestricted; this test explicitly spawns a serve
 /// with a narrower root and confirms writes outside it fail.
+#[cfg(unix)]
 #[tokio::test]
 async fn serve_root_jail_rejects_escape() {
     let jail = tempfile::tempdir().unwrap();
@@ -57,7 +58,8 @@ async fn serve_root_jail_rejects_escape() {
     // are refused by the server.
     use std::process::Stdio;
     let exe = std::env::current_exe().unwrap();
-    let bin = exe.parent().unwrap().parent().unwrap().join("bcmr");
+    let bin_name = if cfg!(windows) { "bcmr.exe" } else { "bcmr" };
+    let bin = exe.parent().unwrap().parent().unwrap().join(bin_name);
     let mut child = tokio::process::Command::new(&bin)
         .args(["serve", "--root", jail.path().to_str().unwrap()])
         .stdin(Stdio::piped())
@@ -117,6 +119,7 @@ async fn serve_root_jail_rejects_escape() {
 
 /// Security: PUT must refuse data beyond the declared size. Without
 /// this bound a malicious client could declare size=1 and send TBs.
+#[cfg(unix)]
 #[tokio::test]
 async fn serve_put_size_bound_rejects_oversized() {
     let dir = tempfile::tempdir().unwrap();
@@ -141,7 +144,8 @@ async fn serve_put_size_bound_rejects_oversized() {
 
     use std::process::Stdio;
     let exe = std::env::current_exe().unwrap();
-    let bin = exe.parent().unwrap().parent().unwrap().join("bcmr");
+    let bin_name = if cfg!(windows) { "bcmr.exe" } else { "bcmr" };
+    let bin = exe.parent().unwrap().parent().unwrap().join(bin_name);
     let mut child = tokio::process::Command::new(&bin)
         .args(["serve", "--root", "/"])
         .stdin(Stdio::piped())
