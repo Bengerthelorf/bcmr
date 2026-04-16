@@ -40,6 +40,17 @@ pub const CAP_DEDUP: u8 = 0x04;
 /// to fill the Data frame buffer.
 pub const CAP_FAST: u8 = 0x08;
 
+/// Per-file fsync after PUT/GET completes. Off by default (matches the
+/// local copy behavior, which gates fsync on `--sync`). With this off, a
+/// 10000-file batch saves ~10-20s of fdatasync barrier latency on NVMe.
+/// The server only fsyncs the destination file in handle_put when this
+/// bit is in the negotiated caps; the client only fsyncs the GET dst
+/// file when the bit is in its own caps (the GET-side fsync happens on
+/// the client, not the server). Mirrors local copy's `--sync` semantics
+/// — explicit opt-in for crash-safe durability, default off so we don't
+/// silently take a 5x perf hit.
+pub const CAP_SYNC: u8 = 0x10;
+
 /// Capability bits advertised in Hello/Welcome.
 ///
 /// Caps are an optional trailing byte appended after the version. A peer

@@ -1,7 +1,7 @@
 use crate::core::cas;
 use crate::core::compress;
 use crate::core::protocol::{
-    self, CompressionAlgo, ListEntry, Message, CAP_DEDUP, CAP_FAST, CAP_LZ4, CAP_ZSTD,
+    self, CompressionAlgo, ListEntry, Message, CAP_DEDUP, CAP_FAST, CAP_LZ4, CAP_SYNC, CAP_ZSTD,
     PROTOCOL_VERSION,
 };
 use anyhow::{bail, Result};
@@ -15,7 +15,7 @@ const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
 /// with its own. CAP_FAST is always offered — the actual implementation
 /// either skips inline hashing (any platform) or also uses splice(2) on
 /// Linux. Either way the client opts in via --fast.
-const SERVER_CAPS: u8 = CAP_LZ4 | CAP_ZSTD | CAP_DEDUP | CAP_FAST;
+const SERVER_CAPS: u8 = CAP_LZ4 | CAP_ZSTD | CAP_DEDUP | CAP_FAST | CAP_SYNC;
 
 /// Resolve the configured root jail. Explicit `--root <path>` wins;
 /// otherwise the invoking user's `$HOME` is used. A user that really
@@ -144,6 +144,7 @@ pub async fn run(root: Option<PathBuf>) -> Result<()> {
     // round trip.
     let algo = CompressionAlgo::negotiate(effective_caps, effective_caps);
     let fast = (effective_caps & CAP_FAST) != 0;
+    let sync = (effective_caps & CAP_SYNC) != 0;
 
     protocol::write_message(
         &mut stdout,
@@ -214,7 +215,14 @@ pub async fn run(root: Option<PathBuf>) -> Result<()> {
             },
             Message::Put { path, size } => match validate_path(&path, &root) {
                 Ok(p) => {
-                    handle_put(p.to_str().unwrap_or(&path), size, &mut stdout, &mut stdin).await
+                    handle_put(
+                        p.to_str().unwrap_or(&path),
+                        size,
+                        sync,
+                        &mut stdout,
+                        &mut stdin,
+                    )
+                    .await
                 }
                 Err(e) => Err(e),
             },
@@ -571,6 +579,7 @@ fn write_all_fd(fd: i32, mut buf: &[u8]) -> std::io::Result<()> {
 async fn handle_put<W, R>(
     path: &str,
     declared_size: u64,
+    sync: bool,
     out: &mut W,
     reader: &mut R,
 ) -> Result<Message>
@@ -658,7 +667,9 @@ where
     }
 
     file.flush().await?;
-    file.sync_all().await?;
+    if sync {
+        file.sync_all().await?;
+    }
     drop(file);
 
     let hash = hasher.finalize().to_hex().to_string();

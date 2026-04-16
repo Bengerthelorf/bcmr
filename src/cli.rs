@@ -410,12 +410,17 @@ impl Commands {
 
     /// Build the full caps byte sent in Hello: compression bits OR'd
     /// with CAP_DEDUP (default on; dedup activates only on file size
-    /// threshold), plus CAP_FAST if the user passed --fast.
+    /// threshold), plus CAP_FAST if the user passed --fast, plus
+    /// CAP_SYNC if the user passed --sync (per-file fsync; off by
+    /// default to match local copy behavior).
     pub fn protocol_caps(&self) -> u8 {
-        use crate::core::protocol::{CAP_DEDUP, CAP_FAST};
+        use crate::core::protocol::{CAP_DEDUP, CAP_FAST, CAP_SYNC};
         let mut caps = self.compression_caps() | CAP_DEDUP;
         if self.copy_move_args().is_some_and(|a| a.fast) {
             caps |= CAP_FAST;
+        }
+        if self.is_sync() {
+            caps |= CAP_SYNC;
         }
         caps
     }
@@ -660,5 +665,35 @@ mod tests {
         assert!(!cmd.is_dry_run());
         assert!(!cmd.is_verbose());
         assert_eq!(cmd.get_parallel(), None);
+    }
+
+    #[test]
+    fn test_protocol_caps_sync_gate() {
+        use crate::core::protocol::{CAP_FAST, CAP_SYNC};
+
+        let cmd_no_sync = Commands::Copy {
+            args: test_args(vec![PathBuf::from("dst")]),
+            reflink: None,
+            sparse: None,
+            parallel: None,
+        };
+        assert_eq!(
+            cmd_no_sync.protocol_caps() & CAP_SYNC,
+            0,
+            "default has no CAP_SYNC"
+        );
+
+        let mut a = test_args(vec![PathBuf::from("dst")]);
+        a.sync = true;
+        a.fast = true;
+        let cmd_sync_fast = Commands::Copy {
+            args: a,
+            reflink: None,
+            sparse: None,
+            parallel: None,
+        };
+        let caps = cmd_sync_fast.protocol_caps();
+        assert_eq!(caps & CAP_SYNC, CAP_SYNC, "--sync sets CAP_SYNC");
+        assert_eq!(caps & CAP_FAST, CAP_FAST, "--fast still sets CAP_FAST");
     }
 }

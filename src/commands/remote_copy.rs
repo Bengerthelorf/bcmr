@@ -262,10 +262,6 @@ pub async fn handle_remote_copy(
             }
         }
     };
-    if args.is_sync() {
-        eprintln!("Warning: --sync has no effect on remote transfers");
-    }
-
     remote::set_ssh_compression(compress);
 
     let check_target = if let Some(ref rd) = remote_dest {
@@ -846,8 +842,10 @@ async fn handle_serve_download(
         if let Some(e) = write_err.into_inner() {
             bail!("write failed for {}: {}", item.local_path.display(), e);
         }
-        // Fsync destination for crash safety
-        dst_file.into_inner().sync_all()?;
+        let f = dst_file.into_inner();
+        if args.is_sync() {
+            f.sync_all()?;
+        }
     }
 
     client.close().await?;
