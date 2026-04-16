@@ -656,7 +656,7 @@ fn background_update_check(command: &Commands) -> Option<mpsc::Receiver<Option<S
         Commands::Update
             | Commands::Completions { .. }
             | Commands::CompleteRemote { .. }
-            | Commands::Serve
+            | Commands::Serve { .. }
             | Commands::Deploy { .. }
     ) {
         return None;
@@ -867,8 +867,8 @@ async fn main() -> Result<()> {
         }
         Commands::Init { .. } => handle_init_command(&cli.command)?,
         Commands::Update => commands::update::run()?,
-        Commands::Serve => {
-            commands::serve::run().await?;
+        Commands::Serve { root } => {
+            commands::serve::run(root.clone()).await?;
         }
         Commands::Deploy { target, path } => {
             let remote_path = path.as_deref().unwrap_or("~/.local/bin/bcmr");

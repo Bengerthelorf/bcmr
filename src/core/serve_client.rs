@@ -112,8 +112,10 @@ impl ServeClient {
             })?
             .clone();
 
+        // Test helper: skip the default $HOME root jail so tests can
+        // put/get under tempdirs like /var/folders or /tmp.
         let mut child = Command::new(&bcmr_path)
-            .arg("serve")
+            .args(["serve", "--root", "/"])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())

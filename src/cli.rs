@@ -205,7 +205,15 @@ pub enum Commands {
 
     /// Run as a remote helper (called via SSH, not directly by users)
     #[command(hide = true)]
-    Serve,
+    Serve {
+        /// Restrict all paths to this directory (canonicalized). Any
+        /// client path that doesn't resolve under this prefix is
+        /// rejected. Defaults to the invoking user's home directory;
+        /// pass `--root /` to explicitly allow full filesystem access
+        /// (only safe for throwaway/root accounts).
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
 
     /// Deploy bcmr to a remote host for serve protocol support
     Deploy {

@@ -17,43 +17,93 @@ const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
 /// Linux. Either way the client opts in via --fast.
 const SERVER_CAPS: u8 = CAP_LZ4 | CAP_ZSTD | CAP_DEDUP | CAP_FAST;
 
-/// Validate and canonicalize a path from the client.
-/// Prevents directory traversal attacks (e.g. "../../../etc/shadow").
-/// All paths must be absolute after canonicalization.
-fn validate_path(raw: &str) -> Result<PathBuf> {
-    let path = Path::new(raw);
+/// Resolve the configured root jail. Explicit `--root <path>` wins;
+/// otherwise the invoking user's `$HOME` is used. A user that really
+/// wants pre-v0.5.10 behaviour (no sandbox) can pass `--root /`.
+fn resolve_root(arg: Option<PathBuf>) -> Result<PathBuf> {
+    let raw = match arg {
+        Some(p) => p,
+        None => directories::UserDirs::new()
+            .map(|u| u.home_dir().to_path_buf())
+            .ok_or_else(|| anyhow::anyhow!("no $HOME to use as default --root"))?,
+    };
+    std::fs::create_dir_all(&raw)?;
+    Ok(std::fs::canonicalize(&raw)?)
+}
 
-    // Reject obviously malicious patterns before touching the filesystem
+/// Validate a client path against the root jail.
+///
+/// Rules:
+/// - null byte → reject
+/// - reject any path component literally `..` (belt-and-suspenders; the
+///   canonicalize below would catch symlink tricks too)
+/// - canonicalize (for existing paths) or canonicalize the deepest
+///   existing ancestor and splice the remainder
+/// - require the result to be under `root` (lexical prefix after canon.)
+///
+/// With `root = /` the prefix check passes everything — that's the
+/// explicit opt-out. Default is $HOME so arbitrary `/etc/evil` is
+/// rejected even on a root-invoked serve.
+fn validate_path(raw: &str, root: &Path) -> Result<PathBuf> {
     if raw.contains('\0') {
         bail!("path contains null byte");
     }
+    let path = Path::new(raw);
 
-    // For existing paths, canonicalize resolves symlinks and ..
-    if path.exists() {
-        return Ok(std::fs::canonicalize(path)?);
-    }
-
-    // Reject any path containing ".." components — even if parent doesn't exist yet
     for component in path.components() {
         if matches!(component, std::path::Component::ParentDir) {
             bail!("path contains '..'");
         }
     }
 
-    // For new files (put/mkdir), canonicalize the parent if it exists
-    if let Some(parent) = path.parent() {
-        if parent.exists() {
-            let canonical_parent = std::fs::canonicalize(parent)?;
-            if let Some(name) = path.file_name() {
-                return Ok(canonical_parent.join(name));
-            }
-        }
+    let canonical = canonicalize_with_ancestor(path)?;
+    if !canonical.starts_with(root) {
+        bail!(
+            "path {} escapes server root {}",
+            canonical.display(),
+            root.display()
+        );
     }
-
-    Ok(path.to_path_buf())
+    Ok(canonical)
 }
 
-pub async fn run() -> Result<()> {
+/// Canonicalize `path` if it exists; otherwise canonicalize the closest
+/// existing ancestor and re-append the remainder. Only follows symlinks
+/// on the existing prefix, so a symlink pointing outside `root` is
+/// caught by the caller's `starts_with` check.
+fn canonicalize_with_ancestor(path: &Path) -> Result<PathBuf> {
+    if path.exists() {
+        return Ok(std::fs::canonicalize(path)?);
+    }
+    let mut ancestor = path.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    while !ancestor.exists() {
+        match ancestor.file_name() {
+            Some(n) => tail.push(n.to_os_string()),
+            None => break,
+        }
+        if !ancestor.pop() {
+            break;
+        }
+    }
+    let mut out = if ancestor.as_os_str().is_empty() {
+        std::env::current_dir()?
+    } else if ancestor.exists() {
+        std::fs::canonicalize(&ancestor)?
+    } else {
+        return Err(anyhow::anyhow!(
+            "no existing ancestor for {}",
+            path.display()
+        ));
+    };
+    for seg in tail.iter().rev() {
+        out.push(seg);
+    }
+    Ok(out)
+}
+
+pub async fn run(root: Option<PathBuf>) -> Result<()> {
+    let root = resolve_root(root)?;
     let mut stdin = io::stdin();
     let mut stdout = io::stdout();
 
@@ -117,7 +167,7 @@ pub async fn run() -> Result<()> {
         // for the dispatch loop to write.
         let response = match msg {
             Message::Get { path, offset } => {
-                match validate_path(&path) {
+                match validate_path(&path, &root) {
                     Ok(p) => {
                         if let Err(e) =
                             handle_get(p.to_str().unwrap_or(&path), offset, algo, fast, &mut stdout)
@@ -146,11 +196,11 @@ pub async fn run() -> Result<()> {
                 stdout.flush().await?;
                 continue;
             }
-            Message::Stat { path } => match validate_path(&path) {
+            Message::Stat { path } => match validate_path(&path, &root) {
                 Ok(p) => handle_stat(p.to_str().unwrap_or(&path)).await,
                 Err(e) => Err(e),
             },
-            Message::List { path } => match validate_path(&path) {
+            Message::List { path } => match validate_path(&path, &root) {
                 Ok(p) => handle_list(p.to_str().unwrap_or(&path)).await,
                 Err(e) => Err(e),
             },
@@ -158,21 +208,21 @@ pub async fn run() -> Result<()> {
                 path,
                 offset,
                 limit,
-            } => match validate_path(&path) {
+            } => match validate_path(&path, &root) {
                 Ok(p) => handle_hash(p.to_str().unwrap_or(&path), offset, limit).await,
                 Err(e) => Err(e),
             },
-            Message::Put { path, size } => match validate_path(&path) {
+            Message::Put { path, size } => match validate_path(&path, &root) {
                 Ok(p) => {
                     handle_put(p.to_str().unwrap_or(&path), size, &mut stdout, &mut stdin).await
                 }
                 Err(e) => Err(e),
             },
-            Message::Mkdir { path } => match validate_path(&path) {
+            Message::Mkdir { path } => match validate_path(&path, &root) {
                 Ok(p) => handle_mkdir(p.to_str().unwrap_or(&path)).await,
                 Err(e) => Err(e),
             },
-            Message::Resume { path } => match validate_path(&path) {
+            Message::Resume { path } => match validate_path(&path, &root) {
                 Ok(p) => handle_resume(p.to_str().unwrap_or(&path)).await,
                 Err(e) => Err(e),
             },
@@ -456,7 +506,12 @@ where
 /// in the CAS for future requests. The composite hash returned in Ok
 /// still covers the entire file regardless of whether each byte arrived
 /// over the wire or came out of the cache.
-async fn handle_put<W, R>(path: &str, _size: u64, out: &mut W, reader: &mut R) -> Result<Message>
+async fn handle_put<W, R>(
+    path: &str,
+    declared_size: u64,
+    out: &mut W,
+    reader: &mut R,
+) -> Result<Message>
 where
     W: tokio::io::AsyncWrite + Unpin,
     R: tokio::io::AsyncRead + Unpin,
@@ -470,6 +525,7 @@ where
 
     let mut file = fs::File::create(path).await?;
     let mut hasher = blake3::Hasher::new();
+    let mut written: u64 = 0;
 
     // Peek at the first message: the client might open with HaveBlocks
     // (dedup mode) or jump straight to Data (legacy / dedup-disabled).
@@ -512,7 +568,9 @@ where
         };
         match m {
             Message::Data { payload } => {
+                enforce_write_bound(written, payload.len(), declared_size)?;
                 consume_block(&payload, &mut file, &mut hasher, dedup_state.as_mut()).await?;
+                written += payload.len() as u64;
             }
             Message::DataCompressed {
                 algo,
@@ -520,7 +578,9 @@ where
                 payload,
             } => {
                 let decoded = compress::decode_block(algo, original_size, &payload)?;
+                enforce_write_bound(written, decoded.len(), declared_size)?;
                 consume_block(&decoded, &mut file, &mut hasher, dedup_state.as_mut()).await?;
+                written += decoded.len() as u64;
             }
             Message::Done => break,
             other => return Err(anyhow::anyhow!("put: unexpected message {other:?}")),
@@ -531,7 +591,8 @@ where
     // had them. We do this *after* draining the wire so the server's
     // stream of writes follows source order.
     if let Some(state) = dedup_state.as_mut() {
-        flush_remaining_cas_blocks(state, &mut file, &mut hasher).await?;
+        flush_remaining_cas_blocks(state, &mut file, &mut hasher, &mut written, declared_size)
+            .await?;
     }
 
     file.flush().await?;
@@ -587,6 +648,8 @@ async fn flush_remaining_cas_blocks(
     state: &mut DedupState,
     file: &mut tokio::fs::File,
     hasher: &mut blake3::Hasher,
+    written: &mut u64,
+    declared_size: u64,
 ) -> Result<()> {
     while state.cursor < state.hashes.len() {
         if state.is_missing(state.cursor) {
@@ -597,9 +660,30 @@ async fn flush_remaining_cas_blocks(
             ));
         }
         let cached = cas::read(&state.hashes[state.cursor])?;
+        enforce_write_bound(*written, cached.len(), declared_size)?;
         hasher.update(&cached);
         file.write_all(&cached).await?;
+        *written += cached.len() as u64;
         state.cursor += 1;
+    }
+    Ok(())
+}
+
+/// Refuse to grow the destination past the size the client declared
+/// on PUT. Protects the server from a malicious or buggy client that
+/// sends unbounded Data frames — without this, `size: 100` could
+/// followed by TB of Data and the server would dutifully write it all.
+/// A small per-block tolerance isn't meaningful; the declared size
+/// should equal the final dst size exactly.
+fn enforce_write_bound(written: u64, incoming: usize, declared: u64) -> Result<()> {
+    if written + incoming as u64 > declared {
+        bail!(
+            "put: client would write {} bytes past the declared size of {} \
+             (already wrote {})",
+            written + incoming as u64 - declared,
+            declared,
+            written
+        );
     }
     Ok(())
 }

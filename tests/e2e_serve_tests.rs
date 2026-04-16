@@ -42,6 +42,164 @@ async fn serve_handshake() {
     client.close().await.unwrap();
 }
 
+/// Security: with a root jail, PUT to a path outside the jail must be
+/// rejected. The connect_local helper uses `--root /` so the default
+/// test path is unrestricted; this test explicitly spawns a serve
+/// with a narrower root and confirms writes outside it fail.
+#[tokio::test]
+async fn serve_root_jail_rejects_escape() {
+    let jail = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let src = outside.path().join("payload.bin");
+    std::fs::write(&src, b"hello").unwrap();
+
+    // Hand-spawn a serve with --root set to the jail so writes outside
+    // are refused by the server.
+    use std::process::Stdio;
+    let exe = std::env::current_exe().unwrap();
+    let bin = exe.parent().unwrap().parent().unwrap().join("bcmr");
+    let mut child = tokio::process::Command::new(&bin)
+        .args(["serve", "--root", jail.path().to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    // Handshake manually at the protocol layer to avoid coupling to
+    // ServeClient's private state. We just need to confirm the Put path
+    // validation rejects the outside path.
+    use bcmr::core::protocol::{read_message, write_message, Message, PROTOCOL_VERSION};
+    let mut stdin = stdin;
+    let mut stdout = stdout;
+    write_message(
+        &mut stdin,
+        &Message::Hello {
+            version: PROTOCOL_VERSION,
+            caps: 0,
+        },
+    )
+    .await
+    .unwrap();
+    // Welcome
+    let _ = read_message(&mut stdout).await.unwrap();
+    // Put to an absolute path outside the jail.
+    let outside_target = outside.path().join("should_not_be_written.bin");
+    write_message(
+        &mut stdin,
+        &Message::Put {
+            path: outside_target.to_string_lossy().into_owned(),
+            size: 5,
+        },
+    )
+    .await
+    .unwrap();
+    let reply = read_message(&mut stdout).await.unwrap().unwrap();
+    match reply {
+        Message::Error { message } => {
+            assert!(
+                message.contains("escapes server root"),
+                "expected jail-escape error, got: {}",
+                message
+            );
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+    assert!(
+        !outside_target.exists(),
+        "forbidden target was written despite jail"
+    );
+    drop(stdin);
+    let _ = child.wait().await;
+}
+
+/// Security: PUT must refuse data beyond the declared size. Without
+/// this bound a malicious client could declare size=1 and send TBs.
+#[tokio::test]
+async fn serve_put_size_bound_rejects_oversized() {
+    let dir = tempfile::tempdir().unwrap();
+    let dst = dir.path().join("capped.bin");
+
+    use bcmr::core::protocol::{read_message, write_message, Message};
+    let mut client = ServeClient::connect_local().await.unwrap();
+    // Reach into the raw protocol: send Put declaring 10 bytes then
+    // a 100-byte Data frame. The server should Error after the first
+    // bound-exceeding block.
+    //
+    // We can't drive the raw protocol through the high-level
+    // `put()` method because it honestly reads the source file and
+    // sends the true size. So mimic the subset we need here.
+    //
+    // Because ServeClient doesn't expose its stdin directly, we
+    // approximate by calling put() on a file larger than declared,
+    // which is the normal client path - and should succeed because
+    // the client declares the true size. That test isn't what we
+    // want. Re-spawn a raw child instead.
+    let _ = client.close().await;
+
+    use std::process::Stdio;
+    let exe = std::env::current_exe().unwrap();
+    let bin = exe.parent().unwrap().parent().unwrap().join("bcmr");
+    let mut child = tokio::process::Command::new(&bin)
+        .args(["serve", "--root", "/"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+
+    use bcmr::core::protocol::PROTOCOL_VERSION;
+    write_message(
+        &mut stdin,
+        &Message::Hello {
+            version: PROTOCOL_VERSION,
+            caps: 0,
+        },
+    )
+    .await
+    .unwrap();
+    let _welcome = read_message(&mut stdout).await.unwrap();
+
+    write_message(
+        &mut stdin,
+        &Message::Put {
+            path: dst.to_string_lossy().into_owned(),
+            size: 10,
+        },
+    )
+    .await
+    .unwrap();
+    // Send a 100-byte Data frame — oversized.
+    write_message(
+        &mut stdin,
+        &Message::Data {
+            payload: vec![0xab; 100],
+        },
+    )
+    .await
+    .unwrap();
+    write_message(&mut stdin, &Message::Done).await.unwrap();
+
+    let reply = read_message(&mut stdout).await.unwrap().unwrap();
+    match reply {
+        Message::Error { message } => {
+            assert!(
+                message.contains("past the declared size"),
+                "expected size-bound error, got: {}",
+                message
+            );
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+
+    drop(stdin);
+    let _ = child.wait().await;
+}
+
 #[tokio::test]
 async fn serve_stat_file() {
     let dir = tempfile::tempdir().unwrap();
