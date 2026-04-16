@@ -599,3 +599,207 @@ async fn serve_resume_nonexistent() {
     assert_eq!(size, 0);
     assert!(block_hash.is_none());
 }
+
+/// Pipelined PUT of many small files: send Put/Data/Done streams for all
+/// files back-to-back via the writer task while the reader collects
+/// FIFO-ordered Ok hashes. Verifies (a) every dst file lands with the
+/// correct contents and (b) the connection is reusable afterwards
+/// (stdin reclaimed cleanly).
+#[tokio::test]
+async fn serve_pipelined_put_many_files_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::create_dir_all(&dst_dir).unwrap();
+
+    let n = 50usize;
+    let mut srcs: Vec<std::path::PathBuf> = Vec::with_capacity(n);
+    let mut expected_hashes: Vec<String> = Vec::with_capacity(n);
+    for i in 0..n {
+        let p = src_dir.join(format!("f_{i}.bin"));
+        // Small variable size so different files have different hashes.
+        create_file(&p, 1024 + i * 16);
+        expected_hashes.push(checksum::calculate_hash(&p).unwrap());
+        srcs.push(p);
+    }
+
+    let files: Vec<(String, std::path::PathBuf, u64)> = srcs
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            (
+                dst_dir
+                    .join(format!("f_{i}.bin"))
+                    .to_string_lossy()
+                    .to_string(),
+                p.clone(),
+                p.metadata().unwrap().len(),
+            )
+        })
+        .collect();
+
+    let mut client = ServeClient::connect_local().await.unwrap();
+    let completed = std::cell::Cell::new(0usize);
+    let hashes = client
+        .pipelined_put_files(files, |_idx, _path, _size| {
+            completed.set(completed.get() + 1);
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(hashes.len(), n);
+    assert_eq!(completed.get(), n);
+    for (i, h) in hashes.iter().enumerate() {
+        assert_eq!(bytes_to_hex(h), expected_hashes[i]);
+        let dst_file = dst_dir.join(format!("f_{i}.bin"));
+        assert_eq!(
+            checksum::calculate_hash(&dst_file).unwrap(),
+            expected_hashes[i]
+        );
+    }
+
+    // Connection still usable for a follow-on op after stdin reclaim.
+    let probe_path = dst_dir.join("f_0.bin");
+    let (probe_size, _, _) = client.stat(probe_path.to_str().unwrap()).await.unwrap();
+    assert!(probe_size > 0);
+    client.close().await.unwrap();
+}
+
+/// Pipelined GET of many small files: send all Get requests up-front,
+/// reader demuxes the resulting Data*/Ok stream into per-file dst
+/// handles. Verifies stream framing, demultiplexing, and stdin reclaim.
+#[tokio::test]
+async fn serve_pipelined_get_many_files_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::create_dir_all(&dst_dir).unwrap();
+
+    let n = 50usize;
+    let mut srcs: Vec<std::path::PathBuf> = Vec::with_capacity(n);
+    let mut expected_hashes: Vec<String> = Vec::with_capacity(n);
+    for i in 0..n {
+        let p = src_dir.join(format!("g_{i}.bin"));
+        create_file(&p, 2048 + i * 32);
+        expected_hashes.push(checksum::calculate_hash(&p).unwrap());
+        srcs.push(p);
+    }
+
+    let files: Vec<(String, std::path::PathBuf, u64)> = srcs
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            (
+                p.to_string_lossy().to_string(),
+                dst_dir.join(format!("g_{i}.bin")),
+                p.metadata().unwrap().len(),
+            )
+        })
+        .collect();
+
+    let mut client = ServeClient::connect_local().await.unwrap();
+    let completed = std::cell::Cell::new(0usize);
+    client
+        .pipelined_get_files(files, false, |_idx, _path, _bytes| {
+            completed.set(completed.get() + 1);
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(completed.get(), n);
+    for (i, expected) in expected_hashes.iter().enumerate() {
+        let dst_file = dst_dir.join(format!("g_{i}.bin"));
+        assert_eq!(&checksum::calculate_hash(&dst_file).unwrap(), expected);
+    }
+
+    // Stdin must be reclaimed; a follow-on stat call confirms.
+    let (probe_size, _, _) = client.stat(srcs[0].to_str().unwrap()).await.unwrap();
+    assert!(probe_size > 0);
+    client.close().await.unwrap();
+}
+
+/// Pipelined PUT where one local source file doesn't exist: writer task
+/// hits open() error mid-batch, returns Err. Reader sees the connection
+/// die and propagates the error. Caller must get an Err back rather than
+/// a partial success.
+#[tokio::test]
+async fn serve_pipelined_put_writer_error_propagates() {
+    let dir = tempfile::tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::create_dir_all(&dst_dir).unwrap();
+
+    let good = src_dir.join("good.bin");
+    create_file(&good, 4096);
+
+    let missing = src_dir.join("does_not_exist.bin");
+
+    let files: Vec<(String, std::path::PathBuf, u64)> = vec![
+        (
+            dst_dir.join("g.bin").to_string_lossy().to_string(),
+            good.clone(),
+            good.metadata().unwrap().len(),
+        ),
+        (
+            dst_dir.join("m.bin").to_string_lossy().to_string(),
+            missing,
+            4096, // size we'd advertise
+        ),
+    ];
+
+    let mut client = ServeClient::connect_local().await.unwrap();
+    let result = client
+        .pipelined_put_files(files, |_idx, _path, _size| {})
+        .await;
+    assert!(
+        result.is_err(),
+        "expected pipelined_put_files to fail when a source file is missing"
+    );
+    drop(client);
+}
+
+/// Pipelined GET where one server-side path doesn't exist: server emits
+/// Error mid-stream. Reader catches it and propagates. We don't assert
+/// how many files succeeded before the bad one — only that the call
+/// returns Err so the caller sees the failure rather than a phantom
+/// success.
+#[tokio::test]
+async fn serve_pipelined_get_server_error_propagates() {
+    let dir = tempfile::tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::create_dir_all(&dst_dir).unwrap();
+
+    let good = src_dir.join("good.bin");
+    create_file(&good, 4096);
+
+    // Second entry references a file that doesn't exist on the server.
+    let bogus_remote = src_dir.join("does_not_exist.bin");
+
+    let files: Vec<(String, std::path::PathBuf, u64)> = vec![
+        (
+            good.to_string_lossy().to_string(),
+            dst_dir.join("g.bin"),
+            good.metadata().unwrap().len(),
+        ),
+        (
+            bogus_remote.to_string_lossy().to_string(),
+            dst_dir.join("b.bin"),
+            4096,
+        ),
+    ];
+
+    let mut client = ServeClient::connect_local().await.unwrap();
+    let result = client
+        .pipelined_get_files(files, false, |_idx, _path, _bytes| {})
+        .await;
+    assert!(
+        result.is_err(),
+        "expected pipelined_get_files to fail when a remote source is missing"
+    );
+    drop(client);
+}

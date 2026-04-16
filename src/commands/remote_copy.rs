@@ -692,6 +692,12 @@ async fn serve_upload_dir(
     let remote_dir = format!("{}/{}", remote_base.path, dir_name);
     client.mkdir(&remote_dir).await?;
 
+    // Two-pass: mkdir all subdirectories first (cheap, must be sequential
+    // so parents exist before children), then batch-pipeline all file
+    // PUTs through pipelined_put_files. The single-file `client.put()`
+    // path is one full RTT per file; for many small files the cumulative
+    // RTT dominates and pipelining hides it.
+    let mut files_to_put: Vec<(String, PathBuf, u64)> = Vec::new();
     for entry in crate::core::traversal::walk(local_dir, true, false, 1, excludes) {
         let entry = entry?;
         let path = entry.path();
@@ -701,14 +707,21 @@ async fn serve_upload_dir(
             client.mkdir(&remote_path).await?;
         } else if path.is_file() {
             let size = entry.metadata()?.len();
-            (runner.file_callback())(
+            files_to_put.push((remote_path, path.to_path_buf(), size));
+        }
+    }
+
+    let file_cb = runner.file_callback();
+    let inc = runner.inc_callback();
+    client
+        .pipelined_put_files(files_to_put, |_idx, path, size| {
+            file_cb(
                 &path.file_name().unwrap_or_default().to_string_lossy(),
                 size,
             );
-            client.put(&remote_path, path).await?;
-            (runner.inc_callback())(size);
-        }
-    }
+            inc(size);
+        })
+        .await?;
     Ok(())
 }
 
@@ -805,48 +818,30 @@ async fn handle_serve_download(
         .lock()
         .set_operation_type("Downloading (serve)");
 
+    // Two-pass: directories serially first (parents before children), then
+    // files via pipelined_get_files so request and reply streams overlap
+    // through SSH instead of paying one full RTT per file.
+    let mut files_to_get: Vec<(String, PathBuf, u64)> = Vec::new();
     for item in &items {
         if item.is_dir {
             tokio::fs::create_dir_all(&item.local_path).await?;
-            continue;
-        }
-        if let Some(parent) = item.local_path.parent() {
-            if !parent.exists() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-        }
-        let fname = item
-            .local_path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        (runner.file_callback())(&fname, item.size);
-
-        let dst_file = std::cell::RefCell::new(std::fs::File::create(&item.local_path)?);
-        let write_err: std::cell::Cell<Option<std::io::Error>> = std::cell::Cell::new(None);
-        let inc = runner.inc_callback();
-        client
-            .get(&item.remote_path, 0, |chunk| {
-                use std::io::Write;
-                if write_err.take().is_some() {
-                    return; // already failed
-                }
-                if let Err(e) = dst_file.borrow_mut().write_all(chunk) {
-                    write_err.set(Some(e));
-                    return;
-                }
-                inc(chunk.len() as u64);
-            })
-            .await?;
-        if let Some(e) = write_err.into_inner() {
-            bail!("write failed for {}: {}", item.local_path.display(), e);
-        }
-        let f = dst_file.into_inner();
-        if args.is_sync() {
-            f.sync_all()?;
+        } else {
+            files_to_get.push((item.remote_path.clone(), item.local_path.clone(), item.size));
         }
     }
+
+    let file_cb = runner.file_callback();
+    let inc = runner.inc_callback();
+    let sync = args.is_sync();
+    client
+        .pipelined_get_files(files_to_get, sync, |_idx, path, received| {
+            file_cb(
+                &path.file_name().unwrap_or_default().to_string_lossy(),
+                received,
+            );
+            inc(received);
+        })
+        .await?;
 
     client.close().await?;
     runner.finish_ok()

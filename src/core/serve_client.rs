@@ -226,6 +226,11 @@ impl ServeClient {
         }
     }
 
+    /// Single-file GET. Kept for the e2e test surface (each test still
+    /// drives one file end-to-end through the protocol). Production
+    /// download path uses `pipelined_get_files`, which sends all GET
+    /// requests up-front so request and reply streams overlap.
+    #[allow(dead_code)]
     pub async fn get(
         &mut self,
         path: &str,
@@ -294,17 +299,11 @@ impl ServeClient {
     }
 
     async fn put_streaming(&mut self, data: &Path) -> Result<(), BcmrError> {
-        let mut file = File::open(data).await?;
-        let mut buf = vec![0u8; DEDUP_BLOCK_SIZE];
-        loop {
-            let n = file.read(&mut buf).await?;
-            if n == 0 {
-                break;
-            }
-            let frame = compress::encode_block(self.algo, buf[..n].to_vec());
-            self.send(&frame).await?;
-        }
-        Ok(())
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| BcmrError::InvalidInput("stdin already taken".into()))?;
+        write_file_data_frames(stdin, data, self.algo).await
     }
 
     async fn put_with_dedup(&mut self, data: &Path, size: u64) -> Result<(), BcmrError> {
@@ -350,6 +349,305 @@ impl ServeClient {
                 let frame = compress::encode_block(self.algo, buf[..filled].to_vec());
                 self.send(&frame).await?;
             }
+        }
+        Ok(())
+    }
+
+    /// Stream-pipeline many small file PUTs over the same connection.
+    ///
+    /// The single-file `put()` is strict request-response: send Put +
+    /// Data\* + Done, await Ok, then start the next file. On a 10000-file
+    /// batch each file pays one full client→server→client round trip
+    /// regardless of how cheap the actual fdatasync is on the wire ---
+    /// SSH transport buffers don't help when the *client* is the one
+    /// blocking. SFTP closes the same gap for `scp -r` by keeping a
+    /// window of in-flight requests; our protocol's dispatch loop is
+    /// already FIFO and out-of-order-safe for replies, so we just need
+    /// to stop waiting on the client side.
+    ///
+    /// Implementation: spawn a writer task that owns `stdin` and emits
+    /// `Put / Data* / Done` for every file in send order. The reader
+    /// (this task) reads `Ok / Error` frames in matching FIFO order.
+    /// The OS pipe between client stdin and the SSH child plus SSH's
+    /// own send window provide natural backpressure when the server
+    /// hasn't drained yet — no explicit channel needed.
+    ///
+    /// Skips the dedup pre-flight unconditionally (dedup needs a
+    /// HaveBlocks/MissingBlocks round trip per file, which would
+    /// re-introduce the very serialization we're trying to remove).
+    /// Caller should keep large files (where dedup wins) on the
+    /// per-file `put()` path.
+    ///
+    /// Bails on the first error (writer-side I/O failure, server `Error`
+    /// frame, or unexpected message). After a failure the connection is
+    /// left in an indeterminate state — the writer task may have
+    /// half-flushed a frame, the server may have queued unread replies —
+    /// so the caller should drop the client rather than try another op.
+    pub async fn pipelined_put_files<F>(
+        &mut self,
+        files: Vec<(String, std::path::PathBuf, u64)>,
+        mut on_complete: F,
+    ) -> Result<Vec<[u8; 32]>, BcmrError>
+    where
+        F: FnMut(usize, &Path, u64),
+    {
+        let n = files.len();
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+
+        let stdin = self.stdin.take().ok_or_else(|| {
+            BcmrError::InvalidInput("stdin already taken (concurrent op?)".into())
+        })?;
+        let algo = self.algo;
+        let progress: Vec<(std::path::PathBuf, u64)> =
+            files.iter().map(|(_, p, s)| (p.clone(), *s)).collect();
+
+        let writer: tokio::task::JoinHandle<Result<ChildStdin, BcmrError>> =
+            tokio::spawn(async move {
+                let mut stdin = stdin;
+                for (remote_path, data_path, size) in files {
+                    protocol::write_message(
+                        &mut stdin,
+                        &Message::Put {
+                            path: remote_path,
+                            size,
+                        },
+                    )
+                    .await?;
+                    write_file_data_frames(&mut stdin, &data_path, algo).await?;
+                    protocol::write_message(&mut stdin, &Message::Done).await?;
+                }
+                Ok(stdin)
+            });
+
+        let mut hashes: Vec<[u8; 32]> = Vec::with_capacity(n);
+        let mut recv_err: Option<BcmrError> = None;
+        for (i, (path, size)) in progress.iter().enumerate() {
+            match self.recv().await {
+                Ok(Message::Ok { hash: Some(h) }) => match decode_hex32(&h) {
+                    Ok(arr) => {
+                        on_complete(i, path, *size);
+                        hashes.push(arr);
+                    }
+                    Err(e) => {
+                        recv_err = Some(e);
+                        break;
+                    }
+                },
+                Ok(Message::Ok { hash: None }) => {
+                    recv_err = Some(BcmrError::InvalidInput("put response missing hash".into()));
+                    break;
+                }
+                Ok(Message::Error { message }) => {
+                    recv_err = Some(BcmrError::InvalidInput(message));
+                    break;
+                }
+                Ok(other) => {
+                    recv_err = Some(BcmrError::InvalidInput(format!(
+                        "unexpected put response: {other:?}"
+                    )));
+                    break;
+                }
+                Err(e) => {
+                    recv_err = Some(e);
+                    break;
+                }
+            }
+        }
+
+        // If recv bailed mid-batch, the writer may still be pushing
+        // frames into a connection whose reply side is full — abort it
+        // before awaiting to avoid a deadlock where writer waits on stdin
+        // (server's stdin buffer is full because server is blocked on
+        // stdout writes that nobody is reading).
+        if recv_err.is_some() {
+            writer.abort();
+        }
+
+        match writer.await {
+            Ok(Ok(stdin_back)) => self.stdin = Some(stdin_back),
+            Ok(Err(writer_err)) => {
+                if recv_err.is_none() {
+                    return Err(writer_err);
+                }
+            }
+            Err(join_err) if !join_err.is_cancelled() => {
+                return Err(BcmrError::InvalidInput(format!(
+                    "writer task join failed: {join_err}"
+                )));
+            }
+            Err(_) => {} // cancelled by abort() — expected when recv_err is set
+        }
+
+        if let Some(e) = recv_err {
+            return Err(e);
+        }
+        Ok(hashes)
+    }
+
+    /// Stream-pipeline many GET requests over the same connection.
+    ///
+    /// Mirror image of `pipelined_put_files`: spawn a writer task that
+    /// emits all `Get { path }` requests in send order while this task
+    /// (the reader) consumes the resulting `Data* / Ok` streams and
+    /// writes each file's bytes to its destination. Server's dispatch
+    /// loop is FIFO so reply ordering matches send ordering — no
+    /// per-message correlation id needed.
+    ///
+    /// Each file's destination is created here (parent directory ensured
+    /// first). When `sync_after_each` is true, `sync_all()` is called on
+    /// the destination file before advancing to the next file's stream;
+    /// matches the per-PUT fsync behavior controlled by `CAP_SYNC` on
+    /// the upload side.
+    ///
+    /// `on_complete` fires after each file's `Ok` has been processed
+    /// and the dst file is closed (and fsynced when requested).
+    ///
+    /// Bails on the first `Error` frame or I/O failure; partial state
+    /// (some files completed, current file half-written) is the
+    /// caller's to clean up.
+    pub async fn pipelined_get_files<F>(
+        &mut self,
+        files: Vec<(String, std::path::PathBuf, u64)>,
+        sync_after_each: bool,
+        mut on_complete: F,
+    ) -> Result<(), BcmrError>
+    where
+        F: FnMut(usize, &Path, u64),
+    {
+        let n = files.len();
+        if n == 0 {
+            return Ok(());
+        }
+
+        let stdin = self.stdin.take().ok_or_else(|| {
+            BcmrError::InvalidInput("stdin already taken (concurrent op?)".into())
+        })?;
+
+        let request_paths: Vec<String> = files.iter().map(|(r, _, _)| r.clone()).collect();
+
+        // Writer task: send all N Get requests in order. Each request is
+        // ~30 bytes; even at N=10000 the cumulative ~300 KiB fits in the
+        // OS pipe + SSH socket buffer with room to spare. If the buffer
+        // *did* fill, write_message().await would naturally backpressure,
+        // so we don't bother with an explicit channel.
+        let writer: tokio::task::JoinHandle<Result<ChildStdin, BcmrError>> =
+            tokio::spawn(async move {
+                let mut stdin = stdin;
+                for path in request_paths {
+                    protocol::write_message(&mut stdin, &Message::Get { path, offset: 0 }).await?;
+                }
+                Ok(stdin)
+            });
+
+        let mut recv_err: Option<BcmrError> = None;
+        'files_loop: for (i, (_, local_path, _expected_size)) in files.iter().enumerate() {
+            if let Some(parent) = local_path.parent() {
+                if !parent.as_os_str().is_empty() && !parent.exists() {
+                    if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                        recv_err = Some(BcmrError::InvalidInput(format!(
+                            "create parent for {}: {e}",
+                            local_path.display()
+                        )));
+                        break;
+                    }
+                }
+            }
+            let mut dst = match std::fs::File::create(local_path) {
+                Ok(f) => f,
+                Err(e) => {
+                    recv_err = Some(BcmrError::InvalidInput(format!(
+                        "create dst {}: {e}",
+                        local_path.display()
+                    )));
+                    break;
+                }
+            };
+            let mut received: u64 = 0;
+            loop {
+                use std::io::Write;
+                match self.recv().await {
+                    Ok(Message::Data { payload }) => {
+                        if let Err(e) = dst.write_all(&payload) {
+                            recv_err = Some(BcmrError::InvalidInput(format!("write dst: {e}")));
+                            break 'files_loop;
+                        }
+                        received += payload.len() as u64;
+                    }
+                    Ok(Message::DataCompressed {
+                        algo,
+                        original_size,
+                        payload,
+                    }) => {
+                        let decoded = match compress::decode_block(algo, original_size, &payload) {
+                            Ok(d) => d,
+                            Err(e) => {
+                                recv_err =
+                                    Some(BcmrError::InvalidInput(format!("decompress: {e}")));
+                                break 'files_loop;
+                            }
+                        };
+                        if let Err(e) = dst.write_all(&decoded) {
+                            recv_err = Some(BcmrError::InvalidInput(format!("write dst: {e}")));
+                            break 'files_loop;
+                        }
+                        received += decoded.len() as u64;
+                    }
+                    Ok(Message::Ok { .. }) => {
+                        if sync_after_each {
+                            if let Err(e) = dst.sync_all() {
+                                recv_err = Some(BcmrError::InvalidInput(format!("fsync dst: {e}")));
+                                break 'files_loop;
+                            }
+                        }
+                        drop(dst);
+                        on_complete(i, local_path, received);
+                        break; // next file
+                    }
+                    Ok(Message::Error { message }) => {
+                        recv_err = Some(BcmrError::InvalidInput(message));
+                        break 'files_loop;
+                    }
+                    Ok(other) => {
+                        recv_err = Some(BcmrError::InvalidInput(format!(
+                            "unexpected get response: {other:?}"
+                        )));
+                        break 'files_loop;
+                    }
+                    Err(e) => {
+                        recv_err = Some(e);
+                        break 'files_loop;
+                    }
+                }
+            }
+        }
+
+        // If we bailed, abort the writer so it stops queuing more requests
+        // into the now-doomed connection. The writer task will end either
+        // via abort (mid-write) or by completing if all sends were already
+        // queued before we bailed.
+        if recv_err.is_some() {
+            writer.abort();
+        }
+
+        match writer.await {
+            Ok(Ok(stdin_back)) => self.stdin = Some(stdin_back),
+            Ok(Err(writer_err)) => {
+                if recv_err.is_none() {
+                    return Err(writer_err);
+                }
+            }
+            Err(join_err) if !join_err.is_cancelled() => {
+                return Err(BcmrError::InvalidInput(format!(
+                    "writer task join failed: {join_err}"
+                )));
+            }
+            Err(_) => {} // cancelled by abort() — expected when recv_err is set
+        }
+
+        if let Some(e) = recv_err {
+            return Err(e);
         }
         Ok(())
     }
@@ -420,6 +718,32 @@ impl Drop for ServeClient {
     fn drop(&mut self) {
         let _ = self.child.start_kill();
     }
+}
+
+/// Read `data` and emit it as a sequence of `Data` (or compressed) frames
+/// to `writer`. Used by both the single-file `put_streaming` path and the
+/// many-file `pipelined_put_files` writer task; extracting it here keeps
+/// the encode-loop in one place so a change to chunking, compression
+/// negotiation, or framing can't drift between the two callers.
+async fn write_file_data_frames<W>(
+    writer: &mut W,
+    data: &Path,
+    algo: CompressionAlgo,
+) -> Result<(), BcmrError>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let mut file = File::open(data).await?;
+    let mut buf = vec![0u8; DEDUP_BLOCK_SIZE];
+    loop {
+        let n = file.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        let frame = compress::encode_block(algo, buf[..n].to_vec());
+        protocol::write_message(writer, &frame).await?;
+    }
+    Ok(())
 }
 
 fn decode_hex32(hex: &str) -> Result<[u8; 32], BcmrError> {
