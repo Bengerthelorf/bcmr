@@ -28,6 +28,19 @@
 
 ---
 
+## 项目定位
+
+bcmr 是 **`cp` / `mv` / `rm` / `scp` 的现代替代**，**不是 rsync 的替代**。具体来说：
+
+- **单文件复制**（本地或 SSH 远程）：对比 cp 和 scp 有优势 — inline BLAKE3 完整性校验、$\mathcal{O}(1)$ resume 校验、原子化崩溃安全写入、线路层 Zstd/LZ4 压缩。
+- **多文件复制** (`bcmr copy -r`)：在"很多小文件"场景下与 cp/rsync 持平或更快（已测量）；单个大文件场景下比 cp 慢约 1.6 倍。
+- **它不是什么**：delta-sync 工具。bcmr 的内容寻址去重按 **整块 4 MiB** 匹配 — 对"重复上传同一个 artifact"可靠，对"100 GB 文件里只改了 3 MB"毫无用处。rsync 的 rolling-checksum 解决后者，我们不解决。
+- **对标 `rsync -a` 的元数据完整性**：部分支持。mode、mtime、xattr 已保留；ACL、BSD 文件标志位、硬链接图谱尚未。
+
+相关测量见 [技术内幕](https://app.snaix.homes/bcmr/ablation/) 页面。
+
+---
+
 ## 亮点
 
 - 📊 **进度显示** — 精美 TUI 界面，渐变进度条、ETA、速度、逐文件追踪。也提供纯文本模式

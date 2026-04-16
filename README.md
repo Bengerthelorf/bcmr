@@ -28,6 +28,31 @@ Installation, shell integration, CLI reference, configuration, and more.
 
 ---
 
+## Scope
+
+bcmr is a **modern `cp` / `mv` / `rm` / `scp` replacement**, not an
+`rsync` replacement. Concretely:
+
+- **Single-file copy** (local or over SSH): has advantages over cp
+  and scp — inline BLAKE3 integrity, $\mathcal{O}(1)$ resume
+  verification, atomic crash-safe writes, wire-level Zstd/LZ4.
+- **Many-file copy** (`bcmr copy -r`): on many-small-files workloads
+  it's competitive with or faster than both cp and rsync (measured);
+  on single large files it's within ~1.6× of cp.
+- **What it is not**: a delta-sync tool. bcmr's content-addressed
+  dedup matches **whole 4 MiB blocks** only — reliable for
+  "re-upload the same artifact", useless for "the 3 MB of a 100 GB
+  file that changed". rsync's rolling-checksum handles the latter;
+  we don't.
+- **Preservation parity with `rsync -a`**: partial. Mode, mtime, and
+  xattrs are preserved; ACLs, BSD flags, and hardlink graphs are
+  not yet.
+
+See the [Internals](https://app.snaix.homes/bcmr/ablation/) page
+for the measurements behind these claims.
+
+---
+
 ## Highlights
 
 - 📊 **Progress Display** — Fancy TUI box with gradient bar, ETA, speed, per-file tracking. Plain text mode for logs and pipes

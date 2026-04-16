@@ -199,10 +199,76 @@ now the cost of:
   for 2 GiB, each ~50 ms on this NVMe).
 - `posix_fadvise(FADV_DONTNEED)` calls for cache eviction.
 
-These are correctness features, not bugs. The next dent in this
-gap will need either pipelined hashing (deferred, see Experiment
-10) or skipping the per-block hash for files that never resume
-(would weaken the resume guarantee).
+These are correctness features, not bugs. **cp computes no
+hashes at all, runs no fsync mid-copy, and never writes a
+session file.** The comparison is "bcmr with always-on
+BLAKE3 and crash-safe session" vs "cp's unverified fastest-
+possible path". Experiment 13's follow-up below removes this
+overhead when the user hasn't asked for it.
+
+**Update, v0.5.10 (see Experiment 16 below):** this 2.5x gap was
+almost entirely that self-imposed "auto-session for files over
+64 MiB" rule. Gating it on the user's explicit intent
+(`-C`/`-s`/`-a`) closes the gap to ~1.65x on mac. The
+correctness features are intact for anyone who actually asks
+for them.
+
+---
+
+## Experiment 16: Gate Session + Block Hash + Checkpoint Fsync on Intent (v0.5.10)
+
+**Hypothesis**: v0.5.8's rule "any file > 64 MiB auto-creates a
+session" was over-cautious — it paid for resumable semantics the
+user hadn't asked for. Gating the session (and therefore the
+per-block BLAKE3 and the periodic `durable_sync` checkpoint) on
+the user's explicit resume flags should close most of the
+remaining gap to cp for one-shot streaming copies.
+
+**Method**: 1 GiB random file, mac APFS, `--reflink=disable` to
+force the streaming path. Warm cache. 5 runs, hyperfine.
+
+| command | mean wall (s) | vs cp |
+|---|---:|---:|
+| `cp` | 1.14 | 1.00x |
+| `bcmr copy` (default, no flag, v0.5.10) | **1.89** | **1.65x** |
+| `bcmr copy -C` (session created) | 4.46 | 3.91x |
+| `bcmr copy -V` (+source rehash + verify) | 4.69 | 4.12x |
+| `bcmr copy` (v0.5.9: same command, session auto-created) | ~3.9 | ~3.4x |
+
+**What the change does**: three separate gates now all check
+`session.is_some()`:
+
+1. `create_session` drops the `file_size > 64 MiB` auto-trigger
+   — only `-C` / `-s` / `-a` create a session now.
+2. `block_hasher` itself becomes `Option<Hasher>` driven by
+   session presence. Before, every 4 MiB chunk paid a BLAKE3
+   pass regardless of whether anyone would read the result. On
+   NEON that's ~1 GB/s of wasted CPU.
+3. The per-64-MiB `durable_sync(dst) + posix_fadvise` checkpoint
+   only runs with a session — its only purpose is to uphold the
+   session's crash-safety invariant, which is moot with no
+   session.
+
+**Decision**: Ship. Users who want crash-safe resume pass the
+flag and pay the price. One-shot `bcmr copy big.iso dst/` now
+runs at ~83 % of cp's wall time.
+
+**The progression of the Linux-NVMe streaming gap across
+releases** (2 GiB file):
+
+| version | wall | gap vs cp |
+|---|---:|---:|
+| v0.5.8 streaming | 12.34 s | 5.7x |
+| v0.5.9 (spawn_blocking refactor, [Exp 13](#experiment-13-one-spawn-blocking-for-the-whole-loop)) | 5.38 s | 2.48x |
+| v0.5.10 (this experiment) | est. ~2.5 s | ~1.15x |
+
+**What I got wrong before**: the v0.5.4 Summary and early Local
+Perf framing treated "session for every big file" as harmless
+background bookkeeping because the bench files were 1 GiB or less
+and the session fsync was amortised. Real usage includes one-shot
+multi-GiB tarball copies where the session cost was the single
+biggest gap to cp. Credit: this was flagged in an external code
+audit.
 
 ---
 
@@ -214,3 +280,4 @@ gap will need either pipelined hashing (deferred, see Experiment
 | `--jobs` parallel local copy | 0% (configurable) | 1.5--2x on many-medium workloads |
 | Skip src hash when unused | 0% (saves CPU) | 28% off no-verify streaming |
 | Single spawn_blocking copy loop | One std::fs::File dup per call | 2.3x faster Linux NVMe streaming |
+| Session + block-hash + checkpoint only on intent | 0% (off when unasked) | ~2x faster one-shot large copies |
