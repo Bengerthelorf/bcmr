@@ -89,6 +89,14 @@ pub async fn try_reflink(
 }
 
 /// Create a session, carrying forward block hashes from a prior session if resuming.
+///
+/// A session costs us the per-block hash, the checkpoint fdatasync
+/// every 64 MiB, and the atomic save of the session file itself.
+/// Before v0.5.10 we also created one automatically for any file
+/// over 64 MiB on the theory that the user might want to resume
+/// later. That was over-cautious: users who actually want resume
+/// pass -C / -s / -a. For one-shot large copies the session cost
+/// showed up as a ~2x gap vs cp. Gate on explicit intent only.
 #[allow(clippy::too_many_arguments)]
 pub fn create_session(
     src: &Path,
@@ -100,7 +108,7 @@ pub fn create_session(
     strict: bool,
     loaded_session: &Option<Session>,
 ) -> Option<Session> {
-    if !(resume || append || strict || file_size > 64 * 1024 * 1024) {
+    if !(resume || append || strict) {
         return None;
     }
 
@@ -193,7 +201,12 @@ fn streaming_copy_sync(
     let mut buffer = vec![0u8; COPY_BLOCK_SIZE as usize];
     let mut pending_hole = 0u64;
     let mut src_hasher = need_src_hash.then(blake3::Hasher::new);
-    let mut block_hasher = blake3::Hasher::new();
+    // Per-block hashes only exist to populate the session; if there's no
+    // session (one-shot copy, no -C/-s/-a), skip the per-byte hash
+    // entirely. Block_hasher at ~1 GB/s on NEON was the biggest
+    // remaining gap vs `cp` on large one-shot copies; this closes it
+    // for non-resume workloads without changing resume behaviour.
+    let mut block_hasher = session.as_ref().map(|_| blake3::Hasher::new());
     let mut bytes_in_block = 0u64;
     let mut blocks_since_checkpoint = 0u32;
 
@@ -206,7 +219,9 @@ fn streaming_copy_sync(
         if let Some(h) = src_hasher.as_mut() {
             h.update(&buffer[..n]);
         }
-        block_hasher.update(&buffer[..n]);
+        if let Some(h) = block_hasher.as_mut() {
+            h.update(&buffer[..n]);
+        }
         bytes_in_block += n as u64;
 
         match sparse_mode {
@@ -240,17 +255,23 @@ fn streaming_copy_sync(
         callback(n as u64);
 
         if bytes_in_block >= COPY_BLOCK_SIZE {
-            let block_hash = block_hasher.finalize();
-            if let Some(ref mut s) = session {
+            if let (Some(h), Some(s)) = (block_hasher.as_mut(), session.as_mut()) {
+                let block_hash = h.finalize();
                 s.add_block(*block_hash.as_bytes(), COPY_BLOCK_SIZE);
+                *h = blake3::Hasher::new();
             }
-            block_hasher = blake3::Hasher::new();
             bytes_in_block -= COPY_BLOCK_SIZE;
             blocks_since_checkpoint += 1;
 
             if blocks_since_checkpoint >= CHECKPOINT_INTERVAL_BLOCKS {
-                durable_io::durable_sync(&dst_file)?;
+                // The checkpoint exists to keep the session consistent
+                // with the on-disk dst: durable_sync lets us promise
+                // "every block ≤ session.n is physically on disk"
+                // (the crash-safety invariant). Without a session,
+                // nobody reads that promise — cp doesn't fsync
+                // mid-copy either. Skip.
                 if let Some(ref s) = session {
+                    durable_io::durable_sync(&dst_file)?;
                     let _ = s.save();
                 }
                 blocks_since_checkpoint = 0;
@@ -280,8 +301,8 @@ fn streaming_copy_sync(
     }
 
     if bytes_in_block > 0 {
-        let block_hash = block_hasher.finalize();
-        if let Some(ref mut s) = session {
+        if let (Some(h), Some(s)) = (block_hasher, session.as_mut()) {
+            let block_hash = h.finalize();
             s.add_block(*block_hash.as_bytes(), bytes_in_block);
         }
     }
