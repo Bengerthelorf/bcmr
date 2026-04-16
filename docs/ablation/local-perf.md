@@ -274,10 +274,16 @@ audit.
 
 ## Summary
 
-| Decision | Measured Cost | Measured Benefit |
+Every benefit below is tied to a specific workload. If you're
+looking for an apples-to-apples comparison against a different
+workload (huge single file / cold cache / HDD / very many files
+on a slow filesystem), the [Open Questions](/ablation/open-questions)
+page lists the measurement gaps honestly.
+
+| Decision | Measured Cost | Measured Benefit (workload) |
 |----------|-------------|-----------------|
-| Opt-in per-file fsync | ~0% (default skip) | 13x faster many-small-files |
-| `--jobs` parallel local copy | 0% (configurable) | 1.5--2x on many-medium workloads |
-| Skip src hash when unused | 0% (saves CPU) | 28% off no-verify streaming |
-| Single spawn_blocking copy loop | One std::fs::File dup per call | 2.3x faster Linux NVMe streaming |
-| Session + block-hash + checkpoint only on intent | 0% (off when unasked) | ~2x faster one-shot large copies |
+| Opt-in per-file fsync | ~0 % (default skip) | 13× (9.9 → 0.72 s) on 2100 × 4 KiB files, mac APFS warm cache |
+| `--jobs` parallel local copy | 0 % (configurable) | 1.67× (6.52 → 3.91 s) `-j1` → `-j32` on 10 000 × 64 KiB files, mac APFS warm cache |
+| Skip src hash when unused | 0 % (saves CPU) | 28 % (285 → 205 ms) on a 32 MiB streaming copy, no `--verify`, mac APFS |
+| Single spawn_blocking copy loop | One std::fs::File dup per call | 2.3× (12.3 → 5.38 s) on 2 GiB streaming copy, Linux NVMe ext4 |
+| Session + checkpoint gated on intent | 0 % (off when unasked) | ~2× (3.9 → 1.89 s) on 1 GiB streaming copy, mac APFS — lands at 1.65× of cp |

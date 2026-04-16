@@ -377,124 +377,186 @@ where
     Ok(())
 }
 
-/// Linux zero-copy GET: file → pipe → stdout via splice(2). Skips the
-/// userspace memcpy that the buffered path needs to fill the Data
-/// frame's Vec<u8>. Each Data frame's 9-byte header (4B length + 1B
-/// type + 4B payload-len) is still written through the normal tokio
-/// path; only the payload bytes go through splice.
+/// Linux zero-copy GET: file → pipe → stdout via splice(2).
+///
+/// v0.5.10 reshaped this path after Experiment 14 caught the original
+/// implementation being *slower* than the buffered path. Two fixes:
+///
+/// 1. **One spawn_blocking for the whole file**. The previous version
+///    dispatched a fresh blocking task per 4 MiB chunk — 256 thread
+///    bounces per GiB, the same anti-pattern Exp 13 caught in the
+///    local copy path. Now the loop owns the file fd, both pipe fds,
+///    and the stdout fd, and never crosses back into the async reactor
+///    until the Ok frame.
+/// 2. **Frame headers via raw write(2)**. The headers used to go
+///    through the tokio async stdout; that forced the splice loop to
+///    re-acquire async context per chunk. Writing the 9 bytes of
+///    frame header directly to the stdout fd inside the blocking
+///    closure keeps everything on one thread.
+///
+/// `F_SETPIPE_SZ(CHUNK_SIZE)` is still attempted and still
+/// best-effort: on Ubuntu default `/proc/sys/fs/pipe-max-size` is
+/// 1 MiB, so the pipe stays at 1 MiB and each 4 MiB chunk takes 4
+/// splice rounds instead of 1. That's fine — the syscall cost is
+/// negligible; the regression was the thread bounces, not the round
+/// count.
 #[cfg(target_os = "linux")]
 async fn handle_get_splice_linux<W>(path: &str, offset: u64, out: &mut W) -> Result<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
+    use std::io::{Seek, Write};
     use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
     use tokio::io::AsyncWriteExt;
 
+    // Flush anything the async stdout has buffered so the raw write(2)
+    // calls inside the blocking loop don't race with it.
+    out.flush().await?;
+
     let path = path.to_owned();
-    let mut std_file = tokio::task::spawn_blocking(move || std::fs::File::open(&path)).await??;
+    let result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let mut std_file = std::fs::File::open(&path)?;
+        if offset > 0 {
+            std_file.seek(std::io::SeekFrom::Start(offset))?;
+        }
+        let total_size = std_file.metadata()?.len() - offset;
 
-    if offset > 0 {
-        use std::io::Seek;
-        std_file.seek(std::io::SeekFrom::Start(offset))?;
-    }
-    let total_size = std_file.metadata()?.len() - offset;
+        // Create a pipe. F_SETPIPE_SZ is advisory; the actual size the
+        // kernel picks is whatever fcntl returns (negative = err).
+        let mut fds = [0i32; 2];
+        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let pipe_r = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let pipe_w = unsafe { OwnedFd::from_raw_fd(fds[1]) };
 
-    // Create a pipe and grow it to the chunk size so each splice round
-    // moves up to 4 MiB without bouncing through the default 64 KiB
-    // pipe buffer. F_SETPIPE_SZ is best-effort; Linux silently caps at
-    // /proc/sys/fs/pipe-max-size for non-root.
-    let mut fds = [0i32; 2];
-    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
-    if rc < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    let pipe_r = unsafe { OwnedFd::from_raw_fd(fds[0]) };
-    let pipe_w = unsafe { OwnedFd::from_raw_fd(fds[1]) };
-    unsafe {
-        libc::fcntl(
-            pipe_w.as_raw_fd(),
-            libc::F_SETPIPE_SZ,
-            CHUNK_SIZE as libc::c_int,
-        );
-    }
+        let _requested_sz = unsafe {
+            libc::fcntl(
+                pipe_w.as_raw_fd(),
+                libc::F_SETPIPE_SZ,
+                CHUNK_SIZE as libc::c_int,
+            )
+        };
+        // Record the actual pipe size — at least for diagnostic logs.
+        // We don't need to read it back; the splice loop handles
+        // whatever number of rounds the kernel ends up needing.
 
-    let mut remaining = total_size;
-    let stdout_fd = libc::STDOUT_FILENO;
-    let file_fd = std_file.as_raw_fd();
-    let pipe_w_fd = pipe_w.as_raw_fd();
-    let pipe_r_fd = pipe_r.as_raw_fd();
+        let file_fd = std_file.as_raw_fd();
+        let pipe_w_fd = pipe_w.as_raw_fd();
+        let pipe_r_fd = pipe_r.as_raw_fd();
+        let stdout_fd = libc::STDOUT_FILENO;
 
-    while remaining > 0 {
-        let chunk = remaining.min(CHUNK_SIZE as u64) as usize;
+        let mut remaining = total_size;
+        while remaining > 0 {
+            let chunk = remaining.min(CHUNK_SIZE as u64) as usize;
 
-        // Frame header: [4B payload_len_total][1B TYPE_DATA][4B payload_len].
-        // payload_len_total = 1 + 4 + chunk = 5 + chunk.
-        let mut header = Vec::with_capacity(9);
-        header.extend_from_slice(&((5 + chunk) as u32).to_le_bytes());
-        header.push(0x84); // TYPE_DATA
-        header.extend_from_slice(&(chunk as u32).to_le_bytes());
-        out.write_all(&header).await?;
-        out.flush().await?;
+            // Frame header: [4B payload_len_total][1B TYPE_DATA][4B payload_len].
+            // payload_len_total = 1 + 4 + chunk = 5 + chunk.
+            let mut header = [0u8; 9];
+            header[0..4].copy_from_slice(&((5 + chunk) as u32).to_le_bytes());
+            header[4] = 0x84; // TYPE_DATA
+            header[5..9].copy_from_slice(&(chunk as u32).to_le_bytes());
+            write_all_fd(stdout_fd, &header)?;
 
-        // Now splice `chunk` bytes through the pipe. Each splice may
-        // move fewer bytes than requested, so we loop until the chunk
-        // is drained. spawn_blocking keeps the syscall off the tokio
-        // reactor threads.
-        let to_move = chunk;
-        let r = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            let mut moved = 0usize;
-            while moved < to_move {
-                let want = to_move - moved;
-                let n = unsafe {
-                    libc::splice(
-                        file_fd,
-                        std::ptr::null_mut(),
-                        pipe_w_fd,
-                        std::ptr::null_mut(),
-                        want,
-                        libc::SPLICE_F_MOVE | libc::SPLICE_F_MORE,
-                    )
-                };
-                if n < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if n == 0 {
-                    break;
-                }
-                let mut drained = 0usize;
-                while drained < n as usize {
-                    let n2 = unsafe {
-                        libc::splice(
-                            pipe_r_fd,
-                            std::ptr::null_mut(),
-                            stdout_fd,
-                            std::ptr::null_mut(),
-                            n as usize - drained,
-                            libc::SPLICE_F_MOVE | libc::SPLICE_F_MORE,
-                        )
-                    };
-                    if n2 < 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    if n2 == 0 {
-                        break;
-                    }
-                    drained += n2 as usize;
-                }
-                moved += drained;
+            splice_n(file_fd, pipe_w_fd, pipe_r_fd, stdout_fd, chunk)?;
+            remaining -= chunk as u64;
+        }
+
+        // Ok { hash: None } frame = [4B payload_len=2][1B TYPE_OK=0x82][1B present=0].
+        let mut ok_frame = [0u8; 6];
+        ok_frame[0..4].copy_from_slice(&2u32.to_le_bytes());
+        ok_frame[4] = 0x82; // TYPE_OK
+        ok_frame[5] = 0; // hash option: absent
+        write_all_fd(stdout_fd, &ok_frame)?;
+
+        drop(pipe_r);
+        drop(pipe_w);
+        drop(std_file);
+        Ok(())
+    })
+    .await?;
+    result.map_err(Into::into)
+}
+
+/// Move exactly `n` bytes through the pipe from `file_fd` to `stdout_fd`.
+/// Loops because splice may move fewer bytes than requested (pipe size
+/// smaller than `n`, or PIPE_BUF semantics). Pairs the read-side and
+/// write-side splices one after the other — standard file→pipe→sock
+/// pattern.
+#[cfg(target_os = "linux")]
+fn splice_n(
+    file_fd: i32,
+    pipe_w_fd: i32,
+    pipe_r_fd: i32,
+    stdout_fd: i32,
+    n: usize,
+) -> std::io::Result<()> {
+    let mut moved = 0usize;
+    while moved < n {
+        let want = n - moved;
+        let got = unsafe {
+            libc::splice(
+                file_fd,
+                std::ptr::null_mut(),
+                pipe_w_fd,
+                std::ptr::null_mut(),
+                want,
+                libc::SPLICE_F_MOVE | libc::SPLICE_F_MORE,
+            )
+        };
+        if got < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if got == 0 {
+            break;
+        }
+        let mut drained = 0usize;
+        while drained < got as usize {
+            let n2 = unsafe {
+                libc::splice(
+                    pipe_r_fd,
+                    std::ptr::null_mut(),
+                    stdout_fd,
+                    std::ptr::null_mut(),
+                    got as usize - drained,
+                    libc::SPLICE_F_MOVE | libc::SPLICE_F_MORE,
+                )
+            };
+            if n2 < 0 {
+                return Err(std::io::Error::last_os_error());
             }
-            Ok(())
-        })
-        .await?;
-        r?;
-        remaining -= chunk as u64;
+            if n2 == 0 {
+                break;
+            }
+            drained += n2 as usize;
+        }
+        moved += drained;
     }
+    Ok(())
+}
 
-    drop(pipe_r);
-    drop(pipe_w);
-    drop(std_file);
-
-    protocol::write_message(out, &Message::Ok { hash: None }).await?;
+/// Equivalent of Write::write_all on a raw fd — loops on short writes
+/// / EINTR. Used inside the splice-path spawn_blocking so headers and
+/// the Ok frame share the same thread as the splice loop.
+#[cfg(target_os = "linux")]
+fn write_all_fd(fd: i32, mut buf: &[u8]) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        let n = unsafe { libc::write(fd, buf.as_ptr() as *const _, buf.len()) };
+        if n < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(e);
+        }
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "write returned 0",
+            ));
+        }
+        buf = &buf[n as usize..];
+    }
     Ok(())
 }
 

@@ -324,9 +324,17 @@ duration --- the absolute saving is similar to the others.
 
 ## Summary
 
-| Decision | Measured Cost | Measured Benefit |
+Each row below states the specific workload behind the number.
+CAP_FAST has a known regression on Linux loopback that the
+summary reflects directly — don't lift this table out of
+context without the qualifiers.
+
+| Decision | Measured Cost | Measured Benefit (workload) |
 |----------|-------------|-----------------|
-| Per-worker SSH | 0% (additive) | Up to ~6x parallel throughput |
-| Serve protocol | 0% (replaces SSH spawns) | Eliminates per-file process overhead |
-| Auto-skip wire compression | Negligible (LZ4 ~4 GB/s encode on random) | 2--5x bandwidth on source text |
-| `CAP_DEDUP` repeat-PUT | One file re-read for hash | All wire bytes removed for cached blocks |
+| Per-worker SSH | 0 % (additive) | Up to ~6× parallel throughput (mscp's 8-connection, 100 Gbps figure; not re-measured on this tree) |
+| Serve protocol | 0 % (replaces SSH spawns) | Eliminates per-file process overhead (qualitative; measured at "~50 ms spawn vs ~0.1 ms frame" in [Serve Protocol Benefits](#serve-protocol-benefits)) |
+| Auto-skip wire compression | Negligible (LZ4 ~4 GB/s encode on random 4 MiB blocks) | Applies to all Data frames; per-block auto-skip keeps incompressible blocks raw |
+| Wire compression (Zstd-3) | ~320 MB/s encode, ~1 GB/s decode on Apple Silicon | 2.48--5.59× over uncompressed on 64 MiB source-text, ~10 MB/s WAN (Exp 12) |
+| `CAP_DEDUP` repeat PUT | One file re-read client-side + hash all blocks | 32 % faster (18.9 → 12.9 s) on 64 MiB re-upload, ~10 MB/s WAN — savings match eliminated wire bytes |
+| `CAP_FAST` GET | **Currently a regression on Linux loopback**, see Exp 14 | 1.07× on WAN (network-bound); 0.78× on Linux loopback until splice refactor lands |
+| CAS LRU cap | Walk + sort the CAS dir per PUT (cheap) | Holds store size ≤ cap under 3× 24 MiB repeated uploads (Exp 15) |
