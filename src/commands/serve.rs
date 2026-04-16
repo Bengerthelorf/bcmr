@@ -405,7 +405,7 @@ async fn handle_get_splice_linux<W>(path: &str, offset: u64, out: &mut W) -> Res
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
-    use std::io::{Seek, Write};
+    use std::io::Seek;
     use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
     use tokio::io::AsyncWriteExt;
 
