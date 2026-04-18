@@ -172,12 +172,38 @@ sparse = "auto"          # "auto" or "never"
 parallel_transfers = 4   # default number of parallel SCP workers
 compression = "auto"     # "auto", "force", or "off"
 
-update_check = "notify"  # "notify", "quiet", or "off"
+update_check = "off"     # "off" (default, no network), "quiet", or "notify"
 ```
 
 ## Contributing
 
 Issues and PRs welcome! See [GitHub Issues](https://github.com/Bengerthelorf/bcmr/issues).
+
+## Prior Art & Acknowledgments
+
+bcmr stands on the shoulders of work that defined what "file
+transfer over SSH" should feel like:
+
+- **[mscp](https://github.com/upa/mscp)** (GPL-3.0) — the
+  parallel-SSH-connections pattern that lets `bcmr serve
+  --parallel N` scale past scp's single-stream crypto ceiling
+  (see [Experiment 19](https://app.snaix.homes/bcmr/ablation/wire-protocol)).
+  bcmr's implementation is an independent reimplementation of
+  the concept in Rust, **not a derivative work** — no code was
+  copied, only the architectural idea (open N independent SSH
+  sessions, stripe files across them). Copyright protects
+  expression, not algorithms (17 USC 102(b) and analogous
+  provisions in other jurisdictions), so our Apache-2.0 license
+  stands.
+- **[HPN-SSH](https://www.psc.edu/hpn-ssh-home/)** — the
+  enlarged-window and NONE-cipher patches that showed how
+  constrained a stock OpenSSH data path really is. bcmr doesn't
+  require HPN patches, but the diagnosis of "SSH single-stream
+  crypto is the ceiling" is theirs.
+- **`cp` / `mv` / `rm` / `rsync` / `scp`** — the user experience
+  we benchmark against and try to earn a place alongside. The
+  `docs/ablation` experiments cite specific comparisons where
+  we win, lose, or draw.
 
 ## License
 

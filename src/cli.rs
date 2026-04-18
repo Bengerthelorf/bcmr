@@ -179,8 +179,8 @@ pub enum Commands {
         /// them — each session has its own cipher stream so this scales
         /// near-linearly until NIC/disk saturate. On the legacy SCP
         /// fallback path, the same flag controls parallel per-file SCP
-        /// workers. Default: 1 for serve, `scp.parallel_transfers` (4)
-        /// for SCP fallback.
+        /// workers. Default: `scp.parallel_transfers` from config
+        /// (4 out of the box), applied to both transports.
         #[arg(short = 'P', long)]
         parallel: Option<usize>,
     },

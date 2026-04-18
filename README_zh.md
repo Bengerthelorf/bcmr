@@ -160,12 +160,30 @@ sparse = "auto"          # "auto" 或 "never"
 parallel_transfers = 4   # 默认并行 SCP 工作线程数
 compression = "auto"     # "auto"、"force" 或 "off"
 
-update_check = "notify"  # "notify"、"quiet" 或 "off"
+update_check = "off"     # "off"（默认，不访问网络）、"quiet" 或 "notify"
 ```
 
 ## 贡献
 
 欢迎提交 Issue 和 PR！请访问 [GitHub Issues](https://github.com/Bengerthelorf/bcmr/issues)。
+
+## 技术借鉴与致谢
+
+bcmr 站在这些项目的肩膀上 — 它们定义了"SSH 上的文件传输"该有的样子：
+
+- **[mscp](https://github.com/upa/mscp)**（GPL-3.0）— 并行 SSH 连接
+  的思路，使得 `bcmr serve --parallel N` 能够突破 scp 的单流加密
+  天花板（详见[实验 19](https://app.snaix.homes/bcmr/zh/ablation/wire-protocol)）。
+  bcmr 的实现是这一概念在 Rust 中的**独立重写**，**不是衍生作品** —
+  没有复制任何代码，只借鉴了架构思路（开 N 条独立 SSH 会话、把文件
+  分散到各连接上）。版权法保护"表达"而非"算法/思想"（17 USC 102(b)
+  和其他司法辖区的类似条款），所以我们的 Apache-2.0 许可证不受影响。
+- **[HPN-SSH](https://www.psc.edu/hpn-ssh-home/)** — 扩大接收窗口和
+  NONE cipher 补丁，最早指出了标准 OpenSSH 数据通路的单核加密瓶颈。
+  bcmr 不依赖 HPN 补丁，但"SSH 单流加密是天花板"这个诊断来自他们。
+- **`cp` / `mv` / `rm` / `rsync` / `scp`** — 我们 benchmark 的对标
+  对象，也是我们想追上并赢过的 UX 标准。`docs/ablation` 的实验章节
+  列出了我们在哪些场景下赢、哪些场景下输、哪些场景下打平。
 
 ## 许可证
 

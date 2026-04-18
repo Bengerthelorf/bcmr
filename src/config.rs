@@ -42,9 +42,17 @@ pub struct Config {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum UpdateCheck {
-    #[default]
+    /// Check GitHub for a new release on every invocation and print a
+    /// one-line "update available" notice at the end. Requires network
+    /// and a GitHub API round trip per run.
     Notify,
+    /// Same network check, no print.
     Quiet,
+    /// No network. Default — bcmr is a local-first tool and shouldn't
+    /// hit the network for a local `cp`. Users who want update alerts
+    /// set this explicitly (notify / quiet) in
+    /// `~/.config/bcmr/config.toml`.
+    #[default]
     Off,
 }
 
@@ -201,7 +209,7 @@ impl Config {
             .unwrap()
             .set_default("scp.compression", defaults.scp.compression)
             .unwrap()
-            .set_default("update_check", "notify")
+            .set_default("update_check", "off")
             .unwrap();
 
         if let Some(user_dirs) = directories::UserDirs::new() {
@@ -247,7 +255,7 @@ mod tests {
     fn test_default_config() {
         let cfg = Config::default();
         assert_eq!(cfg.progress.style, "fancy");
-        assert_eq!(cfg.update_check, UpdateCheck::Notify);
+        assert_eq!(cfg.update_check, UpdateCheck::Off);
     }
 
     #[test]

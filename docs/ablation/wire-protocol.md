@@ -506,6 +506,33 @@ Near-linear through N=4, diminishing past that (box already
 running 90+ threads of other users' CPU work — we're taking what
 we can). **At N=8 bcmr beats scp by 24% on the same loaded box.**
 
+The scaling curve:
+
+```mermaid
+---
+config:
+  xyChart:
+    width: 700
+    height: 340
+  themeVariables:
+    xyChart:
+      titleColor: "#222"
+      plotColorPalette: "#7E6EAC, #CABBE9"
+---
+xychart-beta
+    title "Exp 19: 10000 × 64 KiB on host-L under load ~93 (lower = faster)"
+    x-axis "Pool size N" [1, 2, 4, 8]
+    y-axis "Wall time (s)" 0 --> 80
+    line [67.3, 40.8, 23.7, 14.7]
+    line [19.4, 19.4, 19.4, 19.4]
+```
+
+The upper line is `bcmr copy -r --parallel N`, the flat line at
+19.4 s is the `scp -r` baseline — bcmr crosses below it between
+N=4 and N=8. The diminishing return past N=4 is the box telling
+us the NIC and disk queue have started bounding us; the crypto
+ceiling that limited N=1 is already gone by then.
+
 **Implementation**: New `ServeClientPool { clients: Vec<ServeClient> }`
 in `src/core/serve_client.rs`:
 

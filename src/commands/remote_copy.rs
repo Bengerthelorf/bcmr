@@ -272,14 +272,21 @@ pub async fn handle_remote_copy(
     };
     remote::validate_ssh_connection(&check_target).await?;
 
+    // One knob for both transports. Serve pool size (N independent SSH
+    // sessions for mscp-style crypto parallelism) and SCP fallback
+    // worker count share the same user-facing default — there's no
+    // ergonomic case for tuning them separately, and `scp.parallel_
+    // transfers` is the established config key (legacy name, applies
+    // to both now). Default = 4: enough to beat scp under normal load,
+    // within sshd's default MaxStartups headroom, handshake tax on
+    // small batches is bounded.
     let parallel = args.get_parallel().unwrap_or(CONFIG.scp.parallel_transfers);
-    // Serve-transport pool size: only opens multiple SSH connections when
-    // the user explicitly asked for it via --parallel. Defaulting to 1
-    // keeps small batches from paying N× handshake latency for no reason.
-    let serve_parallel = args.get_parallel().unwrap_or(1).max(1);
+    let serve_parallel = parallel.max(1);
 
     // Try bcmr serve protocol first — much faster than per-file SSH.
-    // Falls back silently to legacy SSH if remote doesn't have bcmr.
+    // Falls back to legacy SSH if remote doesn't have bcmr, OR if the
+    // server's --root jail rejected a path (common cause: default root
+    // is $HOME, a path like /tmp/foo escapes it and serve errors out).
     let ssh_target = check_target.ssh_target();
     let serve_result = if let Some(ref rdest) = remote_dest {
         handle_serve_upload(args, sources, rdest, &ssh_target, excludes, serve_parallel).await
@@ -289,8 +296,25 @@ pub async fn handle_remote_copy(
 
     match serve_result {
         Ok(()) => return Ok(()),
-        Err(_) => {
-            // Serve not available — fall back to legacy SSH
+        Err(e) => {
+            // Surface the reason instead of silently falling back. Users
+            // reported "bcmr copy of /tmp/foo takes 30 s where scp takes
+            // 2 s" because the fast path errored on a path-jail escape
+            // and we silently dropped to the slow SSH-per-file path.
+            // Warning here tells the user why, without changing
+            // behavior — they can fix with `bcmr serve --root /` on the
+            // remote or just accept the fallback for paths under their
+            // home.
+            let msg = e.to_string();
+            if !msg.contains("dry-run fallback") {
+                eprintln!(
+                    "bcmr: serve fast path unavailable ({msg}); \
+                     falling back to legacy SSH. If the remote has \
+                     bcmr but rejected a path outside the server root \
+                     jail, set `bcmr serve --root <path>` on the \
+                     remote to widen it."
+                );
+            }
         }
     }
 

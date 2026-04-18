@@ -23,7 +23,7 @@ box_style = "rounded"    # "rounded"（默认）、"double"、"heavy"、"single"
 reflink = "auto"         # "auto"（默认）、"force" 或 "disable"
 sparse = "auto"          # "auto"（默认）、"force" 或 "disable"
 
-update_check = "notify"  # "notify"（默认）、"quiet" 或 "off"
+update_check = "off"     # "off"（默认，不访问网络）、"quiet" 或 "notify"
 
 [scp]
 parallel_transfers = 4   # 并行 SSH 传输数（默认：4）

@@ -23,7 +23,7 @@ box_style = "rounded"    # "rounded"（預設）、"double"、"heavy"、"single"
 reflink = "auto"         # "auto"（預設）、"force" 或 "disable"
 sparse = "auto"          # "auto"（預設）、"force" 或 "disable"
 
-update_check = "notify"  # "notify"（預設）、"quiet" 或 "off"
+update_check = "off"     # "off"（預設，不存取網路）、"quiet" 或 "notify"
 
 [scp]
 parallel_transfers = 4   # 並行 SSH 傳輸數（預設：4）

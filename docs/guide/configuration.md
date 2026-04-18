@@ -23,7 +23,7 @@ box_style = "rounded"    # "rounded" (default), "double", "heavy", "single"
 reflink = "auto"         # "auto" (default), "force", or "disable"
 sparse = "auto"          # "auto" (default), "force", or "disable"
 
-update_check = "notify"  # "notify" (default), "quiet", or "off"
+update_check = "off"     # "off" (default, no network), "quiet", or "notify"
 
 [scp]
 parallel_transfers = 4   # concurrent SSH transfers (default: 4)
