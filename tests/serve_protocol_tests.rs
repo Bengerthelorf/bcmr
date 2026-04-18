@@ -325,3 +325,64 @@ async fn test_async_write_read_roundtrip() {
     let eof = read_message(&mut server).await.unwrap();
     assert_eq!(eof, None);
 }
+
+#[test]
+fn test_open_direct_channel_roundtrip() {
+    // Zero-field message — wire form is just the type tag.
+    assert_eq!(
+        roundtrip(Message::OpenDirectChannel),
+        Message::OpenDirectChannel
+    );
+}
+
+#[test]
+fn test_auth_hello_roundtrip() {
+    // Fixed 32-byte MAC payload; values chosen to be distinct from 0/ff
+    // so a "forgot to copy" bug would show up.
+    let mut mac = [0u8; 32];
+    for (i, b) in mac.iter_mut().enumerate() {
+        *b = (i * 7 + 3) as u8;
+    }
+    assert_eq!(
+        roundtrip(Message::AuthHello { mac }),
+        Message::AuthHello { mac }
+    );
+}
+
+#[test]
+fn test_direct_channel_ready_roundtrip() {
+    // String + fixed 32-byte key. Verifies the two-field layout
+    // decodes in the right order.
+    let mut key = [0u8; 32];
+    for (i, b) in key.iter_mut().enumerate() {
+        *b = 0xA0u8.wrapping_add(i as u8);
+    }
+    let msg = Message::DirectChannelReady {
+        addr: "127.0.0.1:47281".to_string(),
+        session_key: key,
+    };
+    assert_eq!(roundtrip(msg.clone()), msg);
+}
+
+#[test]
+fn test_direct_ready_addr_empty_string() {
+    // Edge case: empty addr. String length 0, but key bytes must still
+    // follow correctly.
+    let msg = Message::DirectChannelReady {
+        addr: String::new(),
+        session_key: [0x42; 32],
+    };
+    assert_eq!(roundtrip(msg.clone()), msg);
+}
+
+#[test]
+fn test_auth_hello_truncated_payload_returns_none() {
+    // A buggy implementation that accepted 31 bytes would corrupt the
+    // stream — the decode must reject short-tagged AuthHello frames.
+    // Build a frame manually: 1-byte type + 31 bytes (should need 32).
+    let mut payload = vec![0x0cu8]; // TYPE_AUTH_HELLO
+    payload.extend_from_slice(&[0u8; 31]);
+    let mut frame = (payload.len() as u32).to_le_bytes().to_vec();
+    frame.extend_from_slice(&payload);
+    assert_eq!(decode_message(&frame), None);
+}
