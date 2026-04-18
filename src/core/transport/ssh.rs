@@ -37,12 +37,19 @@ pub async fn spawn_local(bcmr_path: &std::path::Path) -> Result<SshSpawn, BcmrEr
 async fn spawn(args: &[&str]) -> Result<SshSpawn, BcmrError> {
     // stderr goes to /dev/null because OpenSSH diagnostics
     // (`Could not request local forwarding`, key-probe chatter) would
-    // interleave with the protocol stdout if passed through.
+    // interleave with the protocol stdout if passed through. Set
+    // BCMR_DEBUG_SSH_STDERR=1 in the environment to surface remote
+    // bcmr stderr during local debugging.
+    let stderr_dest = if std::env::var("BCMR_DEBUG_SSH_STDERR").is_ok_and(|v| v == "1") {
+        std::process::Stdio::inherit()
+    } else {
+        std::process::Stdio::null()
+    };
     let child = Command::new("ssh")
         .args(args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(stderr_dest)
         .spawn()?;
     take_pipes(child)
 }

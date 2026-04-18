@@ -948,6 +948,29 @@ const RENDEZVOUS_ACCEPT_TIMEOUT_SECS: u64 = 30;
 /// (produced for some other future purpose) can't be replayed here.
 const AUTH_HELLO_TAG: &[u8] = b"bcmr-direct-v1";
 
+/// Pick the bind address for a rendezvous listener.
+///
+/// `$SSH_CONNECTION` carries `<client_ip> <client_port> <server_ip>
+/// <server_port>` for every sshd-launched child. The `server_ip` is
+/// the interface the client reached us on — the only IP guaranteed
+/// to route back. Binding there instead of `0.0.0.0` means the
+/// listener is only exposed on the network the caller already has
+/// a live SSH session with, not on every interface the host owns.
+/// Without `$SSH_CONNECTION` (tests, raw stdin invocations) we fall
+/// back to loopback.
+fn rendezvous_bind_ip() -> String {
+    match std::env::var("SSH_CONNECTION") {
+        Ok(v) => {
+            let parts: Vec<&str> = v.split_whitespace().collect();
+            if parts.len() == 4 {
+                return parts[2].to_string();
+            }
+            "127.0.0.1".to_string()
+        }
+        Err(_) => "127.0.0.1".to_string(),
+    }
+}
+
 fn handle_open_direct_channel(
     root: PathBuf,
 ) -> Result<(Message, tokio::task::JoinHandle<()>)> {
@@ -958,7 +981,8 @@ fn handle_open_direct_channel(
     // future stays outside run_session's state machine, which avoids
     // type-level async recursion (run_session → handle_open_direct_channel
     // → run_direct_session → run_session).
-    let std_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let bind_ip = rendezvous_bind_ip();
+    let std_listener = std::net::TcpListener::bind(format!("{bind_ip}:0"))?;
     std_listener.set_nonblocking(true)?;
     let addr = std_listener.local_addr()?;
     let listener = tokio::net::TcpListener::from_std(std_listener)?;
