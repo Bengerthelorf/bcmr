@@ -305,7 +305,7 @@ explicitly want it.
 
 The earlier Experiment 9 measured codec ratios in isolation; this
 one re-runs the protocol over real SSH connections to confirm the
-prediction. 64 MiB of source-text-like content from this MacBook to
+prediction. 64 MiB of source-text-like content from host-N to
 three peers, three runs each.
 
 | Peer | None (s) | LZ4 (s) | Zstd (s) | Zstd vs None |
@@ -596,116 +596,61 @@ routing we don't have; tracked in
 
 ---
 
-## Experiment 20: Direct-TCP Data Plane (Path B) Beats SSH 3.7× Over LAN
+## Experiment 20: Direct-TCP Data Plane (Path B) Beats scp 2.84× on a Single Large File
 
-**Hypothesis**: OpenSSH serialises the entire session through a
-single cipher stream. Even on a link whose raw TCP capacity is
-well below the CPU's crypto rate, the SSH framing + cipher
-pipeline can throttle a single bcmr connection noticeably below
-the network ceiling. Carving off the data plane onto a separate
-AEAD-framed TCP socket should lift that ceiling.
+**Hypothesis**: OpenSSH serialises an entire session through one
+cipher stream, so single-file copies over SSH are walled in at a
+fraction of the link capacity even when the CPU has plenty of
+AES-GCM headroom. Carving the data plane onto a dedicated
+AEAD-framed TCP socket (SSH kept only for auth + rendezvous)
+should lift that ceiling to within noise of the raw TCP rate.
 
-**Setup**:
+**Method**: 1 GiB random file, host-N → host-L GET, LAN link
+(single-stream `iperf3 -t 5` reports **41 MiB/s** as the
+physical ceiling). `--compress=none --fast` to keep the number
+about transport cost, not Zstd or BLAKE3. 3 iterations per mode
+(best-of-3 reported — WiFi variance is enough that a median
+blurs the peak-achievable rate[^1]), fresh dst file each run.
 
-- **Client**: MacBook (Apple Silicon, M-series AES-NI ~5 GB/s),
-  release build of bcmr v0.5.19 on `path-b/direct-tcp`.
-- **Server**: `4090_j` (Xeon-era Dell Precision 7920, Linux 6.8,
-  OpenSSH 8.x), release build of the same tree.
-- **Link**: `laptop → 4090_j` over the home LAN. `iperf3 -t 5`
-  between the two peers reports a sustained **~325 Mbit/s = 41
-  MiB/s** — the physical ceiling for any single TCP stream on
-  this path.
-- **Workload**: GET a 1 GiB random file (`~/bench/src1g.bin` on
-  the server) into `/tmp/bcmr-bench/got.bin` on the client.
-  Random data so wire compression can't distort the number.
-  `--compress=none --fast` to remove the Zstd/BLAKE3 variables.
-- **Iterations**: 3 per mode, fresh dst file each run, no warm-up
-  between modes.
+| Command | best-of-3 | vs scp |
+|---------|----------:|-------:|
+| `scp` | 9.4 MiB/s | — |
+| `bcmr --direct=ssh` | 8.7 MiB/s | 0.93× |
+| `bcmr --direct=direct` | **26.7 MiB/s** | **2.84×** |
+| `bcmr --direct=ssh --parallel=4` | 8.4 MiB/s | 0.89× |
+| `bcmr --direct=direct --parallel=4` | 27.8 MiB/s | 2.96× |
+| iperf3 single-stream ceiling | 41 MiB/s | 4.36× |
 
-**Results** (1 GiB GET, 3 iterations per mode, reporting
-best-of-3 throughput — home WiFi introduces enough variance that
-a median smears the peak-achievable number):
+**Reading**: SSH mode tracks `scp` — same OpenSSH stream, same
+ceiling — and lands within noise of it. **Direct-TCP is 2.84×
+scp** and reaches 65 % of the raw TCP rate; SSH mode stays at
+23 %. `--parallel=4` doesn't help a single 1 GiB file: no
+per-file chunk routing exists on this branch, so the extra
+sessions only add handshake cost. `--parallel` earns its keep on
+multi-file batches (Exp 19), not on one big file.
 
-| Mode | Per-iter (s / MiB/s) | best-of-3 | vs scp |
-|------|----------------------|-----------|--------|
-| `scp` (single SSH)              | 116 / 8.8,  111 / 9.2,  108 / 9.4 | **9.4 MiB/s** | — |
-| `bcmr --direct=ssh`             | 117 / 8.7,  136 / 7.5,  121 / 8.4 | 8.7 MiB/s | 0.93× |
-| `bcmr --direct=direct`          | 63 / 16.3,  81 / 12.7,  38 / 26.7 | **26.7 MiB/s** | **2.84×** |
-| `bcmr --direct=ssh --parallel=4`    | 122 / 8.4,  135 / 7.5,  179 / 5.7 | 8.4 MiB/s | 0.89× |
-| `bcmr --direct=direct --parallel=4` | 266 / 3.8,  71 / 14.3,  37 / 27.8 | **27.8 MiB/s** | **2.96×** |
-| iperf3 single-stream ceiling    | — | 41 MiB/s | 4.36× |
-
-- `bcmr --direct=ssh` ≈ `scp`. Both single SSH streams on this
-  pair, both serialised behind OpenSSH's transport. The 7 %
-  gap sits within WiFi noise.
-- **`bcmr --direct=direct` is 2.84× faster than `scp`** and
-  2.84–3.07× faster than `bcmr --direct=ssh`. Best-of-3 reaches
-  65 % of the raw TCP ceiling; SSH mode stays at 23 %.
-- `--parallel=4` on a single 1 GiB file doesn't help: SSH mode
-  just pays 4× the handshake cost for zero stream speedup (no
-  per-file chunk routing on this branch), and direct-TCP mode
-  is already past the point where parallelism matters on this
-  link. `--parallel` lands its gains on multi-file batches
-  (Experiment 19), not on one big file.
-
-**Integrity**: BLAKE3 of received file matches BLAKE3 of source
-across all runs (also verified out-of-band with `md5sum`).
-AEAD framing is active — `client.is_aead_negotiated()` returns
-true, confirmed by the `serve_direct_tcp_put_get_roundtrip`
-assertion.
-
-**Why SSH is so far below the NIC ceiling on this link**:
-
-OpenSSH's transport layer adds its own MACs, rekeys, and a
-single-threaded cipher stream. On CPUs with AES-NI the crypto
-itself isn't the bottleneck; what's left is serialisation cost
-(one stream handles its own framing, MAC, encrypt, syscalls in
-order). On this laptop/server pair that serialisation caps a
-single SSH session at ~9 MiB/s regardless of the NIC. Path B
-sidesteps it: SSH is used only for auth and rendezvous, and the
-data travels over a second TCP socket whose only in-kernel cost
-is the AES-GCM on bcmr's own 16 MiB frames.
-
-**What this bench doesn't show**:
-
-- **CPU-ceiling runs**: The faster the link, the more the AES
-  cost starts to matter. On a 10 GbE link the relevant ceiling
-  is the single-core AES-GCM rate (~5 GB/s on Apple Silicon,
-  ~1.5 GB/s on contended Xeon per `crypto_probe.rs`), which is
-  what Path B targets — still 10× OpenSSH's single-stream rate,
-  but now limited by crypto, not framing. Verifying that
-  requires a 10 GbE testbed we don't have here.
-- **Tiny-file batches**: Path B opens one TCP data session per
-  `ServeClientPool` connection. For 10000 × 64 KiB the pipelined
-  request path (Exp 18) still applies — the direct socket just
-  carries the same pipeline with less per-frame overhead. Not
-  re-measured here.
-- **PUT direction on this exact network pair**: the server-side
-  account on `4090_j` was at disk-quota during the bench window,
-  so GET is the only direction we have real-network numbers for.
-  The `serve_direct_tcp_put_get_roundtrip` e2e test covers both
-  directions on loopback; PUT over direct-TCP should land on the
-  same curve once the quota is cleared.
-- **mscp head-to-head**: `mscp` doesn't install cleanly on the
-  macOS client here and we don't want to stand up a Linux client
-  VM just for one bench row. Conceptually mscp ≈ N parallel SSH
-  sessions + per-file chunk routing, so on a *single large file*
-  it lands between `bcmr --direct=ssh --parallel=N` (no chunk
-  routing) and `bcmr --direct=direct` (no chunk routing either,
-  but also no SSH framing tax). On this branch the direct-TCP
-  path has no per-stream chunk routing, so a future "mscp-like"
-  bench needs the striping work tracked in Open Questions.
-- **Public-internet runs**: same mechanics; the win scales with
-  how far below the CPU ceiling the link sits. Any LAN-class
-  link where OpenSSH underuses the pipe will see a win; a 10
-  MB/s DSL uplink won't.
+**Integrity**: BLAKE3 of the received bytes matches the source on
+every run (cross-checked with `md5sum`). AEAD framing is active
+on every direct-TCP run — `is_aead_negotiated()` returns true,
+enforced by the `serve_direct_tcp_put_get_roundtrip` assertion.
 
 **Decision**: Ship. `--direct=ssh` stays the default (backwards
-compat, no new sshd permissions needed on the server). Users on
-LAN-class links who care about single-file throughput flip
-`--direct=direct` and take the 3--4× win. AEAD is mandatory on
-direct-TCP so the CLI flag can't silently drop the user into
-plaintext.
+compat, no new sshd config on the server). Users on LAN-class
+links flip `--direct=direct` and take the ~3× win on single
+large files. AEAD is mandatory on direct-TCP so the CLI can't
+silently drop into plaintext.
+
+[^1]: Per-iteration numbers — scp: 8.8, 9.2, 9.4 MiB/s · bcmr-ssh:
+8.7, 7.5, 8.4 · bcmr-direct: 16.3, 12.7, 26.7 · bcmr-ssh-4: 8.4,
+7.5, 5.7 · bcmr-direct-4: 3.8, 14.3, 27.8. WiFi fluctuation
+accounts for most of the spread inside each mode. A 10 GbE
+testbed would turn the bottleneck from transport framing into
+single-core AES-GCM (~5 GB/s host-N, ~1.5 GB/s host-L per
+`crypto_probe.rs`) — still an order of magnitude above OpenSSH,
+but we don't have the hardware to re-measure here. mscp isn't in
+the table because it doesn't install on host-N; conceptually it
+overlaps `bcmr --parallel=N` plus per-file chunk routing, and
+this branch doesn't yet stripe a single file across streams.
 
 ---
 
@@ -726,4 +671,4 @@ Don't lift this table out of context without the qualifiers.
 | `CAP_SYNC` per-file fsync gate | Negotiated bit; off by default (matches cp/scp) | 3.9× on 10000 × 64 KiB host-L loopback (24.75 → 6.35 s); ~10 % on 1 GiB single (Exp 17) |
 | Client-side request pipelining | Writer-task spawn per batch; writer.abort() on error path | 1.8× on 10000 × 64 KiB host-L loopback (6.35 → 3.58 s); lands at 1.18× of `scp -r` (Exp 18) |
 | `ServeClientPool` parallel SSH | `--parallel N` opts into N concurrent SSH sessions; default N=1 preserves old behavior | 4.58× scaling N=1→N=8 on host-L under load 93; bcmr N=8 **beats `scp -r` by 24%** (14.7 vs 19.4 s) on 10000 × 64 KiB (Exp 19) |
-| `--direct=direct` data plane | SSH used only for rendezvous; data over a dedicated TCP socket with AES-256-GCM framing (Path B) | **2.84× vs `scp`, 3.07× vs `bcmr --direct=ssh`** on 1 GiB GET over laptop↔home-WiFi link (best-of-3): scp 9.4 → bcmr-ssh 8.7 → bcmr-direct 26.7 MiB/s; iperf3 ceiling 41 MiB/s (Exp 20) |
+| `--direct=direct` data plane | SSH used only for auth + rendezvous; data over a dedicated AES-256-GCM-framed TCP socket (Path B) | **2.84× vs `scp`** on 1 GiB GET host-N → host-L (best-of-3): scp 9.4 → bcmr-ssh 8.7 → bcmr-direct 26.7 MiB/s; 65% of iperf3's 41 MiB/s ceiling (Exp 20) |
