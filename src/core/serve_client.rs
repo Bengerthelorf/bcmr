@@ -24,21 +24,31 @@ const AUTH_HELLO_TAG: &[u8] = b"bcmr-direct-v1";
 /// ProxyJump'd targets reach the server through a hop that plain TCP
 /// can't follow, so we point the user at `--direct=ssh` rather than
 /// at a generic timeout message.
-fn ssh_target_uses_proxyjump(target: &str) -> bool {
-    let Ok(out) = std::process::Command::new("ssh")
-        .args(["-G", target])
-        .output()
-    else {
-        return false;
-    };
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    stdout.lines().any(|line| {
-        let mut it = line.split_whitespace();
-        matches!(
-            (it.next(), it.next()),
-            (Some("proxyjump"), Some(v)) if v != "none"
-        )
+///
+/// `ssh -G` can take 50-500 ms (DNS, ssh_config parsing), so we run
+/// it off the async executor via `spawn_blocking` to avoid stalling
+/// other tasks. Always-false on failure — the diagnostic is best-
+/// effort.
+async fn ssh_target_uses_proxyjump(target: &str) -> bool {
+    let target = target.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let Ok(out) = std::process::Command::new("ssh")
+            .args(["-G", &target])
+            .output()
+        else {
+            return false;
+        };
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        stdout.lines().any(|line| {
+            let mut it = line.split_whitespace();
+            matches!(
+                (it.next(), it.next()),
+                (Some("proxyjump"), Some(v)) if v != "none"
+            )
+        })
     })
+    .await
+    .unwrap_or(false)
 }
 
 type BoxedReader = Box<dyn AsyncRead + Send + Unpin>;
@@ -257,8 +267,15 @@ impl ServeClient {
 
         protocol::write_message(&mut spawn.stdin, &Message::OpenDirectChannel).await?;
         spawn.stdin.flush().await?;
+        // Wrap the received session key in Zeroizing as early as the
+        // decode boundary, so every downstream reference to it
+        // (AuthHello MAC, AEAD half construction) flows through a
+        // scope that scrubs the stack copy on drop. Matches what the
+        // server side does for its own copy.
         let (addr, session_key) = match protocol::read_message(&mut spawn.stdout).await? {
-            Some(Message::DirectChannelReady { addr, session_key }) => (addr, session_key),
+            Some(Message::DirectChannelReady { addr, session_key }) => {
+                (addr, zeroize::Zeroizing::new(session_key))
+            }
             Some(Message::Error { message }) => return Err(BcmrError::InvalidInput(message)),
             Some(other) => {
                 return Err(BcmrError::InvalidInput(format!(
@@ -284,7 +301,7 @@ impl ServeClient {
                      this client can't reach that address."
                 );
                 if let Some(target) = ssh_target {
-                    if ssh_target_uses_proxyjump(target) {
+                    if ssh_target_uses_proxyjump(target).await {
                         msg.push_str(
                             " This SSH target uses ProxyJump — when the jump host is on \
                              a different subnet from the client, direct-TCP rendezvous is \
@@ -1500,6 +1517,36 @@ impl ServeClientPool {
             return Err(BcmrError::InvalidInput("pool is empty".into()));
         }
         let file_size = tokio::fs::metadata(local).await?.len();
+
+        // Ask the server to create-and-truncate the dst to exactly
+        // file_size before any chunks start. Two reasons: (1) stale
+        // bytes past the new file's end from a prior run must not
+        // survive; (2) if file_size == 0 the fanout below produces
+        // zero active ranges and would never create the dst at all.
+        // Route through pool.first_mut() since it's a one-shot
+        // control op, not a data-path one.
+        self.clients[0]
+            .send(&Message::Truncate {
+                path: remote.to_owned(),
+                size: file_size,
+            })
+            .await?;
+        match self.clients[0].recv().await? {
+            Message::Ok { .. } => {}
+            Message::Error { message } => return Err(BcmrError::InvalidInput(message)),
+            other => {
+                return Err(BcmrError::InvalidInput(format!(
+                    "unexpected reply to Truncate: {other:?}"
+                )))
+            }
+        }
+
+        // Empty source: truncate already created the empty dst,
+        // hash is fixed, no fanout needed.
+        if file_size == 0 {
+            return Ok(*blake3::hash(b"").as_bytes());
+        }
+
         let n = self.clients.len() as u64;
         // Client-side whole-file hash: compute in parallel with the
         // transfer so the caller gets a final digest without a

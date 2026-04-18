@@ -187,9 +187,13 @@ where
     if direct_tcp_key.is_none() {
         offered_caps &= !CAP_AEAD;
     }
-    // Rendezvous listener handles; awaited before return so a dropped
-    // session cleans up anything it spun up.
-    let mut rendezvous_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    // Rendezvous listener handles held via a drop-guard so that
+    // cleanup runs on every `?`-propagated error exit, not just the
+    // happy path. An orphaned rendezvous task would otherwise keep a
+    // TCP listener bound on a random port until its own deadline
+    // fired, after the control session it belongs to has already
+    // gone away.
+    let mut rendezvous_tasks = RendezvousTasks::new();
 
     // Start in plain framing; flip to AEAD after Welcome if negotiated.
     let mut framing = Framing::plain();
@@ -423,12 +427,25 @@ where
                 Ok(p) => handle_mkdir(p.to_str().unwrap_or(&path)).await,
                 Err(e) => Err(e),
             },
+            Message::Truncate { path, size } => match validate_path(&path, root) {
+                Ok(p) => handle_truncate(p.to_str().unwrap_or(&path), size).await,
+                Err(e) => Err(e),
+            },
             Message::Resume { path } => match validate_path(&path, root) {
                 Ok(p) => handle_resume(p.to_str().unwrap_or(&path)).await,
                 Err(e) => Err(e),
             },
             Message::OpenDirectChannel => {
-                if direct_tcp {
+                if !direct_tcp {
+                    Err(anyhow::anyhow!(
+                        "CAP_DIRECT_TCP not negotiated on this session"
+                    ))
+                } else if rendezvous_tasks.len() >= MAX_RENDEZVOUS_PER_SESSION {
+                    Err(anyhow::anyhow!(
+                        "too many concurrent direct-TCP rendezvous requests \
+                         on this session (limit {MAX_RENDEZVOUS_PER_SESSION})"
+                    ))
+                } else {
                     match handle_open_direct_channel(root.to_path_buf()) {
                         Ok((msg, handle)) => {
                             rendezvous_tasks.push(handle);
@@ -436,10 +453,6 @@ where
                         }
                         Err(e) => Err(e),
                     }
-                } else {
-                    Err(anyhow::anyhow!(
-                        "CAP_DIRECT_TCP not negotiated on this session"
-                    ))
                 }
             }
             other => Err(anyhow::anyhow!("unexpected message: {other:?}")),
@@ -459,15 +472,12 @@ where
         writer.flush().await?;
     }
 
-    // Control session ended. Wait (don't abort) any rendezvous tasks:
-    // each runs a full sub-session over its own TCP socket and must
-    // complete its own data transfer before we tear down the process.
-    // The tasks are self-limiting — an unused listener gives up after
-    // RENDEZVOUS_ACCEPT_TIMEOUT_SECS — so this await is bounded.
-    for handle in rendezvous_tasks {
-        let _ = handle.await;
-    }
-
+    // Control session ended. Drain any rendezvous tasks synchronously
+    // so run_session doesn't return before their sub-sessions have
+    // completed. Drop-guard handles the error-propagation path, but
+    // on the happy path we prefer to await (not abort) so a still-
+    // running data session has a chance to finish its transfer.
+    rendezvous_tasks.drain_gracefully().await;
     Ok(())
 }
 
@@ -1121,10 +1131,89 @@ async fn handle_mkdir(path: &str) -> Result<Message> {
     Ok(Message::Ok { hash: None })
 }
 
+async fn handle_truncate(path: &str, size: u64) -> Result<Message> {
+    if let Some(parent) = Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).await?;
+        }
+    }
+    let f = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .await?;
+    f.set_len(size).await?;
+    Ok(Message::Ok { hash: None })
+}
+
 /// Seconds the rendezvous listener waits for the client to dial in
 /// before giving up. Bounds the resource hold so a client that opens
 /// a channel and then vanishes can't keep a listener alive forever.
+/// Override with `BCMR_RENDEZVOUS_TIMEOUT_SECS` for tests that need
+/// a tighter window.
 const RENDEZVOUS_ACCEPT_TIMEOUT_SECS: u64 = 30;
+
+/// Per-accepted-connection budget for reading the AuthHello frame.
+/// A squatter that connects and stalls bytes must not pin the
+/// rendezvous until the kernel's TCP keepalive fires — carved out of
+/// (and smaller than) the outer accept deadline so even N hostile
+/// connects can't exhaust the window.
+const AUTH_HELLO_READ_TIMEOUT_SECS: u64 = 2;
+
+/// Max concurrent rendezvous listeners per control session. An
+/// authenticated peer that hammers OpenDirectChannel otherwise eats
+/// file descriptors and ephemeral ports on the server. Four in
+/// flight matches the sane `--parallel` upper bound the client
+/// would ever reach.
+const MAX_RENDEZVOUS_PER_SESSION: usize = 16;
+
+fn rendezvous_accept_timeout() -> std::time::Duration {
+    let secs = std::env::var("BCMR_RENDEZVOUS_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(RENDEZVOUS_ACCEPT_TIMEOUT_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Owning collection of rendezvous task handles with Drop-based
+/// cleanup, so an error bubbling out of the dispatch loop via `?`
+/// doesn't orphan live listeners. `drain_gracefully` on the happy
+/// path awaits (lets data sessions finish); Drop on the error path
+/// aborts (caller already bailed, no point waiting).
+struct RendezvousTasks {
+    handles: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl RendezvousTasks {
+    fn new() -> Self {
+        Self {
+            handles: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, h: tokio::task::JoinHandle<()>) {
+        self.handles.push(h);
+    }
+
+    fn len(&self) -> usize {
+        self.handles.len()
+    }
+
+    async fn drain_gracefully(mut self) {
+        for h in self.handles.drain(..) {
+            let _ = h.await;
+        }
+    }
+}
+
+impl Drop for RendezvousTasks {
+    fn drop(&mut self) {
+        for h in &self.handles {
+            h.abort();
+        }
+    }
+}
 
 /// Domain-separation constant for the AuthHello MAC. Both peers feed
 /// this tag into `blake3::keyed_hash(session_key, ...)` so a MAC that
@@ -1142,17 +1231,21 @@ const AUTH_HELLO_TAG: &[u8] = b"bcmr-direct-v1";
 /// a live SSH session with, not on every interface the host owns.
 /// Without `$SSH_CONNECTION` (tests, raw stdin invocations) we fall
 /// back to loopback.
-fn rendezvous_bind_ip() -> String {
-    match std::env::var("SSH_CONNECTION") {
-        Ok(v) => {
-            let parts: Vec<&str> = v.split_whitespace().collect();
-            if parts.len() == 4 {
-                return parts[2].to_string();
-            }
-            "127.0.0.1".to_string()
+///
+/// Returns a parsed `IpAddr` so the caller can form a `SocketAddr`
+/// without string-concat quirks — IPv6 addresses in particular need
+/// bracket-framed host:port, which `format!("{ip}:0")` gets wrong.
+fn rendezvous_bind_ip() -> std::net::IpAddr {
+    use std::net::{IpAddr, Ipv4Addr};
+    let parsed = std::env::var("SSH_CONNECTION").ok().and_then(|v| {
+        let parts: Vec<&str> = v.split_whitespace().collect();
+        if parts.len() == 4 {
+            parts[2].parse::<IpAddr>().ok()
+        } else {
+            None
         }
-        Err(_) => "127.0.0.1".to_string(),
-    }
+    });
+    parsed.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
 }
 
 fn handle_open_direct_channel(
@@ -1161,12 +1254,21 @@ fn handle_open_direct_channel(
     use ring::rand::{SecureRandom, SystemRandom};
     use zeroize::Zeroizing;
 
-    // Bind synchronously so the function holds no await points — its
-    // future stays outside run_session's state machine, which avoids
-    // type-level async recursion (run_session → handle_open_direct_channel
-    // → run_direct_session → run_session).
-    let bind_ip = rendezvous_bind_ip();
-    let std_listener = std::net::TcpListener::bind(format!("{bind_ip}:0"))?;
+    // INVARIANT: this function is sync. Do not introduce `.await`
+    // anywhere in the body. The call chain run_session → here →
+    // (spawned) run_direct_session → run_session is a type-level
+    // recursion the compiler refuses to materialise; keeping this
+    // function's state machine empty is what breaks the cycle. If
+    // you find yourself wanting an async bind, use `spawn_blocking`
+    // or wrap the whole function in a boxed-future indirection —
+    // don't just sprinkle `.await` on the existing std::net calls.
+    //
+    // SocketAddr::new handles IPv6 without the bracket-formatting
+    // trap that `format!("{ip}:0")` falls into (IPv6 literals in
+    // host:port form need square brackets to disambiguate the final
+    // colon).
+    let bind_addr = std::net::SocketAddr::new(rendezvous_bind_ip(), 0);
+    let std_listener = std::net::TcpListener::bind(bind_addr)?;
     std_listener.set_nonblocking(true)?;
     let addr = std_listener.local_addr()?;
     let listener = tokio::net::TcpListener::from_std(std_listener)?;
@@ -1198,8 +1300,7 @@ async fn run_rendezvous(
     // that connects first must NOT be able to consume the listener
     // and starve the real client — close that connection, loop back,
     // and wait for the next one inside the same deadline.
-    let deadline =
-        tokio::time::Instant::now() + std::time::Duration::from_secs(RENDEZVOUS_ACCEPT_TIMEOUT_SECS);
+    let deadline = tokio::time::Instant::now() + rendezvous_accept_timeout();
     let authed = loop {
         let remaining = match deadline.checked_duration_since(tokio::time::Instant::now()) {
             Some(d) if !d.is_zero() => d,
@@ -1231,18 +1332,18 @@ async fn run_rendezvous(
 
 /// Consume the first frame of an accepted TCP stream and return
 /// `true` iff that frame is an AuthHello whose MAC matches the
-/// session key. On any failure (wrong frame type, MAC mismatch,
-/// I/O error) return `false` so the caller can drop the stream
-/// and keep accepting — no reply, no oracle for scanners.
-/// Takes `&mut` (not by-value) so subsequent frames on the same
-/// socket can still be read by `run_direct_session` without a
-/// split/reunite round-trip.
+/// session key. Wrapped in a per-connection read timeout so a
+/// squatter that connects and then stalls bytes (or dribbles a
+/// partial length prefix) can't pin the rendezvous until TCP
+/// keepalive — the budget is small so N hostile connects still
+/// can't exhaust the outer accept deadline.
 async fn verify_auth_hello(
     stream: &mut tokio::net::TcpStream,
     session_key: &[u8; 32],
 ) -> bool {
-    let mac = match protocol::read_message(stream).await {
-        Ok(Some(Message::AuthHello { mac })) => mac,
+    let read_budget = std::time::Duration::from_secs(AUTH_HELLO_READ_TIMEOUT_SECS);
+    let mac = match tokio::time::timeout(read_budget, protocol::read_message(stream)).await {
+        Ok(Ok(Some(Message::AuthHello { mac }))) => mac,
         _ => return false,
     };
     let expected = blake3::keyed_hash(session_key, AUTH_HELLO_TAG);

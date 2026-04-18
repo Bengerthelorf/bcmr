@@ -135,8 +135,16 @@ pub struct CopyMoveArgs {
     /// framing — bypasses SSH's single-stream cipher ceiling on fast
     /// networks. Fails hard if the server doesn't advertise
     /// CAP_DIRECT_TCP (v0.5.20+).
-    #[arg(long, default_value = "ssh")]
-    pub direct: String,
+    #[arg(long, value_enum, default_value_t = DirectMode::Ssh)]
+    pub direct: DirectMode,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum DirectMode {
+    /// Default: data over the same SSH channel as auth.
+    Ssh,
+    /// Data plane over a dedicated AES-256-GCM-framed TCP socket.
+    Direct,
 }
 
 #[derive(Subcommand, Debug)]
@@ -447,16 +455,16 @@ impl Commands {
         caps
     }
 
-    /// Parsed value of `--direct`. "ssh" (default) runs data over the
-    /// SSH channel; "direct" triggers rendezvous + AEAD-wrapped TCP.
-    /// Unrecognised strings fall through to ssh so a typo doesn't
-    /// silently flip to the encrypted-TCP path.
+    /// Parsed value of `--direct`. clap's value_enum rejects anything
+    /// other than the two documented variants at parse time, so this
+    /// accessor is a pure field read — no string matching, no typo
+    /// fallback. The old behaviour silently treated typos as `ssh`,
+    /// which is safer on the security axis but surprising on the
+    /// performance axis when a user explicitly asked for `direct`.
     pub fn use_direct_tcp(&self) -> bool {
         matches!(
-            self.copy_move_args()
-                .map(|a| a.direct.as_str())
-                .unwrap_or("ssh"),
-            "direct" | "tcp" | "on"
+            self.copy_move_args().map(|a| a.direct),
+            Some(DirectMode::Direct)
         )
     }
 
@@ -607,7 +615,7 @@ mod tests {
             jobs: None,
             compress: "auto".to_string(),
             fast: false,
-            direct: "ssh".to_string(),
+            direct: DirectMode::Ssh,
         }
     }
 

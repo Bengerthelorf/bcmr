@@ -28,8 +28,12 @@ async fn serve_open_direct_channel_reply_is_well_formed() {
     let exe = std::env::current_exe().unwrap();
     let bin_name = if cfg!(windows) { "bcmr.exe" } else { "bcmr" };
     let bin = exe.parent().unwrap().parent().unwrap().join(bin_name);
+    // Shorten the rendezvous accept timeout for tests — the child
+    // serve process would otherwise hold its random listener ports
+    // for the full 30 s default after this test's explicit teardown.
     let mut child = tokio::process::Command::new(&bin)
         .args(["serve", "--root", "/"])
+        .env("BCMR_RENDEZVOUS_TIMEOUT_SECS", "2")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -598,6 +602,69 @@ async fn serve_direct_tcp_striped_get_single_large_file() {
     assert_eq!(bytes_to_hex(&got_hash), src_hash_hex);
     assert_eq!(checksum::calculate_hash(&dst).unwrap(), src_hash_hex);
     assert_eq!(std::fs::metadata(&dst).unwrap().len(), src_size);
+}
+
+/// I1 regression guard: a striped PUT to a dst that is already
+/// larger than the new src must leave the dst at exactly the new
+/// src's size — not silently keep stale tail bytes past the new
+/// end. The Truncate preamble before the chunk fanout is what
+/// makes this correct; without it the smaller new file's chunks
+/// would only overwrite the prefix and the tail would survive.
+#[tokio::test]
+async fn serve_direct_tcp_striped_put_truncates_existing_dst() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("small.bin");
+    let dst = dir.path().join("dst.bin");
+    // Prior run: a larger dst with recognisable sentinel bytes.
+    std::fs::write(&dst, vec![0xEEu8; 20 * 1024 * 1024]).unwrap();
+    // New run: overwrite with a smaller src.
+    create_file(&src, 2 * 1024 * 1024 + 17); // above dedup threshold? no — we go through striped anyway
+    let src_hash_hex = checksum::calculate_hash(&src).unwrap();
+
+    let mut pool = ServeClientPool::connect_direct_local(4).await.unwrap();
+    let _ = pool
+        .striped_put_file(&src, dst.to_str().unwrap())
+        .await
+        .unwrap();
+    pool.close().await.unwrap();
+
+    assert_eq!(
+        std::fs::metadata(&dst).unwrap().len(),
+        std::fs::metadata(&src).unwrap().len(),
+        "dst size must match new src exactly — no stale tail bytes",
+    );
+    assert_eq!(
+        checksum::calculate_hash(&dst).unwrap(),
+        src_hash_hex,
+        "dst content must be byte-identical to new src (no residue of old 0xEE payload)",
+    );
+}
+
+/// M4 regression guard: striping a zero-byte file must still
+/// produce an empty file on the server. The fanout skips empty
+/// ranges, so without the Truncate preamble the dst would simply
+/// not exist after the call.
+#[tokio::test]
+async fn serve_direct_tcp_striped_put_zero_byte_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("empty.bin");
+    let dst = dir.path().join("empty_dst.bin");
+    std::fs::write(&src, b"").unwrap();
+
+    let mut pool = ServeClientPool::connect_direct_local(4).await.unwrap();
+    let returned_hash = pool
+        .striped_put_file(&src, dst.to_str().unwrap())
+        .await
+        .unwrap();
+    pool.close().await.unwrap();
+
+    assert!(dst.exists(), "striped PUT of an empty file must still create the dst");
+    assert_eq!(std::fs::metadata(&dst).unwrap().len(), 0);
+    // BLAKE3 of empty input is a known constant.
+    assert_eq!(
+        bytes_to_hex(&returned_hash),
+        "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+    );
 }
 
 /// Edge case: striping a file smaller than pool-size * 1 byte. Some

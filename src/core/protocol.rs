@@ -18,6 +18,7 @@ const TYPE_OPEN_DIRECT: u8 = 0x0b;
 const TYPE_AUTH_HELLO: u8 = 0x0c;
 const TYPE_PUT_CHUNKED: u8 = 0x0d;
 const TYPE_GET_CHUNKED: u8 = 0x0e;
+const TYPE_TRUNCATE: u8 = 0x0f;
 
 const TYPE_WELCOME: u8 = 0x81;
 const TYPE_OK: u8 = 0x82;
@@ -189,6 +190,17 @@ pub enum Message {
         path: String,
         offset: u64,
         length: u64,
+    },
+    /// Create-and-sized-truncate a dst path. Issued by the client
+    /// before a striped PUT fanout so (a) stale bytes past the new
+    /// file's end are removed and (b) the dst exists with its exact
+    /// final size before any chunk writes kick off. Parent dirs are
+    /// created if missing. Also creates an empty file when `size`
+    /// is 0, which handles the degenerate "stripe a zero-byte file"
+    /// case without fanning out to the pool at all.
+    Truncate {
+        path: String,
+        size: u64,
     },
 
     // Responses (server → client)
@@ -452,6 +464,11 @@ pub fn encode_message(msg: &Message) -> Vec<u8> {
             write_u64_le(&mut payload, *offset);
             write_u64_le(&mut payload, *length);
         }
+        Message::Truncate { path, size } => {
+            write_u8(&mut payload, TYPE_TRUNCATE);
+            write_string(&mut payload, path);
+            write_u64_le(&mut payload, *size);
+        }
     }
 
     let mut frame = Vec::with_capacity(4 + payload.len());
@@ -665,6 +682,10 @@ pub fn decode_message(data: &[u8]) -> Option<Message> {
             path: p.read_string()?,
             offset: p.read_u64_le()?,
             length: p.read_u64_le()?,
+        },
+        TYPE_TRUNCATE => Message::Truncate {
+            path: p.read_string()?,
+            size: p.read_u64_le()?,
         },
         _ => return None,
     };
