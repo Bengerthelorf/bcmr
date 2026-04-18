@@ -165,39 +165,24 @@ pub enum Message {
     AuthHello {
         mac: [u8; 32],
     },
-    /// Single-file striping PUT: client takes one large file, cuts it
-    /// into N non-overlapping ranges, and fans each range out to its
-    /// own ServeClient (typically from a ServeClientPool). Each chunk
-    /// PUT names the same `path`, declares its own `[offset, offset +
-    /// length)` region, and streams exactly `length` bytes of data
-    /// frames (possibly compressed). Clients coordinate file
-    /// pre-creation by racing on open(2) with O_CREAT|O_WRONLY on the
-    /// first chunk — every server process writes to non-overlapping
-    /// ranges, so no per-fd seeking conflicts exist across the pool.
-    /// Server reply: Ok { hash: None }. Per-chunk hashing doesn't
-    /// compose cleanly into a whole-file BLAKE3 without a second
-    /// read pass, so the client either accepts the AEAD per-frame
-    /// MAC as integrity proof (default) or re-reads the finalised
-    /// dst and hashes itself (under `--verify`).
+    /// One slice of a striped PUT. `length` bytes at `offset` in
+    /// `path`. Server reply: `Ok { hash: None }`; integrity comes
+    /// from the AEAD per-frame MAC.
     PutChunked {
         path: String,
         offset: u64,
         length: u64,
     },
-    /// Single-file striping GET: mirror of PutChunked. Server seeks
-    /// to `offset` and streams exactly `length` bytes, then Ok.
+    /// Mirror of `PutChunked` on the download side.
     GetChunked {
         path: String,
         offset: u64,
         length: u64,
     },
-    /// Create-and-sized-truncate a dst path. Issued by the client
-    /// before a striped PUT fanout so (a) stale bytes past the new
-    /// file's end are removed and (b) the dst exists with its exact
-    /// final size before any chunk writes kick off. Parent dirs are
-    /// created if missing. Also creates an empty file when `size`
-    /// is 0, which handles the degenerate "stripe a zero-byte file"
-    /// case without fanning out to the pool at all.
+    /// Preamble to a striped PUT: create-or-truncate `path` to
+    /// exactly `size`. Covers the "new src smaller than existing
+    /// dst" and "zero-byte src" edge cases the chunk fanout can't
+    /// handle on its own.
     Truncate {
         path: String,
         size: u64,

@@ -1,10 +1,49 @@
-//! Shared helpers for the e2e_serve_* integration test files.
-//!
-//! Each integration test is its own binary, so `common/mod.rs` gets
-//! compiled per-file — helpers unused by a particular file still
-//! appear "unused" to that file's compilation. `#![allow(dead_code)]`
-//! keeps the warning out of `cargo test` output.
+//! Each integration test is its own binary, so this module gets
+//! compiled per-file; `allow(dead_code)` silences "unused in this
+//! binary" warnings.
 #![allow(dead_code)]
+
+use std::path::PathBuf;
+use std::process::Stdio;
+
+pub fn bcmr_bin() -> PathBuf {
+    let exe = std::env::current_exe().unwrap();
+    let bin_name = if cfg!(windows) { "bcmr.exe" } else { "bcmr" };
+    exe.parent().unwrap().parent().unwrap().join(bin_name)
+}
+
+/// Spawn a `bcmr serve` subprocess for raw-protocol tests.
+/// Root defaults to `/` so tests can write under `/tmp`; override
+/// by passing a different path. `stderr_inherit=true` surfaces the
+/// child's stderr for debugging.
+pub struct ServeChild {
+    pub child: tokio::process::Child,
+    pub stdin: tokio::process::ChildStdin,
+    pub stdout: tokio::process::ChildStdout,
+}
+
+pub fn spawn_serve(root: &str) -> ServeChild {
+    spawn_serve_with_env(root, &[])
+}
+
+pub fn spawn_serve_with_env(root: &str, env: &[(&str, &str)]) -> ServeChild {
+    let mut cmd = tokio::process::Command::new(bcmr_bin());
+    cmd.args(["serve", "--root", root])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().unwrap();
+    let stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    ServeChild {
+        child,
+        stdin,
+        stdout,
+    }
+}
 
 use std::fs;
 use std::io::Write;

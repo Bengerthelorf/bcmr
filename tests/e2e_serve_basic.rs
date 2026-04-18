@@ -12,7 +12,7 @@
 
 mod common;
 
-use common::{bytes_to_hex, cas_test_lock, create_file};
+use common::{bytes_to_hex, cas_test_lock, create_file, spawn_serve, ServeChild};
 use std::fs;
 use std::sync::{Arc, Mutex};
 
@@ -36,20 +36,11 @@ async fn serve_root_jail_rejects_escape() {
     let src = outside.path().join("payload.bin");
     std::fs::write(&src, b"hello").unwrap();
 
-    use std::process::Stdio;
-    let exe = std::env::current_exe().unwrap();
-    let bin_name = if cfg!(windows) { "bcmr.exe" } else { "bcmr" };
-    let bin = exe.parent().unwrap().parent().unwrap().join(bin_name);
-    let mut child = tokio::process::Command::new(&bin)
-        .args(["serve", "--root", jail.path().to_str().unwrap()])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-
-    let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = child.stdout.take().unwrap();
+    let ServeChild {
+        mut child,
+        mut stdin,
+        mut stdout,
+    } = spawn_serve(jail.path().to_str().unwrap());
     use bcmr::core::protocol::{read_message, write_message, Message, PROTOCOL_VERSION};
     write_message(
         &mut stdin,
@@ -98,19 +89,11 @@ async fn serve_put_size_bound_rejects_oversized() {
     let dst = dir.path().join("capped.bin");
 
     use bcmr::core::protocol::{read_message, write_message, Message, PROTOCOL_VERSION};
-    use std::process::Stdio;
-    let exe = std::env::current_exe().unwrap();
-    let bin_name = if cfg!(windows) { "bcmr.exe" } else { "bcmr" };
-    let bin = exe.parent().unwrap().parent().unwrap().join(bin_name);
-    let mut child = tokio::process::Command::new(&bin)
-        .args(["serve", "--root", "/"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = child.stdout.take().unwrap();
+    let ServeChild {
+        mut child,
+        mut stdin,
+        mut stdout,
+    } = spawn_serve("/");
 
     write_message(
         &mut stdin,

@@ -187,12 +187,6 @@ where
     if direct_tcp_key.is_none() {
         offered_caps &= !CAP_AEAD;
     }
-    // Rendezvous listener handles held via a drop-guard so that
-    // cleanup runs on every `?`-propagated error exit, not just the
-    // happy path. An orphaned rendezvous task would otherwise keep a
-    // TCP listener bound on a random port until its own deadline
-    // fired, after the control session it belongs to has already
-    // gone away.
     let mut rendezvous_tasks = RendezvousTasks::new();
 
     // Start in plain framing; flip to AEAD after Welcome if negotiated.
@@ -239,12 +233,10 @@ where
     let direct_tcp = (effective_caps & CAP_DIRECT_TCP) != 0;
     let aead = (effective_caps & CAP_AEAD) != 0;
 
-    // Downgrade-attack guard: on a rendezvous-backed direct-TCP
-    // transport, refuse to proceed without AEAD. Without this, an
-    // attacker who can strip bits from a MITM'd Hello could clear
-    // CAP_AEAD from the client's offer; both sides would then
-    // intersect to zero, keep framing Plain, and the session would
-    // carry real file bytes in the clear across the public internet.
+    // Downgrade guard: a MITM that stripped CAP_AEAD from Hello/
+    // Welcome would otherwise slip a rendezvous session through in
+    // plain framing, defeating the point of using direct-TCP for
+    // encryption.
     if direct_tcp_key.is_some() && !aead {
         framing
             .write_message(
@@ -270,10 +262,7 @@ where
         .await?;
     writer.flush().await?;
 
-    // Flip to AEAD strictly after Welcome is on the wire. Both peers
-    // derive the switchover from the same boundary: every byte after
-    // the Welcome frame is encrypted, starting with counter=0 in each
-    // direction.
+    // Welcome is the switchover boundary — both sides flip now.
     if aead {
         let key = direct_tcp_key
             .expect("cap mask guarantees direct_tcp_key is Some when CAP_AEAD negotiated");
@@ -472,11 +461,6 @@ where
         writer.flush().await?;
     }
 
-    // Control session ended. Drain any rendezvous tasks synchronously
-    // so run_session doesn't return before their sub-sessions have
-    // completed. Drop-guard handles the error-propagation path, but
-    // on the happy path we prefer to await (not abort) so a still-
-    // running data session has a chance to finish its transfer.
     rendezvous_tasks.drain_gracefully().await;
     Ok(())
 }
@@ -824,12 +808,7 @@ where
     W: tokio::io::AsyncWrite + Unpin,
     R: tokio::io::AsyncRead + Unpin,
 {
-    let parent = Path::new(path).parent();
-    if let Some(p) = parent {
-        if !p.as_os_str().is_empty() {
-            fs::create_dir_all(p).await?;
-        }
-    }
+    ensure_parent_dir(path).await?;
 
     let mut file = fs::File::create(path).await?;
     let mut hasher = blake3::Hasher::new();
@@ -1000,15 +979,11 @@ fn enforce_write_bound(written: u64, incoming: usize, declared: u64) -> Result<(
     Ok(())
 }
 
-/// Receive exactly `length` bytes of Data frames from the client and
-/// pwrite them into `path` starting at `offset`. Unlike `handle_put`,
-/// this handler expects the file to be concurrently written by other
-/// server processes at other offsets (one per chunk from the pool),
-/// so it opens `O_WRONLY|O_CREAT` without truncating, `seek`s to its
-/// own offset, and only that region is its responsibility. Returns
-/// `Ok { hash: None }` — whole-file integrity lives either in the
-/// AEAD per-frame MAC (default) or in the client's post-transfer
-/// rehash under `--verify`.
+/// Write exactly `length` bytes at `offset` in `path`. The dst is
+/// opened without `truncate` so parallel bcmr-serve processes from
+/// a pool can each write their own range without clobbering each
+/// other. No per-chunk hash reply — integrity is the AEAD per-frame
+/// MAC or a client-side post-transfer rehash under `--verify`.
 async fn handle_put_chunked<R>(
     path: &str,
     offset: u64,
@@ -1022,11 +997,7 @@ where
 {
     use tokio::io::{AsyncSeekExt, AsyncWriteExt as _};
 
-    if let Some(parent) = Path::new(path).parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).await?;
-        }
-    }
+    ensure_parent_dir(path).await?;
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -1086,8 +1057,8 @@ where
     Ok(Message::Ok { hash: None })
 }
 
-/// Stream exactly `length` bytes of `path` starting at `offset` as
-/// Data frames, followed by Ok. Mirror of handle_put_chunked.
+/// Mirror of `handle_put_chunked`: stream `length` bytes from
+/// `offset`, then Ok.
 async fn handle_get_chunked<W>(
     path: &str,
     offset: u64,
@@ -1131,12 +1102,17 @@ async fn handle_mkdir(path: &str) -> Result<Message> {
     Ok(Message::Ok { hash: None })
 }
 
-async fn handle_truncate(path: &str, size: u64) -> Result<Message> {
+async fn ensure_parent_dir(path: &str) -> Result<()> {
     if let Some(parent) = Path::new(path).parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).await?;
         }
     }
+    Ok(())
+}
+
+async fn handle_truncate(path: &str, size: u64) -> Result<Message> {
+    ensure_parent_dir(path).await?;
     let f = fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -1147,25 +1123,13 @@ async fn handle_truncate(path: &str, size: u64) -> Result<Message> {
     Ok(Message::Ok { hash: None })
 }
 
-/// Seconds the rendezvous listener waits for the client to dial in
-/// before giving up. Bounds the resource hold so a client that opens
-/// a channel and then vanishes can't keep a listener alive forever.
-/// Override with `BCMR_RENDEZVOUS_TIMEOUT_SECS` for tests that need
-/// a tighter window.
+/// Overridable via `BCMR_RENDEZVOUS_TIMEOUT_SECS` for tests.
 const RENDEZVOUS_ACCEPT_TIMEOUT_SECS: u64 = 30;
 
-/// Per-accepted-connection budget for reading the AuthHello frame.
-/// A squatter that connects and stalls bytes must not pin the
-/// rendezvous until the kernel's TCP keepalive fires — carved out of
-/// (and smaller than) the outer accept deadline so even N hostile
-/// connects can't exhaust the window.
+/// Per-accepted-connection read budget, carved from the outer accept
+/// deadline so N hostile `connect+stall` attempts can't exhaust it.
 const AUTH_HELLO_READ_TIMEOUT_SECS: u64 = 2;
 
-/// Max concurrent rendezvous listeners per control session. An
-/// authenticated peer that hammers OpenDirectChannel otherwise eats
-/// file descriptors and ephemeral ports on the server. Four in
-/// flight matches the sane `--parallel` upper bound the client
-/// would ever reach.
 const MAX_RENDEZVOUS_PER_SESSION: usize = 16;
 
 fn rendezvous_accept_timeout() -> std::time::Duration {
@@ -1176,11 +1140,9 @@ fn rendezvous_accept_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
-/// Owning collection of rendezvous task handles with Drop-based
-/// cleanup, so an error bubbling out of the dispatch loop via `?`
-/// doesn't orphan live listeners. `drain_gracefully` on the happy
-/// path awaits (lets data sessions finish); Drop on the error path
-/// aborts (caller already bailed, no point waiting).
+/// Happy path: `drain_gracefully` awaits running data sessions to
+/// completion. Error path: Drop aborts orphans so a `?`-propagated
+/// error doesn't leak listeners past the control session's lifetime.
 struct RendezvousTasks {
     handles: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -1215,26 +1177,13 @@ impl Drop for RendezvousTasks {
     }
 }
 
-/// Domain-separation constant for the AuthHello MAC. Both peers feed
-/// this tag into `blake3::keyed_hash(session_key, ...)` so a MAC that
-/// happens to match an unrelated keyed hash of the session key
-/// (produced for some other future purpose) can't be replayed here.
+/// Domain-separation tag for the AuthHello MAC — must match the
+/// client side.
 const AUTH_HELLO_TAG: &[u8] = b"bcmr-direct-v1";
 
-/// Pick the bind address for a rendezvous listener.
-///
-/// `$SSH_CONNECTION` carries `<client_ip> <client_port> <server_ip>
-/// <server_port>` for every sshd-launched child. The `server_ip` is
-/// the interface the client reached us on — the only IP guaranteed
-/// to route back. Binding there instead of `0.0.0.0` means the
-/// listener is only exposed on the network the caller already has
-/// a live SSH session with, not on every interface the host owns.
-/// Without `$SSH_CONNECTION` (tests, raw stdin invocations) we fall
-/// back to loopback.
-///
-/// Returns a parsed `IpAddr` so the caller can form a `SocketAddr`
-/// without string-concat quirks — IPv6 addresses in particular need
-/// bracket-framed host:port, which `format!("{ip}:0")` gets wrong.
+/// Bind on the SSH-facing interface (from `$SSH_CONNECTION.server_ip`)
+/// so the listener is only exposed on the network the SSH session
+/// already traversed — not 0.0.0.0 across every local interface.
 fn rendezvous_bind_ip() -> std::net::IpAddr {
     use std::net::{IpAddr, Ipv4Addr};
     let parsed = std::env::var("SSH_CONNECTION").ok().and_then(|v| {
@@ -1254,19 +1203,10 @@ fn handle_open_direct_channel(
     use ring::rand::{SecureRandom, SystemRandom};
     use zeroize::Zeroizing;
 
-    // INVARIANT: this function is sync. Do not introduce `.await`
-    // anywhere in the body. The call chain run_session → here →
-    // (spawned) run_direct_session → run_session is a type-level
-    // recursion the compiler refuses to materialise; keeping this
-    // function's state machine empty is what breaks the cycle. If
-    // you find yourself wanting an async bind, use `spawn_blocking`
-    // or wrap the whole function in a boxed-future indirection —
-    // don't just sprinkle `.await` on the existing std::net calls.
-    //
-    // SocketAddr::new handles IPv6 without the bracket-formatting
-    // trap that `format!("{ip}:0")` falls into (IPv6 literals in
-    // host:port form need square brackets to disambiguate the final
-    // colon).
+    // INVARIANT: sync body — adding `.await` here re-introduces the
+    // type-level recursion run_session → this → run_direct_session
+    // → run_session that won't compile. Use spawn_blocking or
+    // Box::pin if you need async bind work.
     let bind_addr = std::net::SocketAddr::new(rendezvous_bind_ip(), 0);
     let std_listener = std::net::TcpListener::bind(bind_addr)?;
     std_listener.set_nonblocking(true)?;
@@ -1295,16 +1235,14 @@ async fn run_rendezvous(
     session_key: zeroize::Zeroizing<[u8; 32]>,
     root: PathBuf,
 ) {
-    // Keep accepting until a peer proves AuthHello knowledge. An
-    // unauthenticated squatter (same LAN, co-tenant, port scanner)
-    // that connects first must NOT be able to consume the listener
-    // and starve the real client — close that connection, loop back,
-    // and wait for the next one inside the same deadline.
+    // Loop-accept-verify until either an authenticated peer dials in
+    // or the outer deadline elapses — a squatter that flunks AuthHello
+    // must not consume the single rendezvous slot.
     let deadline = tokio::time::Instant::now() + rendezvous_accept_timeout();
     let authed = loop {
         let remaining = match deadline.checked_duration_since(tokio::time::Instant::now()) {
             Some(d) if !d.is_zero() => d,
-            _ => return, // window elapsed, no authenticated peer
+            _ => return,
         };
         let mut stream = match tokio::time::timeout(remaining, listener.accept()).await {
             Ok(Ok((stream, _peer))) => stream,
@@ -1312,17 +1250,12 @@ async fn run_rendezvous(
                 eprintln!("serve: direct-tcp accept failed: {e}");
                 return;
             }
-            Err(_) => return, // deadline hit, no peer dialed in
+            Err(_) => return,
         };
         if verify_auth_hello(&mut stream, &session_key).await {
             break stream;
         }
-        // MAC mismatch / wrong first frame / EOF before AuthHello.
-        // Drop the stream, loop — listener stays open for the real
-        // client. A squatter who connects first and flunks the MAC
-        // must not starve the legitimate peer.
     };
-    // Authenticated peer in hand; the listener has served its purpose.
     drop(listener);
 
     if let Err(e) = run_direct_session(authed, &session_key, &root).await {
@@ -1330,13 +1263,6 @@ async fn run_rendezvous(
     }
 }
 
-/// Consume the first frame of an accepted TCP stream and return
-/// `true` iff that frame is an AuthHello whose MAC matches the
-/// session key. Wrapped in a per-connection read timeout so a
-/// squatter that connects and then stalls bytes (or dribbles a
-/// partial length prefix) can't pin the rendezvous until TCP
-/// keepalive — the budget is small so N hostile connects still
-/// can't exhaust the outer accept deadline.
 async fn verify_auth_hello(
     stream: &mut tokio::net::TcpStream,
     session_key: &[u8; 32],
@@ -1346,9 +1272,8 @@ async fn verify_auth_hello(
         Ok(Ok(Some(Message::AuthHello { mac }))) => mac,
         _ => return false,
     };
-    let expected = blake3::keyed_hash(session_key, AUTH_HELLO_TAG);
-    // blake3::Hash implements constant-time PartialEq.
-    blake3::Hash::from(mac) == expected
+    // blake3::Hash::PartialEq is constant-time.
+    blake3::Hash::from(mac) == blake3::keyed_hash(session_key, AUTH_HELLO_TAG)
 }
 
 async fn run_direct_session(
@@ -1358,15 +1283,9 @@ async fn run_direct_session(
 ) -> Result<()> {
     let (mut reader, mut writer) = stream.into_split();
 
-    // Caller has already verified AuthHello via verify_auth_hello.
-    // Run a fresh protocol session on this socket.
-    //   allow_splice=false: TCP fd is not STDOUT_FILENO.
-    //   allow_direct_tcp=false: already on direct-TCP; nesting would
-    //   let the same peer open more listeners recursively.
-    //   direct_tcp_key=Some: advertise CAP_AEAD so the client may
-    //   upgrade framing post-Welcome.
-    // Box::pin breaks the type-level async recursion between
-    // run_session ↔ run_direct_session.
+    // Box::pin breaks the type-level recursion between run_session
+    // and run_direct_session. Flags: no splice (fd != STDOUT_FILENO),
+    // no nested direct-TCP, session_key present so CAP_AEAD is offered.
     Box::pin(run_session(
         &mut reader,
         &mut writer,

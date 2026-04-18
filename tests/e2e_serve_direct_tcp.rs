@@ -7,7 +7,7 @@
 
 mod common;
 
-use common::{bytes_to_hex, create_file};
+use common::{bytes_to_hex, create_file, spawn_serve, spawn_serve_with_env, ServeChild};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -22,25 +22,15 @@ async fn serve_open_direct_channel_reply_is_well_formed() {
     use bcmr::core::protocol::{
         read_message, write_message, Message, CAP_DIRECT_TCP, PROTOCOL_VERSION,
     };
-    use std::process::Stdio;
     use tokio::net::TcpStream;
 
-    let exe = std::env::current_exe().unwrap();
-    let bin_name = if cfg!(windows) { "bcmr.exe" } else { "bcmr" };
-    let bin = exe.parent().unwrap().parent().unwrap().join(bin_name);
-    // Shorten the rendezvous accept timeout for tests — the child
-    // serve process would otherwise hold its random listener ports
-    // for the full 30 s default after this test's explicit teardown.
-    let mut child = tokio::process::Command::new(&bin)
-        .args(["serve", "--root", "/"])
-        .env("BCMR_RENDEZVOUS_TIMEOUT_SECS", "2")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = child.stdout.take().unwrap();
+    // Tight rendezvous timeout so the per-channel listeners don't
+    // pin the child for the full 30 s default.
+    let ServeChild {
+        mut child,
+        mut stdin,
+        mut stdout,
+    } = spawn_serve_with_env("/", &[("BCMR_RENDEZVOUS_TIMEOUT_SECS", "2")]);
 
     write_message(
         &mut stdin,
@@ -93,20 +83,12 @@ async fn serve_open_direct_channel_reply_is_well_formed() {
 #[tokio::test]
 async fn serve_open_direct_channel_requires_cap() {
     use bcmr::core::protocol::{read_message, write_message, Message, PROTOCOL_VERSION};
-    use std::process::Stdio;
 
-    let exe = std::env::current_exe().unwrap();
-    let bin_name = if cfg!(windows) { "bcmr.exe" } else { "bcmr" };
-    let bin = exe.parent().unwrap().parent().unwrap().join(bin_name);
-    let mut child = tokio::process::Command::new(&bin)
-        .args(["serve", "--root", "/"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = child.stdout.take().unwrap();
+    let ServeChild {
+        mut child,
+        mut stdin,
+        mut stdout,
+    } = spawn_serve("/");
 
     write_message(
         &mut stdin,
@@ -184,21 +166,13 @@ async fn serve_direct_tcp_squatter_does_not_starve_real_client() {
     use bcmr::core::protocol::{
         read_message, write_message, Message, CAP_AEAD, CAP_DIRECT_TCP, PROTOCOL_VERSION,
     };
-    use std::process::Stdio;
     use tokio::net::TcpStream;
 
-    let exe = std::env::current_exe().unwrap();
-    let bin_name = if cfg!(windows) { "bcmr.exe" } else { "bcmr" };
-    let bin = exe.parent().unwrap().parent().unwrap().join(bin_name);
-    let mut child = tokio::process::Command::new(&bin)
-        .args(["serve", "--root", "/"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut ssh_stdin = child.stdin.take().unwrap();
-    let mut ssh_stdout = child.stdout.take().unwrap();
+    let ServeChild {
+        mut child,
+        stdin: mut ssh_stdin,
+        stdout: mut ssh_stdout,
+    } = spawn_serve("/");
 
     write_message(
         &mut ssh_stdin,
@@ -266,21 +240,13 @@ async fn serve_direct_tcp_refuses_session_without_aead() {
     use bcmr::core::protocol::{
         read_message, write_message, Message, CAP_DIRECT_TCP, PROTOCOL_VERSION,
     };
-    use std::process::Stdio;
     use tokio::net::TcpStream;
 
-    let exe = std::env::current_exe().unwrap();
-    let bin_name = if cfg!(windows) { "bcmr.exe" } else { "bcmr" };
-    let bin = exe.parent().unwrap().parent().unwrap().join(bin_name);
-    let mut child = tokio::process::Command::new(&bin)
-        .args(["serve", "--root", "/"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut ssh_stdin = child.stdin.take().unwrap();
-    let mut ssh_stdout = child.stdout.take().unwrap();
+    let ServeChild {
+        mut child,
+        stdin: mut ssh_stdin,
+        stdout: mut ssh_stdout,
+    } = spawn_serve("/");
 
     write_message(
         &mut ssh_stdin,
@@ -336,20 +302,12 @@ async fn serve_direct_tcp_refuses_session_without_aead() {
 #[tokio::test]
 async fn serve_ssh_transport_does_not_offer_cap_aead() {
     use bcmr::core::protocol::{read_message, write_message, CAP_AEAD, PROTOCOL_VERSION};
-    use std::process::Stdio;
 
-    let exe = std::env::current_exe().unwrap();
-    let bin_name = if cfg!(windows) { "bcmr.exe" } else { "bcmr" };
-    let bin = exe.parent().unwrap().parent().unwrap().join(bin_name);
-    let mut child = tokio::process::Command::new(&bin)
-        .args(["serve", "--root", "/"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = child.stdout.take().unwrap();
+    let ServeChild {
+        mut child,
+        mut stdin,
+        mut stdout,
+    } = spawn_serve("/");
 
     write_message(
         &mut stdin,

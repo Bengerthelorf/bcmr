@@ -54,30 +54,14 @@ async fn ssh_target_uses_proxyjump(target: &str) -> bool {
 type BoxedReader = Box<dyn AsyncRead + Send + Unpin>;
 type BoxedWriter = Box<dyn AsyncWrite + Send + Unpin>;
 
-/// Transport-specific cleanup state. The byte streams themselves live
-/// as `reader`/`writer` fields on `ServeClient` (type-erased so every
-/// transport goes through the same protocol framing code), but the
-/// kill-on-drop handle is transport-specific — SSH needs to terminate
-/// the child process; a plain TCP connection would just drop the
-/// socket.
-enum Transport {
-    Ssh {
-        child: Child,
-    },
-    /// Data channel is a direct TCP socket; the SSH control channel is
-    /// held alive in the background to keep the remote serve process
-    /// running for the lifetime of the data session. Dropping this
-    /// variant releases the SSH control child, which exits naturally
-    /// after the remote serve exits (tokio's reaper cleans up the
-    /// zombie).
-    DirectTcp {
-        ssh_control: Child,
-        /// Drains the SSH stdout side to avoid blocking local ssh on a
-        /// full pipe buffer if the remote writes anything after the
-        /// rendezvous hand-off. Not cancelled on drop — the task
-        /// finishes when the stream EOFs as SSH exits.
-        _stdout_drain: tokio::task::JoinHandle<()>,
-    },
+/// Byte streams live on `ServeClient::reader`/`writer` (type-erased);
+/// this owns the SSH `Child` separately so Drop can kill it.
+/// `_drain` only exists on the direct-TCP path — it reads whatever
+/// sshd writes to stdout after rendezvous hand-off so local ssh
+/// doesn't wedge on a full pipe buffer.
+struct Transport {
+    child: Child,
+    _drain: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Default client caps: LZ4 + Zstd + dedup. CAP_FAST is opt-in via
@@ -336,9 +320,9 @@ impl ServeClient {
 
         let (tx, rx) = framing::plain_halves();
         let mut client = Self {
-            transport: Transport::DirectTcp {
-                ssh_control: spawn.child,
-                _stdout_drain: stdout_drain,
+            transport: Transport {
+                child: spawn.child,
+                _drain: Some(stdout_drain),
             },
             reader: Box::new(tcp_reader),
             writer: Some(Box::new(tcp_writer)),
@@ -363,7 +347,10 @@ impl ServeClient {
     fn from_ssh_spawn(spawn: ssh_transport::SshSpawn) -> Self {
         let (tx, rx) = framing::plain_halves();
         Self {
-            transport: Transport::Ssh { child: spawn.child },
+            transport: Transport {
+                child: spawn.child,
+                _drain: None,
+            },
             reader: Box::new(spawn.stdout),
             writer: Some(Box::new(spawn.stdin)),
             tx: Some(tx),
@@ -1219,36 +1206,12 @@ impl ServeClient {
 
 impl Transport {
     async fn wait(&mut self) {
-        match self {
-            Transport::Ssh { child } => {
-                let _ = child.wait().await;
-            }
-            Transport::DirectTcp { ssh_control, .. } => {
-                let _ = ssh_control.wait().await;
-            }
-        }
-    }
-
-    fn start_kill(&mut self) {
-        match self {
-            Transport::Ssh { child } => {
-                let _ = child.start_kill();
-            }
-            // Don't SIGKILL the SSH control child. The remote serve
-            // exits cleanly once the TCP data session ends; local
-            // ssh follows once remote sshd closes the channel, and
-            // tokio's background reaper cleans up the zombie.
-            Transport::DirectTcp { .. } => {}
-        }
+        let _ = self.child.wait().await;
     }
 }
 
-/// Kill child process on drop to prevent orphaned bcmr serve processes.
-impl Drop for ServeClient {
-    fn drop(&mut self) {
-        self.transport.start_kill();
-    }
-}
+// Child is spawned with kill_on_drop(true) (see core::transport::ssh),
+// so drop alone suffices to terminate an orphaned ssh process.
 
 /// A pool of N parallel `ServeClient` connections to the same remote.
 ///
@@ -1499,15 +1462,12 @@ impl ServeClientPool {
         Ok(())
     }
 
-    /// Stripe a single file across all N pool clients: cut the source
-    /// into N non-overlapping ranges, farm one range to each client,
-    /// run them concurrently. Each client opens the same dst path
-    /// (O_WRONLY | O_CREAT, no truncate) and writes its region only,
-    /// so the ranges land at their correct offsets via each connection's
-    /// own fd. Returns the whole-file BLAKE3 computed client-side from
-    /// the source — no server-side hash is returned on chunked PUT
-    /// (integrity lives in the AEAD per-frame MAC; callers who want a
-    /// second-level check should re-read the dst after transfer).
+    /// Stripe a single file across all N pool clients. Each bucket
+    /// gets one non-overlapping range; the dst is pre-truncated to
+    /// `file_size` so stale tail bytes from prior runs can't survive
+    /// and the zero-byte case still creates the dst. Returns the
+    /// whole-file BLAKE3 computed client-side from the source —
+    /// integrity on the wire is the AEAD per-frame MAC.
     pub async fn striped_put_file(
         &mut self,
         local: &Path,
@@ -1517,76 +1477,21 @@ impl ServeClientPool {
             return Err(BcmrError::InvalidInput("pool is empty".into()));
         }
         let file_size = tokio::fs::metadata(local).await?.len();
-
-        // Ask the server to create-and-truncate the dst to exactly
-        // file_size before any chunks start. Two reasons: (1) stale
-        // bytes past the new file's end from a prior run must not
-        // survive; (2) if file_size == 0 the fanout below produces
-        // zero active ranges and would never create the dst at all.
-        // Route through pool.first_mut() since it's a one-shot
-        // control op, not a data-path one.
-        self.clients[0]
-            .send(&Message::Truncate {
-                path: remote.to_owned(),
-                size: file_size,
-            })
-            .await?;
-        match self.clients[0].recv().await? {
-            Message::Ok { .. } => {}
-            Message::Error { message } => return Err(BcmrError::InvalidInput(message)),
-            other => {
-                return Err(BcmrError::InvalidInput(format!(
-                    "unexpected reply to Truncate: {other:?}"
-                )))
-            }
-        }
-
-        // Empty source: truncate already created the empty dst,
-        // hash is fixed, no fanout needed.
+        self.request_truncate(remote, file_size).await?;
         if file_size == 0 {
             return Ok(*blake3::hash(b"").as_bytes());
         }
 
-        let n = self.clients.len() as u64;
-        // Client-side whole-file hash: compute in parallel with the
-        // transfer so the caller gets a final digest without a
-        // separate pass on the hot path.
-        let local_for_hash = local.to_path_buf();
-        let hash_task = tokio::task::spawn_blocking(move || -> Result<[u8; 32], BcmrError> {
-            use std::io::Read;
-            let mut f = std::fs::File::open(&local_for_hash)?;
-            let mut hasher = blake3::Hasher::new();
-            let mut buf = vec![0u8; DEDUP_BLOCK_SIZE];
-            loop {
-                let n = f.read(&mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&buf[..n]);
-            }
-            Ok(*hasher.finalize().as_bytes())
-        });
+        // Hash in parallel with the transfer.
+        let hash_task = spawn_blake3_file(local.to_path_buf());
 
-        // Divide the file into N ranges. Last range absorbs the
-        // remainder so total chunks cover exactly [0, file_size).
-        let chunk_size = file_size.div_ceil(n);
-        let mut ranges: Vec<(u64, u64)> = Vec::with_capacity(self.clients.len());
-        let mut offset = 0u64;
-        for _ in 0..self.clients.len() {
-            let length = chunk_size.min(file_size.saturating_sub(offset));
-            ranges.push((offset, length));
-            offset += length;
-        }
-
-        // Farm each range to its pool client. try_join_all runs them
-        // concurrently; any one failure cancels the others and we
-        // surface the first Err.
         let local_owned = local.to_path_buf();
         let remote_owned = remote.to_owned();
+        let ranges = divide_ranges(file_size, self.clients.len());
         let futs: Vec<_> = self
             .clients
             .iter_mut()
-            .zip(ranges.into_iter())
+            .zip(ranges)
             .filter(|(_, (_, length))| *length > 0)
             .map(|(client, (offset, length))| {
                 let local = local_owned.clone();
@@ -1601,12 +1506,8 @@ impl ServeClientPool {
             .map_err(|e| BcmrError::InvalidInput(format!("hash task join: {e}")))?
     }
 
-    /// Mirror of `striped_put_file`: pull a single remote file in N
-    /// parallel chunks, each client writing into its own region of
-    /// the local destination (also via `O_WRONLY | O_CREAT`, no
-    /// truncate, per-fd seek). Returns the client-computed BLAKE3 of
-    /// the received dst. Caller is responsible for knowing the remote
-    /// size up-front (from `client.stat` or an upper bound).
+    /// Mirror of `striped_put_file`. Caller supplies `remote_size`
+    /// (from `client.stat` or an upper bound).
     pub async fn striped_get_file(
         &mut self,
         remote: &str,
@@ -1616,9 +1517,9 @@ impl ServeClientPool {
         if self.clients.is_empty() {
             return Err(BcmrError::InvalidInput("pool is empty".into()));
         }
-        // Pre-create + set length so every client's seek+write finds
-        // a properly sized destination (avoids a race where one
-        // client's write grows past another's).
+        // Pre-size so every chunk's seek+write finds the dst at its
+        // final length — avoids the race where one chunk's write grows
+        // past another's seek target.
         let f = tokio::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -1628,22 +1529,13 @@ impl ServeClientPool {
         f.set_len(remote_size).await?;
         drop(f);
 
-        let n = self.clients.len() as u64;
-        let chunk_size = remote_size.div_ceil(n);
-        let mut ranges: Vec<(u64, u64)> = Vec::with_capacity(self.clients.len());
-        let mut offset = 0u64;
-        for _ in 0..self.clients.len() {
-            let length = chunk_size.min(remote_size.saturating_sub(offset));
-            ranges.push((offset, length));
-            offset += length;
-        }
-
         let local_owned = local.to_path_buf();
         let remote_owned = remote.to_owned();
+        let ranges = divide_ranges(remote_size, self.clients.len());
         let futs: Vec<_> = self
             .clients
             .iter_mut()
-            .zip(ranges.into_iter())
+            .zip(ranges)
             .filter(|(_, (_, length))| *length > 0)
             .map(|(client, (offset, length))| {
                 let local = local_owned.clone();
@@ -1657,26 +1549,25 @@ impl ServeClientPool {
             .collect();
         futures::future::try_join_all(futs).await?;
 
-        // Final hash: re-read dst. Cheaper than trying to compose
-        // chunk hashes (BLAKE3 would require merkle-tree alignment
-        // and adds wire overhead).
-        let local_for_hash = local.to_path_buf();
-        tokio::task::spawn_blocking(move || -> Result<[u8; 32], BcmrError> {
-            use std::io::Read;
-            let mut f = std::fs::File::open(&local_for_hash)?;
-            let mut hasher = blake3::Hasher::new();
-            let mut buf = vec![0u8; DEDUP_BLOCK_SIZE];
-            loop {
-                let n = f.read(&mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&buf[..n]);
-            }
-            Ok(*hasher.finalize().as_bytes())
-        })
-        .await
-        .map_err(|e| BcmrError::InvalidInput(format!("hash task join: {e}")))?
+        spawn_blake3_file(local.to_path_buf())
+            .await
+            .map_err(|e| BcmrError::InvalidInput(format!("hash task join: {e}")))?
+    }
+
+    async fn request_truncate(&mut self, remote: &str, size: u64) -> Result<(), BcmrError> {
+        self.clients[0]
+            .send(&Message::Truncate {
+                path: remote.to_owned(),
+                size,
+            })
+            .await?;
+        match self.clients[0].recv().await? {
+            Message::Ok { .. } => Ok(()),
+            Message::Error { message } => Err(BcmrError::InvalidInput(message)),
+            other => Err(BcmrError::InvalidInput(format!(
+                "unexpected reply to Truncate: {other:?}"
+            ))),
+        }
     }
 
     /// Cleanly close all N connections.
@@ -1688,14 +1579,46 @@ impl ServeClientPool {
     }
 }
 
-/// Read `data` and emit it as a sequence of `Data` (or compressed) frames
-/// to `writer`. Used by both the single-file `put_streaming` path and the
-/// many-file `pipelined_put_files` writer task; extracting it here keeps
-/// the encode-loop in one place so a change to chunking, compression
-/// negotiation, or framing can't drift between the two callers.
-///
-/// `on_chunk(uncompressed_bytes)` fires once per Data frame so callers
-/// can drive a progress bar. Passing a `|_| {}` no-op skips reporting.
+/// Divide `[0, total)` into `n` non-overlapping ranges with the last
+/// one absorbing the remainder so the union covers exactly [0, total).
+/// If `total == 0` every range has length 0; callers are expected to
+/// filter those.
+fn divide_ranges(total: u64, n: usize) -> Vec<(u64, u64)> {
+    let mut ranges = Vec::with_capacity(n);
+    let chunk = total.div_ceil(n as u64);
+    let mut offset = 0u64;
+    for _ in 0..n {
+        let length = chunk.min(total.saturating_sub(offset));
+        ranges.push((offset, length));
+        offset += length;
+    }
+    ranges
+}
+
+/// BLAKE3 of a file, computed on the blocking pool so the caller's
+/// async task isn't pinned to the read loop.
+fn spawn_blake3_file(
+    path: std::path::PathBuf,
+) -> tokio::task::JoinHandle<Result<[u8; 32], BcmrError>> {
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut f = std::fs::File::open(&path)?;
+        let mut hasher = blake3::Hasher::new();
+        let mut buf = vec![0u8; DEDUP_BLOCK_SIZE];
+        loop {
+            let n = f.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        Ok(*hasher.finalize().as_bytes())
+    })
+}
+
+/// Streams `data` to `writer` as Data frames, applying `algo` for
+/// compression. One encode loop shared by single-file put_streaming
+/// and the pipelined_put_files writer task.
 async fn write_file_data_frames<W>(
     writer: &mut W,
     tx: &mut SendHalf,
