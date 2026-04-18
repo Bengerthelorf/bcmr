@@ -1357,3 +1357,38 @@ async fn serve_open_direct_channel_requires_cap() {
     drop(stdin);
     let _ = child.wait().await;
 }
+
+/// Full SSH → OpenDirectChannel → TCP rendezvous → AuthHello → PUT → GET
+/// round-trip. Proves the direct-TCP transport carries a complete data
+/// session end-to-end with the same semantics as the SSH path.
+#[tokio::test]
+async fn serve_direct_tcp_put_get_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let remote_dst = dir.path().join("remote_dst.bin");
+    create_file(&src, 3 * 1024 * 1024);
+    let src_hash = checksum::calculate_hash(&src).unwrap();
+
+    let mut client = ServeClient::connect_direct_local().await.unwrap();
+    let put_hash = client
+        .put(remote_dst.to_str().unwrap(), &src)
+        .await
+        .unwrap();
+    assert_eq!(bytes_to_hex(&put_hash), src_hash);
+
+    let received: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let received_clone = Arc::clone(&received);
+    client
+        .get(remote_dst.to_str().unwrap(), 0, move |chunk| {
+            received_clone.lock().unwrap().extend_from_slice(chunk);
+        })
+        .await
+        .unwrap();
+    client.close().await.unwrap();
+
+    let got = Arc::try_unwrap(received).unwrap().into_inner().unwrap();
+    let got_path = dir.path().join("got.bin");
+    fs::write(&got_path, &got).unwrap();
+    assert_eq!(checksum::calculate_hash(&got_path).unwrap(), src_hash);
+    assert_eq!(checksum::calculate_hash(&remote_dst).unwrap(), src_hash);
+}

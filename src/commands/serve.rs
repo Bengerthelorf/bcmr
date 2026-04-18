@@ -305,7 +305,7 @@ where
             },
             Message::OpenDirectChannel => {
                 if direct_tcp {
-                    match handle_open_direct_channel().await {
+                    match handle_open_direct_channel(root.to_path_buf()) {
                         Ok((msg, handle)) => {
                             rendezvous_tasks.push(handle);
                             Ok(msg)
@@ -335,11 +335,11 @@ where
         writer.flush().await?;
     }
 
-    // Session done — cancel any rendezvous listeners still waiting for
-    // their one accept. Tasks that already accepted complete naturally.
-    for handle in &rendezvous_tasks {
-        handle.abort();
-    }
+    // Control session ended. Wait (don't abort) any rendezvous tasks:
+    // each runs a full sub-session over its own TCP socket and must
+    // complete its own data transfer before we tear down the process.
+    // The tasks are self-limiting — an unused listener gives up after
+    // RENDEZVOUS_ACCEPT_TIMEOUT_SECS — so this await is bounded.
     for handle in rendezvous_tasks {
         let _ = handle.await;
     }
@@ -866,28 +866,40 @@ async fn handle_mkdir(path: &str) -> Result<Message> {
     Ok(Message::Ok { hash: None })
 }
 
-// TODO(direct-tcp): bind to $SSH_CONNECTION server_ip, AuthHello + AEAD
-// dispatch. Current body is a stub that accepts one connection and drops.
-async fn handle_open_direct_channel() -> Result<(Message, tokio::task::JoinHandle<()>)> {
+/// Seconds the rendezvous listener waits for the client to dial in
+/// before giving up. Bounds the resource hold so a client that opens
+/// a channel and then vanishes can't keep a listener alive forever.
+const RENDEZVOUS_ACCEPT_TIMEOUT_SECS: u64 = 30;
+
+/// Domain-separation constant for the AuthHello MAC. Both peers feed
+/// this tag into `blake3::keyed_hash(session_key, ...)` so a MAC that
+/// happens to match an unrelated keyed hash of the session key
+/// (produced for some other future purpose) can't be replayed here.
+const AUTH_HELLO_TAG: &[u8] = b"bcmr-direct-v1";
+
+fn handle_open_direct_channel(
+    root: PathBuf,
+) -> Result<(Message, tokio::task::JoinHandle<()>)> {
     use ring::rand::{SecureRandom, SystemRandom};
-    use tokio::net::TcpListener;
     use zeroize::Zeroizing;
 
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let addr = listener.local_addr()?;
+    // Bind synchronously so the function holds no await points — its
+    // future stays outside run_session's state machine, which avoids
+    // type-level async recursion (run_session → handle_open_direct_channel
+    // → run_direct_session → run_session).
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    std_listener.set_nonblocking(true)?;
+    let addr = std_listener.local_addr()?;
+    let listener = tokio::net::TcpListener::from_std(std_listener)?;
 
     let rng = SystemRandom::new();
     let mut session_key: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
     rng.fill(session_key.as_mut())
         .map_err(|_| anyhow::anyhow!("ring::rand failed to produce session key"))?;
-
-    // One-shot: accept exactly one connection, drop the listener, task
-    // exits. Prevents the listener from outliving its single rendezvous.
-    let handle = tokio::spawn(async move {
-        let _ = listener.accept().await;
-    });
-
     let key_out = *session_key;
+
+    let handle = tokio::spawn(run_rendezvous(listener, session_key, root));
+
     Ok((
         Message::DirectChannelReady {
             addr: addr.to_string(),
@@ -895,6 +907,58 @@ async fn handle_open_direct_channel() -> Result<(Message, tokio::task::JoinHandl
         },
         handle,
     ))
+}
+
+async fn run_rendezvous(
+    listener: tokio::net::TcpListener,
+    session_key: zeroize::Zeroizing<[u8; 32]>,
+    root: PathBuf,
+) {
+    let timeout = std::time::Duration::from_secs(RENDEZVOUS_ACCEPT_TIMEOUT_SECS);
+    let stream = match tokio::time::timeout(timeout, listener.accept()).await {
+        Ok(Ok((stream, _peer))) => stream,
+        Ok(Err(e)) => {
+            eprintln!("serve: direct-tcp accept failed: {e}");
+            return;
+        }
+        Err(_) => return, // peer never dialed in
+    };
+    // Drop listener now: at most one data session per rendezvous.
+    drop(listener);
+
+    if let Err(e) = run_direct_session(stream, &session_key, &root).await {
+        eprintln!("serve: direct-tcp session error: {e}");
+    }
+}
+
+async fn run_direct_session(
+    stream: tokio::net::TcpStream,
+    session_key: &[u8; 32],
+    root: &Path,
+) -> Result<()> {
+    let (mut reader, mut writer) = stream.into_split();
+
+    // First frame on the data channel must prove the peer learned the
+    // session key from the authenticated control channel. Anything
+    // else is dropped without reply — no oracle for attackers.
+    let mac = match protocol::read_message(&mut reader).await? {
+        Some(Message::AuthHello { mac }) => mac,
+        Some(other) => bail!("direct-tcp: expected AuthHello, got {other:?}"),
+        None => return Ok(()),
+    };
+    let expected = blake3::keyed_hash(session_key, AUTH_HELLO_TAG);
+    // blake3::Hash implements constant-time PartialEq.
+    if blake3::Hash::from(mac) != expected {
+        bail!("direct-tcp: AuthHello MAC mismatch");
+    }
+
+    // Authenticated. Run a fresh protocol session on this socket.
+    //   allow_splice=false: TCP fd is not STDOUT_FILENO.
+    //   allow_direct_tcp=false: already on direct-TCP; nesting would
+    //   let the same peer open more listeners recursively.
+    // Box::pin breaks the type-level async recursion between
+    // run_session ↔ run_direct_session.
+    Box::pin(run_session(&mut reader, &mut writer, root, false, false)).await
 }
 
 async fn handle_resume(path: &str) -> Result<Message> {

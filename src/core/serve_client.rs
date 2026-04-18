@@ -7,9 +7,15 @@ use tokio::process::Child;
 use crate::core::compress;
 use crate::core::error::BcmrError;
 use crate::core::protocol::{
-    self, CompressionAlgo, ListEntry, Message, CAP_DEDUP, CAP_LZ4, CAP_ZSTD, PROTOCOL_VERSION,
+    self, CompressionAlgo, ListEntry, Message, CAP_DEDUP, CAP_DIRECT_TCP, CAP_LZ4, CAP_ZSTD,
+    PROTOCOL_VERSION,
 };
 use crate::core::transport::ssh as ssh_transport;
+
+/// Must match `AUTH_HELLO_TAG` on the server. Domain-separates the
+/// rendezvous MAC from any other keyed hash a future protocol step
+/// might compute over the same session key.
+const AUTH_HELLO_TAG: &[u8] = b"bcmr-direct-v1";
 
 type BoxedReader = Box<dyn AsyncRead + Send + Unpin>;
 type BoxedWriter = Box<dyn AsyncWrite + Send + Unpin>;
@@ -21,7 +27,23 @@ type BoxedWriter = Box<dyn AsyncWrite + Send + Unpin>;
 /// the child process; a plain TCP connection would just drop the
 /// socket.
 enum Transport {
-    Ssh { child: Child },
+    Ssh {
+        child: Child,
+    },
+    /// Data channel is a direct TCP socket; the SSH control channel is
+    /// held alive in the background to keep the remote serve process
+    /// running for the lifetime of the data session. Dropping this
+    /// variant releases the SSH control child, which exits naturally
+    /// after the remote serve exits (tokio's reaper cleans up the
+    /// zombie).
+    DirectTcp {
+        ssh_control: Child,
+        /// Drains the SSH stdout side to avoid blocking local ssh on a
+        /// full pipe buffer if the remote writes anything after the
+        /// rendezvous hand-off. Not cancelled on drop — the task
+        /// finishes when the stream EOFs as SSH exits.
+        _stdout_drain: tokio::task::JoinHandle<()>,
+    },
 }
 
 /// Default client caps: LZ4 + Zstd + dedup. CAP_FAST is opt-in via
@@ -92,8 +114,42 @@ impl ServeClient {
         Ok(client)
     }
 
+    /// Connect over SSH, then promote to a direct-TCP data channel.
+    /// Requires the server to advertise CAP_DIRECT_TCP (v0.5.20+).
+    /// `caps` are the client-offered capabilities for the *data*
+    /// session; CAP_DIRECT_TCP is set internally on the control
+    /// handshake regardless of what the caller passed.
+    #[allow(dead_code)]
+    pub async fn connect_direct_with_caps(
+        ssh_target: &str,
+        caps: u8,
+    ) -> Result<Self, BcmrError> {
+        let spawn = ssh_transport::spawn_remote(ssh_target).await?;
+        Self::promote_to_direct_tcp(spawn, caps).await
+    }
+
+    /// Test helper: local `bcmr serve` subprocess → rendezvous → TCP.
+    #[allow(dead_code)]
+    pub async fn connect_direct_local_with_caps(caps: u8) -> Result<Self, BcmrError> {
+        let bcmr_path = Self::locate_bcmr_binary()?;
+        let spawn = ssh_transport::spawn_local(&bcmr_path).await?;
+        Self::promote_to_direct_tcp(spawn, caps).await
+    }
+
+    #[allow(dead_code)]
+    pub async fn connect_direct_local() -> Result<Self, BcmrError> {
+        Self::connect_direct_local_with_caps(CLIENT_CAPS).await
+    }
+
     #[allow(dead_code)]
     async fn spawn_local_serve() -> Result<Self, BcmrError> {
+        let bcmr_path = Self::locate_bcmr_binary()?;
+        let spawn = ssh_transport::spawn_local(&bcmr_path).await?;
+        Ok(Self::from_ssh_spawn(spawn))
+    }
+
+    #[allow(dead_code)]
+    fn locate_bcmr_binary() -> Result<std::path::PathBuf, BcmrError> {
         // Find the bcmr binary in the same directory as the test binary.
         // current_exe() returns the test binary itself, not bcmr.
         let exe = std::env::current_exe()?;
@@ -110,20 +166,122 @@ impl ServeClient {
                 .map(|p| p.join(bin_name))
                 .unwrap_or_default(),
         ];
-        let bcmr_path = candidates
+        candidates
             .iter()
             .find(|p| p.exists())
+            .cloned()
             .ok_or_else(|| {
                 BcmrError::InvalidInput(format!(
                     "bcmr binary not found at {} or {}",
                     candidates[0].display(),
                     candidates[1].display()
                 ))
-            })?
-            .clone();
+            })
+    }
 
-        let spawn = ssh_transport::spawn_local(&bcmr_path).await?;
-        Ok(Self::from_ssh_spawn(spawn))
+    async fn promote_to_direct_tcp(
+        mut spawn: ssh_transport::SshSpawn,
+        caps: u8,
+    ) -> Result<Self, BcmrError> {
+        use tokio::io::{AsyncWriteExt as _, AsyncReadExt as _};
+
+        // Control handshake: advertise CAP_DIRECT_TCP alongside whatever
+        // the caller wants for the data session. The data-session
+        // handshake over TCP happens below with `caps` unchanged so
+        // compression negotiation stays the caller's choice.
+        protocol::write_message(
+            &mut spawn.stdin,
+            &Message::Hello {
+                version: PROTOCOL_VERSION,
+                caps: caps | CAP_DIRECT_TCP,
+            },
+        )
+        .await?;
+        spawn.stdin.flush().await?;
+
+        let control_caps = match protocol::read_message(&mut spawn.stdout).await? {
+            Some(Message::Welcome {
+                caps: server_caps, ..
+            }) => server_caps,
+            Some(Message::Error { message }) => return Err(BcmrError::InvalidInput(message)),
+            Some(other) => {
+                return Err(BcmrError::InvalidInput(format!(
+                    "unexpected handshake response: {other:?}"
+                )))
+            }
+            None => {
+                return Err(BcmrError::InvalidInput(
+                    "server closed connection during handshake".into(),
+                ))
+            }
+        };
+        if (control_caps & CAP_DIRECT_TCP) == 0 {
+            return Err(BcmrError::InvalidInput(
+                "server did not negotiate CAP_DIRECT_TCP; cannot use direct-TCP transport".into(),
+            ));
+        }
+
+        protocol::write_message(&mut spawn.stdin, &Message::OpenDirectChannel).await?;
+        spawn.stdin.flush().await?;
+        let (addr, session_key) = match protocol::read_message(&mut spawn.stdout).await? {
+            Some(Message::DirectChannelReady { addr, session_key }) => (addr, session_key),
+            Some(Message::Error { message }) => return Err(BcmrError::InvalidInput(message)),
+            Some(other) => {
+                return Err(BcmrError::InvalidInput(format!(
+                    "expected DirectChannelReady, got {other:?}"
+                )))
+            }
+            None => {
+                return Err(BcmrError::InvalidInput(
+                    "server closed connection before DirectChannelReady".into(),
+                ))
+            }
+        };
+
+        // Open the data channel before releasing SSH stdin, so the
+        // server's rendezvous listener still has the connection in its
+        // backlog if EOF on SSH triggers any cascade timing.
+        let stream = tokio::net::TcpStream::connect(&addr).await?;
+        let (tcp_reader, tcp_writer) = stream.into_split();
+
+        // Drop SSH stdin to EOF the control session; remote exits its
+        // SSH run_session and falls through to await the rendezvous
+        // task that will run our TCP session.
+        drop(spawn.stdin);
+
+        // Keep local ssh happy by draining whatever it forwards after
+        // we stopped reading. In practice the remote writes nothing
+        // past DirectChannelReady, but an unread pipe would wedge
+        // ssh's output loop.
+        let mut stdout = spawn.stdout;
+        let stdout_drain = tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            loop {
+                match stdout.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+
+        let mut client = Self {
+            transport: Transport::DirectTcp {
+                ssh_control: spawn.child,
+                _stdout_drain: stdout_drain,
+            },
+            reader: Box::new(tcp_reader),
+            writer: Some(Box::new(tcp_writer)),
+            algo: CompressionAlgo::None,
+            dedup_enabled: false,
+        };
+
+        // Prove to the server that we learned the session key over the
+        // authenticated SSH channel, then do the normal protocol
+        // handshake on the data plane.
+        let mac = *blake3::keyed_hash(&session_key, AUTH_HELLO_TAG).as_bytes();
+        client.send(&Message::AuthHello { mac }).await?;
+        client.handshake(caps).await?;
+        Ok(client)
     }
 
     fn from_ssh_spawn(spawn: ssh_transport::SshSpawn) -> Self {
@@ -797,6 +955,9 @@ impl Transport {
             Transport::Ssh { child } => {
                 let _ = child.wait().await;
             }
+            Transport::DirectTcp { ssh_control, .. } => {
+                let _ = ssh_control.wait().await;
+            }
         }
     }
 
@@ -805,6 +966,11 @@ impl Transport {
             Transport::Ssh { child } => {
                 let _ = child.start_kill();
             }
+            // Don't SIGKILL the SSH control child. The remote serve
+            // exits cleanly once the TCP data session ends; local
+            // ssh follows once remote sshd closes the channel, and
+            // tokio's background reaper cleans up the zombie.
+            Transport::DirectTcp { .. } => {}
         }
     }
 }
