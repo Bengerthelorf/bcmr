@@ -1244,6 +1244,71 @@ async fn serve_open_direct_channel_reply_is_well_formed() {
     let _ = child.wait().await;
 }
 
+/// Server running over `--listen` (TCP transport) must not advertise
+/// CAP_DIRECT_TCP in its Welcome. Prevents recursive rendezvous — any
+/// client already on the direct-TCP path asking for another one is
+/// an amplification vector with no legitimate use case.
+#[tokio::test]
+async fn serve_listen_does_not_offer_direct_tcp_cap() {
+    use bcmr::core::protocol::{
+        read_message, write_message, Message, CAP_DIRECT_TCP, PROTOCOL_VERSION,
+    };
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::net::TcpStream;
+
+    let exe = std::env::current_exe().unwrap();
+    let bin_name = if cfg!(windows) { "bcmr.exe" } else { "bcmr" };
+    let bin = exe.parent().unwrap().parent().unwrap().join(bin_name);
+    let mut child = tokio::process::Command::new(&bin)
+        .args(["serve", "--listen", "127.0.0.1:0", "--root", "/"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut stdout = BufReader::new(stdout);
+    let mut line = String::new();
+    stdout.read_line(&mut line).await.unwrap();
+    let addr: std::net::SocketAddr = line
+        .trim_start_matches("LISTENING ")
+        .trim()
+        .parse()
+        .unwrap();
+
+    let sock = TcpStream::connect(addr).await.unwrap();
+    let (reader, writer) = sock.into_split();
+    let mut reader = reader;
+    let mut writer = writer;
+    // Client asks for the full cap set — server must mask out
+    // CAP_DIRECT_TCP on this transport.
+    write_message(
+        &mut writer,
+        &Message::Hello {
+            version: PROTOCOL_VERSION,
+            caps: CAP_DIRECT_TCP,
+        },
+    )
+    .await
+    .unwrap();
+    match read_message(&mut reader).await.unwrap().unwrap() {
+        Message::Welcome { caps, .. } => {
+            assert_eq!(
+                caps & CAP_DIRECT_TCP,
+                0,
+                "TCP-transport server must not offer CAP_DIRECT_TCP, got caps={caps:#x}"
+            );
+        }
+        other => panic!("expected Welcome, got {other:?}"),
+    }
+
+    drop(writer);
+    drop(reader);
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
+
 /// Without CAP_DIRECT_TCP in the negotiated caps, the server must refuse
 /// OpenDirectChannel with an Error. Guards forward compat for old
 /// clients that don't know about Path B.

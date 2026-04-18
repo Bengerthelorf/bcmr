@@ -108,7 +108,9 @@ pub async fn run(root: Option<PathBuf>) -> Result<()> {
     let mut stdout = io::stdout();
     // allow_splice=true: the writer is real STDOUT_FILENO, which
     // handle_get_splice_linux hardcodes.
-    run_session(&mut stdin, &mut stdout, &root, true).await
+    // allow_direct_tcp=true: only the stdin/stdout path (invoked by
+    // sshd) is authenticated enough to escalate.
+    run_session(&mut stdin, &mut stdout, &root, true, true).await
 }
 
 pub async fn run_listen(root: Option<PathBuf>, addr: std::net::SocketAddr) -> Result<()> {
@@ -147,7 +149,11 @@ pub async fn run_listen(root: Option<PathBuf>, addr: std::net::SocketAddr) -> Re
         tokio::spawn(async move {
             let (mut reader, mut writer) = stream.into_split();
             // allow_splice=false: TCP socket fd is not STDOUT_FILENO.
-            let _ = run_session(&mut reader, &mut writer, &root, false).await;
+            // allow_direct_tcp=false: an already-direct-TCP peer has no
+            // reason to escalate to another direct-TCP channel, and
+            // allowing it would let any reachable TCP client open new
+            // listeners recursively (amplification / port exhaustion).
+            let _ = run_session(&mut reader, &mut writer, &root, false, false).await;
         });
     }
 }
@@ -157,11 +163,24 @@ async fn run_session<R, W>(
     writer: &mut W,
     root: &Path,
     allow_splice: bool,
+    allow_direct_tcp: bool,
 ) -> Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
+    // Transport-dependent cap mask. Direct-TCP peers see a server that
+    // doesn't advertise the escalation bit, closing the recursive-
+    // rendezvous amplification vector.
+    let offered_caps = if allow_direct_tcp {
+        SERVER_CAPS
+    } else {
+        SERVER_CAPS & !CAP_DIRECT_TCP
+    };
+    // Rendezvous listener handles; awaited before return so a dropped
+    // session cleans up anything it spun up.
+    let mut rendezvous_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
     let effective_caps = match protocol::read_message(reader).await? {
         Some(Message::Hello { version, caps }) => {
             if version != PROTOCOL_VERSION {
@@ -177,7 +196,7 @@ where
                 writer.flush().await?;
                 return Ok(());
             }
-            SERVER_CAPS & caps
+            offered_caps & caps
         }
         Some(other) => {
             protocol::write_message(
@@ -286,7 +305,13 @@ where
             },
             Message::OpenDirectChannel => {
                 if direct_tcp {
-                    handle_open_direct_channel().await
+                    match handle_open_direct_channel().await {
+                        Ok((msg, handle)) => {
+                            rendezvous_tasks.push(handle);
+                            Ok(msg)
+                        }
+                        Err(e) => Err(e),
+                    }
                 } else {
                     Err(anyhow::anyhow!(
                         "CAP_DIRECT_TCP not negotiated on this session"
@@ -308,6 +333,15 @@ where
 
         protocol::write_message(writer, &reply).await?;
         writer.flush().await?;
+    }
+
+    // Session done — cancel any rendezvous listeners still waiting for
+    // their one accept. Tasks that already accepted complete naturally.
+    for handle in &rendezvous_tasks {
+        handle.abort();
+    }
+    for handle in rendezvous_tasks {
+        let _ = handle.await;
     }
 
     Ok(())
@@ -832,10 +866,9 @@ async fn handle_mkdir(path: &str) -> Result<Message> {
     Ok(Message::Ok { hash: None })
 }
 
-// TODO(direct-tcp): bind to $SSH_CONNECTION server_ip, one-shot listener
-// with lifetime tied to the enclosing session, AuthHello + AEAD dispatch.
-// Current body is a stub: accepts and drops, no auth.
-async fn handle_open_direct_channel() -> Result<Message> {
+// TODO(direct-tcp): bind to $SSH_CONNECTION server_ip, AuthHello + AEAD
+// dispatch. Current body is a stub that accepts one connection and drops.
+async fn handle_open_direct_channel() -> Result<(Message, tokio::task::JoinHandle<()>)> {
     use ring::rand::{SecureRandom, SystemRandom};
     use tokio::net::TcpListener;
     use zeroize::Zeroizing;
@@ -848,20 +881,20 @@ async fn handle_open_direct_channel() -> Result<Message> {
     rng.fill(session_key.as_mut())
         .map_err(|_| anyhow::anyhow!("ring::rand failed to produce session key"))?;
 
-    tokio::spawn(async move {
-        while let Ok((stream, _peer)) = listener.accept().await {
-            drop(stream);
-        }
+    // One-shot: accept exactly one connection, drop the listener, task
+    // exits. Prevents the listener from outliving its single rendezvous.
+    let handle = tokio::spawn(async move {
+        let _ = listener.accept().await;
     });
 
-    // The key is copied into the outgoing Message and from there into
-    // the framing buffer. Best-effort zeroize leaves no trace in this
-    // stack frame; downstream copies survive until the buffers drop.
     let key_out = *session_key;
-    Ok(Message::DirectChannelReady {
-        addr: addr.to_string(),
-        session_key: key_out,
-    })
+    Ok((
+        Message::DirectChannelReady {
+            addr: addr.to_string(),
+            session_key: key_out,
+        },
+        handle,
+    ))
 }
 
 async fn handle_resume(path: &str) -> Result<Message> {
