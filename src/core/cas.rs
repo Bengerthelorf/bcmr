@@ -1,16 +1,6 @@
-//! Content-addressed store for the dedup wire path.
-//!
-//! Stores 4 MiB blocks at `~/.local/share/bcmr/cas/<aa>/<bb>/<rest>.blk`
-//! where `aabb...` is the lowercase hex of the block's BLAKE3 hash.
-//! The two-level prefix keeps any single directory from accumulating
-//! more than ~65k entries on the workloads we care about.
-//!
-//! Capped via a soft byte limit (default 1 GiB, override with the
-//! BCMR_CAS_CAP_MB env var). Eviction runs lazily on the first
-//! `evict_to_cap` call after the store crosses the cap and uses
-//! filesystem mtime as the LRU clock — every successful `read` or
-//! `write` touches the mtime, so an actively-hit blob stays warm
-//! while truly-cold blobs roll out.
+//! Content-addressed store at `~/.local/share/bcmr/cas/<aa>/<bb>/<rest>.blk`.
+//! Two-level prefix caps directory fan-out at ~65k entries. LRU eviction
+//! uses filesystem mtime; every read/write touches it so hot blobs stay warm.
 
 use std::io;
 use std::path::PathBuf;
@@ -50,20 +40,16 @@ pub fn has(hash: &[u8; 32]) -> bool {
 pub fn read(hash: &[u8; 32]) -> io::Result<Vec<u8>> {
     let p = path_for(hash);
     let data = std::fs::read(&p)?;
-    // Bump mtime so this blob is fresher than any not-just-touched one.
-    // Failure here is harmless — eviction would just remove it sooner.
     let now = filetime::FileTime::from_system_time(SystemTime::now());
     let _ = filetime::set_file_mtime(&p, now);
     Ok(data)
 }
 
-/// Atomically write `data` to the CAS at the slot derived from `hash`.
-/// No-op when the slot already exists. The hash itself is not verified
-/// here — callers are expected to have just computed it from `data`.
+/// Atomically write `data` to the slot derived from `hash`. No-op if the slot
+/// exists; the hash itself is not verified — callers just computed it.
 pub fn write(hash: &[u8; 32], data: &[u8]) -> io::Result<()> {
     let dst = path_for(hash);
     if dst.exists() {
-        // Touch mtime so an existing blob counts as recently used too.
         let now = filetime::FileTime::from_system_time(SystemTime::now());
         let _ = filetime::set_file_mtime(&dst, now);
         return Ok(());
@@ -77,10 +63,7 @@ pub fn write(hash: &[u8; 32], data: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-/// Resolve the configured byte cap. `BCMR_CAS_CAP_MB=0` disables the
-/// cap entirely (back to the v0.5.8 unbounded behaviour); any other
-/// positive integer caps the store at that many MiB. Default 1024
-/// (= 1 GiB) when unset or unparseable.
+/// `BCMR_CAS_CAP_MB=0` disables the cap; default 1024 (= 1 GiB).
 pub fn cap_bytes() -> Option<u64> {
     let raw = std::env::var("BCMR_CAS_CAP_MB").ok();
     let mb: u64 = match raw.as_deref().and_then(|s| s.parse().ok()) {
@@ -91,9 +74,7 @@ pub fn cap_bytes() -> Option<u64> {
     Some(mb * 1024 * 1024)
 }
 
-/// Walk the CAS, sum total blob bytes, and if over `cap` evict oldest
-/// blobs by mtime until under. Returns the bytes evicted. Cheap when
-/// already under the cap (one walk, one early return).
+/// Evict oldest-mtime blobs until total is under `cap`. Returns bytes freed.
 pub fn evict_to_cap(cap: u64) -> io::Result<u64> {
     let root = cas_root();
     if !root.exists() {
@@ -156,10 +137,8 @@ mod tests {
     use super::*;
 
     fn unique_hash() -> [u8; 32] {
-        // Time + pid + monotonically-increasing counter. Time alone
-        // collides when called in tight succession (system clock
-        // resolution > nanosecond on macOS), so the counter is the
-        // actual uniqueness guarantee.
+        // Counter is the real uniqueness guarantee — macOS clock
+        // resolution is coarser than nanoseconds so time alone collides.
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -209,10 +188,8 @@ mod tests {
         std::env::remove_var("BCMR_CAS_DIR");
     }
 
-    /// Use a per-test CAS directory via tempdir + BCMR_CAS_DIR override.
-    /// Returns the tempdir guard so the caller can keep it alive for the
-    /// duration of the test. Tests that share env vars must serialize
-    /// via CAS_DIR_LOCK because std::env::set_var races across threads.
+    // Tests that share env vars must serialize via CAS_DIR_LOCK because
+    // std::env::set_var races across threads.
     fn isolated_cas() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("BCMR_CAS_DIR", tmp.path());
@@ -221,9 +198,6 @@ mod tests {
 
     static CAS_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// Take the lock, recovering from poisoning so a panic in one test
-    /// doesn't cascade to fail every later test that also touches the
-    /// shared CAS dir env var.
     fn lock_cas() -> std::sync::MutexGuard<'static, ()> {
         CAS_DIR_LOCK.lock().unwrap_or_else(|p| p.into_inner())
     }
@@ -249,7 +223,6 @@ mod tests {
         filetime::set_file_mtime(path_for(&h_mid), t_mid).unwrap();
         filetime::set_file_mtime(path_for(&h_new), t_new).unwrap();
 
-        // Cap = 1.5 KiB: must drop the two oldest, keep the newest.
         let freed = evict_to_cap(1536).unwrap();
         assert!(freed >= 2 * 1024, "freed={}", freed);
         assert!(!has(&h_old));
@@ -298,17 +271,14 @@ mod tests {
         write(&h_a, &payload).unwrap();
         write(&h_b, &payload).unwrap();
 
-        // Backdate both blobs.
         let old = filetime::FileTime::from_system_time(
             std::time::SystemTime::now() - std::time::Duration::from_secs(300),
         );
         filetime::set_file_mtime(path_for(&h_a), old).unwrap();
         filetime::set_file_mtime(path_for(&h_b), old).unwrap();
 
-        // Touch h_a via read; its mtime jumps to now while h_b stays old.
         let _ = read(&h_a).unwrap();
 
-        // Cap so only one survives — the freshly-touched h_a.
         let _ = evict_to_cap(1024).unwrap();
         assert!(has(&h_a), "recently-read blob should win the LRU");
         assert!(!has(&h_b));

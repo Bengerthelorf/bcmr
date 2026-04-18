@@ -13,7 +13,6 @@ struct Entry {
     is_dir: bool,
 }
 
-/// Compare source(s) against a destination and return a structured diff.
 pub async fn run(
     sources: &[PathBuf],
     dest: &Path,
@@ -32,7 +31,7 @@ pub async fn run(
         ));
     }
 
-    // Determine the remote host (if any) and open ONE connection for all operations
+    // One connection services stat + list for every source.
     let remote_host = if let Some(ref rd) = remote_dest {
         Some(rd.ssh_target())
     } else if any_remote_source {
@@ -196,10 +195,6 @@ async fn collect_both(
     Ok((src_entries, dst_entries))
 }
 
-// ---------------------------------------------------------------------------
-// Remote helpers — single connection for stat + list
-// ---------------------------------------------------------------------------
-
 async fn remote_is_dir(
     rp: &RemotePath,
     serve: &mut Option<ServeClient>,
@@ -238,13 +233,12 @@ async fn collect_remote_entries(
                     .collect());
             }
             Err(_) => {
-                // Serve list failed (e.g. frame too large for huge directories).
-                // Drop the broken connection and fall through to SSH find.
+                // Serve list can fail on huge dirs (frame size limit).
+                // SSH find has no such limit — drop and fall through.
                 *serve = None;
             }
         }
     }
-    // Fallback: SSH find (no frame size limit, handles any directory size)
     let files = remote::remote_list_files(rp).await?;
     Ok(files
         .into_iter()
@@ -255,10 +249,6 @@ async fn collect_remote_entries(
         })
         .collect())
 }
-
-// ---------------------------------------------------------------------------
-// Local
-// ---------------------------------------------------------------------------
 
 fn collect_local_entries(root: &Path, excludes: &[regex::Regex]) -> Result<Vec<Entry>, BcmrError> {
     let mut entries = Vec::new();
@@ -275,10 +265,6 @@ fn collect_local_entries(root: &Path, excludes: &[regex::Regex]) -> Result<Vec<E
     }
     Ok(entries)
 }
-
-// ---------------------------------------------------------------------------
-// Output helpers
-// ---------------------------------------------------------------------------
 
 fn emit_connecting(host: &str) {
     if crate::config::is_json_mode() {
@@ -302,10 +288,6 @@ fn emit_scanning_done(count: usize) {
     }
     eprintln!(" {} entries", count);
 }
-
-// ---------------------------------------------------------------------------
-// Diff
-// ---------------------------------------------------------------------------
 
 fn diff_entries(src: Vec<Entry>, dst: Vec<Entry>) -> (Vec<FileDiff>, Vec<FileDiff>, Vec<FileDiff>) {
     let dst_map: HashMap<&str, &Entry> = dst.iter().map(|e| (e.rel_path.as_str(), e)).collect();

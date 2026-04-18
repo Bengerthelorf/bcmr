@@ -30,9 +30,8 @@ fn check_removes_sync(
             continue;
         }
 
-        // symlink_metadata() doesn't follow symlinks, so dangling symlinks
-        // report Ok and broken-target files aren't accidentally hidden as
-        // "missing".
+        // symlink_metadata() lets us see dangling symlinks (metadata()
+        // would follow the link and report NotFound).
         let md = match path.symlink_metadata() {
             Ok(m) => m,
             Err(_) if force => continue,
@@ -69,9 +68,6 @@ fn check_removes_sync(
                     let entry_path = entry.path();
                     let ft = entry.file_type();
 
-                    // Only regular files contribute bytes to the total.
-                    // Symlinks, fifos, sockets etc. all count as items to
-                    // remove but have size 0.
                     let size = if ft.is_file() {
                         entry.metadata().map(|m| m.len()).unwrap_or(0)
                     } else {
@@ -85,8 +81,6 @@ fn check_removes_sync(
                 }
             }
         } else {
-            // Regular file, symlink (valid or dangling), or any other
-            // non-directory entry. All of these are unlinked the same way.
             files_to_remove.push(FileToRemove {
                 path: path.to_path_buf(),
                 is_dir: false,
@@ -203,7 +197,6 @@ pub async fn remove_path(
         .to_string_lossy()
         .to_string();
 
-    // symlink_metadata so we see the link itself, not what it points at.
     let md = match path.symlink_metadata() {
         Ok(m) => m,
         Err(_) if cli.is_force() => return Ok(()),
@@ -243,8 +236,6 @@ pub async fn remove_path(
                 if ft.is_dir() {
                     fs::remove_dir(entry_path).await?;
                 } else {
-                    // Files, symlinks (valid or dangling), fifos, sockets:
-                    // unlink() handles all non-directories uniformly.
                     fs::remove_file(entry_path).await?;
                 }
             } else {
@@ -255,7 +246,6 @@ pub async fn remove_path(
                 report_progress(size, &test_mode, &progress_callback).await;
             }
 
-            // Skip root item itself
             if entry_path != path {
                 progress_state.lock().inc_processed();
             }
@@ -265,15 +255,11 @@ pub async fn remove_path(
             }
         }
     } else if md.is_dir() {
-        // Non-recursive directory: the earlier check in check_removes_sync
-        // would have rejected this for normal remove; dir_only / rmdir is
-        // handled by the caller's dry-run branch via remove_paths.
         return Err(BcmrError::InvalidInput(format!(
             "Cannot remove '{}': Is a directory (use -r for recursive removal)",
             path.display()
         )));
     } else {
-        // Regular file or symlink (any kind).
         if cli.is_dry_run() {
             print_dry_run(ActionType::Remove, &path.to_string_lossy(), None);
             return Ok(());

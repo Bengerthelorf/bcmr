@@ -81,7 +81,7 @@ async fn try_copy_file_range(
     let dst_fd = dst_file.as_raw_fd();
 
     if file_size > 0 {
-        // Best-effort preallocation; ignore ENOTSUP on filesystems that don't support it
+        // Best-effort preallocation; ENOTSUP on some filesystems is fine.
         unsafe {
             let _ = libc::fallocate(dst_fd, 0, 0, file_size as libc::off_t);
         }
@@ -261,8 +261,6 @@ fn is_normal_write(cli: &Commands) -> bool {
     !cli.is_resume() && !cli.is_append() && !cli.is_strict()
 }
 
-/// Check if destination exists and handle overwrite rules.
-/// Returns Err if overwrite is not allowed; removes dst if force + resume/append/strict mode.
 async fn check_overwrite(dst: &Path, cli: &Commands) -> std::result::Result<(), BcmrError> {
     if !dst.exists() {
         return Ok(());
@@ -327,7 +325,7 @@ pub struct CopyPlan {
 }
 
 /// Walk sources and emit PlanEntry items via callback.
-/// Core scanning logic shared between plan_copy and pipeline_copy.
+/// Shared between plan_copy (collects) and pipeline_copy (streams).
 fn scan_sources(
     sources: &[PathBuf],
     dst: &Path,
@@ -429,7 +427,6 @@ fn plan_copy_sync(
     scan_sources(&sources, &dst, recursive, &excludes, |entry, size| {
         total_size += size;
 
-        // Track overwrites
         let target = match &entry {
             PlanEntry::CopyFile { dst, .. } => Some((dst.clone(), false)),
             PlanEntry::CreateDir { dst, .. } => {
@@ -505,8 +502,8 @@ where
         on_new_file: Box::new(on_new_file),
     };
 
-    // Directories must exist before we spawn concurrent file copies into
-    // them. They're cheap, so we take them in the plan's DFS order.
+    // Directories must exist before concurrent file copies into them,
+    // so take them sequentially in the plan's DFS order.
     for entry in &plan.entries {
         if let PlanEntry::CreateDir { dst, .. } = entry {
             if !dst.exists() {
@@ -757,11 +754,9 @@ pub(crate) async fn preserve_attributes(
     Ok(())
 }
 
-/// Best-effort xattr copy. Filesystems that don't support xattrs (e.g.
-/// vfat, exFAT) return ENOTSUP / EOPNOTSUPP which we swallow silently —
-/// matching `cp -p` behaviour on the same target. Permission errors on
-/// specific names (e.g. `security.*` under SELinux) are also soft
-/// failures: the user wanted a copy, not a cryptographic identity.
+/// Best-effort xattr copy. ENOTSUP (vfat/exFAT) and per-name EPERM
+/// (e.g. `com.apple.rootless`, SELinux `security.*`) are soft failures,
+/// matching `cp -p`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn copy_xattrs(src: &Path, dst: &Path) -> std::result::Result<(), BcmrError> {
     let names = match xattr::list(src) {
@@ -770,16 +765,12 @@ fn copy_xattrs(src: &Path, dst: &Path) -> std::result::Result<(), BcmrError> {
         Err(e) => return Err(BcmrError::Io(e)),
     };
     for name in names {
-        // `xattr::list` returns raw byte names; copy both the name and
-        // value verbatim so binary-safe attributes round-trip exactly.
         let value = match xattr::get(src, &name) {
             Ok(Some(v)) => v,
             Ok(None) => continue,
             Err(e) if is_unsupported(&e) => continue,
             Err(_) => continue,
         };
-        // On macOS, system-level attrs like `com.apple.rootless` fail
-        // set_xattr with EPERM; we skip rather than abort the whole copy.
         let _ = xattr::set(dst, &name, &value);
     }
     Ok(())
@@ -787,7 +778,7 @@ fn copy_xattrs(src: &Path, dst: &Path) -> std::result::Result<(), BcmrError> {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn is_unsupported(e: &std::io::Error) -> bool {
-    // 95 = ENOTSUP on Linux, 45 = ENOTSUP on macOS, 1 = EPERM.
+    // 95 = ENOTSUP on Linux, 45 = ENOTSUP on macOS.
     matches!(e.raw_os_error(), Some(95) | Some(45))
 }
 
@@ -837,7 +828,6 @@ fn resolve_sparse_mode(arg: &Option<String>) -> SparseMode {
     }
 }
 
-/// Context for finalize — avoids repeating 10 parameters across call sites.
 struct FinalizeCtx<'a> {
     write_target: &'a Path,
     dst: &'a Path,
@@ -924,7 +914,6 @@ where
         write_target = dst.to_path_buf();
     }
 
-    // Fast path 1: reflink (CoW)
     if super::copy_strategies::try_reflink(
         src,
         &write_target,
@@ -950,7 +939,6 @@ where
         return ctx.run(fs::File::open(&write_target).await?).await;
     }
 
-    // Fast path 2: copy_file_range (Linux)
     #[cfg(target_os = "linux")]
     if use_atomic && matches!(test_mode, TestMode::None) && matches!(sparse_mode, SparseMode::Never)
     {
@@ -974,7 +962,6 @@ where
         }
     }
 
-    // Slow path: streaming copy with optional resume
     let resume_state = crate::core::resume::resolve(
         src,
         dst,
@@ -1068,9 +1055,8 @@ where
             None
         }
         TestMode::None => {
-            // We need the src hash whenever -V is set or there's a session
-            // that will outlive this run (resume/strict/append, or any file
-            // big enough that streaming_copy might be re-entered later).
+            // src hash is needed for -V and for sessions that will outlive
+            // this run (resume/strict/append).
             let need_src_hash = verify || session.is_some();
             super::copy_strategies::streaming_copy(
                 &mut src_file,
@@ -1153,7 +1139,7 @@ where
                 on_file_found(files_found);
             }
             if tx.blocking_send(ScanMessage::Entry(entry)).is_err() {
-                return Ok(()); // receiver dropped
+                return Ok(());
             }
             Ok(())
         });
@@ -1162,7 +1148,7 @@ where
         result
     });
 
-    let mut dir_entries: Vec<(PathBuf, PathBuf)> = Vec::new(); // (src, dst) for preserve
+    let mut dir_entries: Vec<(PathBuf, PathBuf)> = Vec::new();
 
     while let Some(msg) = rx.recv().await {
         match msg {
@@ -1212,12 +1198,11 @@ pub(crate) async fn verify_copy(
     dst: &Path,
     inline_src_hash: Option<blake3::Hash>,
 ) -> std::result::Result<(), BcmrError> {
-    // 2-pass verification: if we have an inline source hash (computed during copy),
-    // we only need to re-read the destination — saving one full file read.
+    // With an inline src hash we only re-read the dst (reflink and
+    // copy_file_range don't get inline hashes, so those re-read both).
     let src_hash_str = if let Some(h) = inline_src_hash {
         h.to_hex().to_string()
     } else {
-        // Fallback: no inline hash available (reflink/copy_file_range path)
         let src_path = src.to_path_buf();
         tokio::task::spawn_blocking(move || checksum::calculate_hash(&src_path)).await??
     };

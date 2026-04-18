@@ -82,25 +82,18 @@ impl ProgressRunner {
         bail!("{}", msg);
     }
 
-    /// Emit the error terminal event without returning an Err. Use at the
-    /// handler boundary when you want to propagate an existing error up
-    /// the stack while still making sure the log file gets a terminal
-    /// "error" line. Unlike `finish_err`, this consumes self and leaves
-    /// the caller to re-raise the original error.
+    /// Emits the error terminal event without returning an Err, so the caller
+    /// can re-raise the original error while the log file still gets a
+    /// terminal "error" line.
     pub fn finish_with_error(self, msg: &str) {
         self.ticker_handle.abort();
         let _ = self.progress.lock().finish_err(msg);
     }
 }
 
-/// Hard stop the ticker task when the runner is dropped without an
-/// explicit `finish_*`. Tokio's `JoinHandle` detaches on drop, so
-/// without this the 100 ms-tick painter keeps running in the background
-/// — and if the handler then spawns a *new* runner (e.g. serve fast
-/// path errors and we fall back to legacy SSH, which builds its own
-/// runner), two ticker tasks paint the same progress bar at once,
-/// corrupting the render. Belt-and-suspenders: `abort()` on an
-/// already-aborted handle is a no-op.
+/// Tokio's `JoinHandle` detaches on drop; without aborting, two ticker tasks
+/// could paint the same progress bar at once if the handler spawns a second
+/// runner (e.g. serve fast path errors and we fall back to legacy SSH).
 impl Drop for ProgressRunner {
     fn drop(&mut self) {
         self.ticker_handle.abort();

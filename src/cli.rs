@@ -18,7 +18,6 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// Internal: run as a detached background job writing to a log file.
     #[arg(long = "_bg", hide = true)]
     pub _bg: Option<String>,
 }
@@ -47,7 +46,6 @@ impl std::fmt::Display for Shell {
     }
 }
 
-/// Shared arguments for copy and move operations
 #[derive(Args, Debug)]
 pub struct CopyMoveArgs {
     /// Source files and destination directory (last argument is the destination)
@@ -128,6 +126,23 @@ pub struct CopyMoveArgs {
     /// the dst client-side).
     #[arg(long, default_value_t = false)]
     pub fast: bool,
+
+    /// Data-plane transport. `ssh` (default) carries data over the SSH
+    /// channel alongside auth. `direct` uses SSH only for rendezvous,
+    /// then opens a dedicated TCP socket for data with AES-256-GCM
+    /// framing — bypasses SSH's single-stream cipher ceiling on fast
+    /// networks. Fails hard if the server doesn't advertise
+    /// CAP_DIRECT_TCP (v0.5.20+).
+    #[arg(long, value_enum, default_value_t = DirectMode::Ssh)]
+    pub direct: DirectMode,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum DirectMode {
+    /// Default: data over the same SSH channel as auth.
+    Ssh,
+    /// Data plane over a dedicated AES-256-GCM-framed TCP socket.
+    Direct,
 }
 
 #[derive(Subcommand, Debug)]
@@ -219,6 +234,13 @@ pub enum Commands {
         /// (only safe for throwaway/root accounts).
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Listen on a TCP address instead of stdin/stdout. Dev/test
+        /// only until rendezvous + auth land — binding to anything
+        /// other than a loopback address is unsafe (no peer auth yet).
+        /// Format: `127.0.0.1:0` (any port) or `host:port`. Prints
+        /// `LISTENING <bound-addr>\n` to stdout on bind.
+        #[arg(long, value_name = "ADDR")]
+        listen: Option<String>,
     },
 
     /// Deploy bcmr to a remote host for serve protocol support
@@ -297,8 +319,8 @@ pub enum Commands {
 
 #[derive(Debug, Clone)]
 pub enum TestMode {
-    Delay(u64),      // Milliseconds delay
-    SpeedLimit(u64), // Bytes per second
+    Delay(u64),
+    SpeedLimit(u64),
     None,
 }
 
@@ -390,14 +412,12 @@ impl Commands {
         self.copy_move_args().is_some_and(|a| a.sync)
     }
 
-    /// Desired concurrency for local multi-file operations.
     pub fn local_jobs(&self) -> usize {
         self.copy_move_args()
             .and_then(|a| a.jobs)
             .unwrap_or_else(|| num_cpus::get().clamp(1, 8))
     }
 
-    /// Parse --compress into a capability bitmask for the serve handshake.
     pub fn compression_caps(&self) -> u8 {
         use crate::core::protocol::{CAP_LZ4, CAP_ZSTD};
         match self
@@ -414,11 +434,6 @@ impl Commands {
         }
     }
 
-    /// Build the full caps byte sent in Hello: compression bits OR'd
-    /// with CAP_DEDUP (default on; dedup activates only on file size
-    /// threshold), plus CAP_FAST if the user passed --fast, plus
-    /// CAP_SYNC if the user passed --sync (per-file fsync; off by
-    /// default to match local copy behavior).
     pub fn protocol_caps(&self) -> u8 {
         use crate::core::protocol::{CAP_DEDUP, CAP_FAST, CAP_SYNC};
         let mut caps = self.compression_caps() | CAP_DEDUP;
@@ -429,6 +444,13 @@ impl Commands {
             caps |= CAP_SYNC;
         }
         caps
+    }
+
+    pub fn use_direct_tcp(&self) -> bool {
+        matches!(
+            self.copy_move_args().map(|a| a.direct),
+            Some(DirectMode::Direct)
+        )
     }
 
     pub fn get_reflink_mode(&self) -> Option<String> {
@@ -578,6 +600,7 @@ mod tests {
             jobs: None,
             compress: "auto".to_string(),
             fast: false,
+            direct: DirectMode::Ssh,
         }
     }
 

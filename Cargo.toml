@@ -1,6 +1,6 @@
 [package]
 name = "bcmr"
-version = "0.5.19"
+version = "0.5.20"
 edition = "2021"
 authors = ["Zane Leong"]
 description = "Better Copy Move Remove (BCMR) - A modern CLI tool for file operations with progress bar and advanced features"
@@ -46,6 +46,13 @@ futures = "0.3"
 num_cpus = "1.16"
 lz4_flex = { version = "0.11", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 zstd = { version = "0.13", default-features = false }
+# Path B direct-TCP transport: RNG for session keys + AES-256-GCM on
+# the data plane. BoringSSL-backed, hand-tuned AES-NI / VAES asm on
+# x86, hardware AES on ARMv8-A / Apple Silicon. crypto_probe.rs
+# measured ~5 GB/s on M-series, ~1.5 GB/s on contended Xeon —
+# materially past SSH's ~500 MB/s single-stream ceiling.
+ring = "0.17"
+zeroize = { version = "1.8", features = ["derive"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 xattr = "1.5"
@@ -69,3 +76,7 @@ path = "bench/compress_probe.rs"
 [[example]]
 name = "dedup_breakdown"
 path = "bench/dedup_breakdown.rs"
+
+[[example]]
+name = "crypto_probe"
+path = "bench/crypto_probe.rs"

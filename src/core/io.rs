@@ -1,15 +1,9 @@
 use std::io;
 use std::path::Path;
 
-/// Durable sync: ensures data is on persistent storage, not just OS cache.
-///
-/// On macOS, `fsync()` only flushes to the drive's write cache, not to the
-/// actual storage medium. `F_FULLFSYNC` issues a full cache flush command
-/// to the drive controller, guaranteeing durability. This is what SQLite,
-/// RocksDB, and PostgreSQL use on macOS.
-///
-/// On Linux, `fdatasync()` provides sufficient guarantees with ext4's
-/// `data=ordered` mode (the default) and XFS.
+/// On macOS `fsync()` only reaches the drive's write cache; `F_FULLFSYNC`
+/// forces a controller-level flush, matching SQLite/RocksDB/Postgres. On
+/// Linux `fdatasync()` is sufficient on ext4 `data=ordered` and XFS.
 #[cfg(target_os = "macos")]
 pub fn durable_sync(file: &std::fs::File) -> io::Result<()> {
     use std::os::unix::io::AsRawFd;
@@ -26,10 +20,6 @@ pub fn durable_sync(file: &std::fs::File) -> io::Result<()> {
     file.sync_data()
 }
 
-/// Async version of durable_sync for tokio::fs::File.
-///
-/// Extracts the std::fs::File via `try_into_std()`, performs the sync on a
-/// blocking thread, then converts back.
 pub async fn durable_sync_async(file: &tokio::fs::File) -> io::Result<()> {
     let std_file = file.try_clone().await?.into_std().await;
     tokio::task::spawn_blocking(move || durable_sync(&std_file))
@@ -37,26 +27,19 @@ pub async fn durable_sync_async(file: &tokio::fs::File) -> io::Result<()> {
         .map_err(io::Error::other)?
 }
 
-/// Fsync a directory to ensure that directory entry changes (renames, creates)
-/// are durable. Required after rename() on XFS and other filesystems that don't
-/// have ext4's `auto_da_alloc` heuristic.
-///
-/// This is a best-effort operation: if the directory can't be opened or synced,
-/// we silently continue rather than failing the copy.
+/// Best-effort fsync of a directory. Required after rename() on XFS and other
+/// filesystems without ext4's `auto_da_alloc` heuristic.
 pub fn fsync_dir(dir: &Path) {
     if let Ok(d) = std::fs::File::open(dir) {
         let _ = durable_sync(&d);
     }
 }
 
-/// Async version of fsync_dir.
 pub async fn fsync_dir_async(dir: &Path) {
     let dir = dir.to_path_buf();
     let _ = tokio::task::spawn_blocking(move || fsync_dir(&dir)).await;
 }
 
-/// Get the inode number of a file (Unix only).
-/// Returns 0 on non-Unix platforms.
 #[cfg(unix)]
 pub fn get_inode(path: &Path) -> io::Result<u64> {
     use std::os::unix::fs::MetadataExt;
@@ -85,13 +68,11 @@ mod tests {
     #[test]
     fn test_fsync_dir_on_valid_dir() {
         let dir = tempfile::tempdir().unwrap();
-        // Should not panic or error
         fsync_dir(dir.path());
     }
 
     #[test]
     fn test_fsync_dir_on_nonexistent() {
-        // Best-effort — should not panic
         fsync_dir(Path::new("/nonexistent/dir/abc"));
     }
 

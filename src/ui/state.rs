@@ -156,12 +156,11 @@ impl ProgressData {
         if self.total_bytes == 0 || self.current_bytes >= self.total_bytes {
             return Some(Duration::from_secs(0));
         }
-        // last_speed is in MiB/s
         if self.last_speed <= 0.0 {
             return None;
         }
         let remaining_bytes = self.total_bytes.saturating_sub(self.current_bytes) as f64;
-        let bytes_per_sec = self.last_speed * 1024.0 * 1024.0; // convert MiB/s -> B/s
+        let bytes_per_sec = self.last_speed * 1024.0 * 1024.0;
         if bytes_per_sec <= 0.0 {
             return None;
         }
@@ -221,7 +220,7 @@ mod tests {
     fn test_estimate_eta_with_speed() {
         let mut pd = ProgressData::new(1024 * 1024 * 100);
         pd.current_bytes = 1024 * 1024 * 50;
-        pd.last_speed = 10.0; // 10 MiB/s
+        pd.last_speed = 10.0;
         let eta = pd.estimate_eta().unwrap();
         assert_eq!(eta.as_secs(), 5);
     }

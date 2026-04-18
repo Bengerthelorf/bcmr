@@ -1,20 +1,12 @@
 use serde::Serialize;
 use std::path::PathBuf;
 
-// ---------------------------------------------------------------------------
-// Core output envelope — used by check and error reporting
-// ---------------------------------------------------------------------------
-
 #[derive(Serialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum CommandOutput {
     Check(CheckResult),
     Error(ErrorResult),
 }
-
-// ---------------------------------------------------------------------------
-// Check
-// ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
 pub struct CheckResult {
@@ -53,10 +45,6 @@ pub struct CheckSummary {
     pub total_bytes: u64,
 }
 
-// ---------------------------------------------------------------------------
-// Error (for --json mode error output)
-// ---------------------------------------------------------------------------
-
 #[derive(Serialize)]
 pub struct ErrorResult {
     pub status: Status,
@@ -64,20 +52,12 @@ pub struct ErrorResult {
     pub error_kind: String,
 }
 
-// ---------------------------------------------------------------------------
-// Shared
-// ---------------------------------------------------------------------------
-
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
     Success,
     Error,
 }
-
-// ---------------------------------------------------------------------------
-// Constructors
-// ---------------------------------------------------------------------------
 
 impl CheckResult {
     pub fn error(msg: impl Into<String>, kind: impl Into<String>) -> Self {
@@ -99,16 +79,12 @@ impl CheckResult {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Rendering
-// ---------------------------------------------------------------------------
-
 impl CommandOutput {
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).expect("CommandOutput must be serializable")
     }
 
-    /// Exit code: 0 = success/in-sync, 1 = check found diffs, 2 = error
+    /// Exit code: 0 = success/in-sync, 1 = check found diffs, 2 = error.
     pub fn exit_code(&self) -> i32 {
         match self {
             CommandOutput::Check(r) => {
@@ -124,10 +100,6 @@ impl CommandOutput {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Error helpers
-// ---------------------------------------------------------------------------
 
 fn error_kind_from(err: &dyn std::error::Error) -> String {
     let msg = err.to_string();

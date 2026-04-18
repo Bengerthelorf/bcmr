@@ -85,7 +85,6 @@ mod tests {
         let entries: Vec<_> = walk(dir.path(), true, false, 1, &[])
             .filter_map(|e| e.ok())
             .collect();
-        // sub dir + a.txt + sub/b.txt = 3
         assert_eq!(entries.len(), 3);
     }
 
@@ -113,7 +112,6 @@ mod tests {
         let entries: Vec<_> = walk(dir.path(), true, true, 1, &[])
             .filter_map(|e| e.ok())
             .collect();
-        // In contents_first mode, file appears before its parent directory
         let file_idx = entries.iter().position(|e| e.path().is_file()).unwrap();
         let dir_idx = entries.iter().position(|e| e.path() == sub).unwrap();
         assert!(file_idx < dir_idx);

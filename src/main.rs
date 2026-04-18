@@ -82,7 +82,6 @@ fn confirm_removal(files: &[commands::remove::FileToRemove]) -> Result<bool> {
     prompt_yes_no("\nDo you want to proceed?")
 }
 
-/// First filename from a list, as a short display label.
 fn first_display_name(paths: &[std::path::PathBuf]) -> Option<String> {
     paths.first().map(|p| {
         p.file_name()
@@ -96,8 +95,7 @@ fn first_display_name(paths: &[std::path::PathBuf]) -> Option<String> {
 /// emits heartbeat events to the log while the plan/check phase runs. Long
 /// scans on slow filesystems (NFS, HPC, many files) would otherwise leave
 /// the log with only the parent-written descriptor line, making the job
-/// look frozen. Returns `None` in non-JSON mode so interactive handlers
-/// keep their existing prompt flow.
+/// look frozen.
 fn start_scanning_runner(
     args: &Commands,
     operation: &str,
@@ -124,8 +122,6 @@ fn start_scanning_runner(
     Ok(Some(runner))
 }
 
-/// Either take over an early scanning runner (setting total and clearing
-/// `scanning`) or create a fresh runner now that the total is known.
 fn resume_or_new_runner(
     early: Option<ProgressRunner>,
     args: &Commands,
@@ -196,9 +192,8 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
 
     if needs_overwrite_prompt || args.is_dry_run() {
         let first_display = first_display_name(sources);
-        // Only start an early heartbeat runner for the real execute path.
-        // Dry-run in JSON mode already emits nothing to the log; starting
-        // a runner there would leak its ticker task.
+        // Dry-run in JSON mode emits nothing to the log; starting an
+        // early runner there would leak its ticker task.
         let early = if !args.is_dry_run() {
             start_scanning_runner(args, "Copying", first_display.as_deref())?
         } else {
@@ -335,9 +330,9 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
         None
     };
 
-    // Any Err before the runner is constructed must go through this
-    // closure so the early scanning runner (if any) emits a terminal
-    // error event to the log before we propagate.
+    // Err before runner construction must go through this closure so
+    // the early scanning runner (if any) emits a terminal error event
+    // to the log before we propagate.
     let bail_early = |early: Option<ProgressRunner>, e: anyhow::Error| -> Result<()> {
         if let Some(r) = early {
             r.finish_with_error(&e.to_string());
@@ -672,8 +667,8 @@ fn background_update_check(command: &Commands) -> Option<mpsc::Receiver<Option<S
     Some(rx)
 }
 
-/// For copy/move/remove with --json: detach to background and write progress to log file.
-/// Returns true if this process should exit (parent after fork), false if it should continue (child or no detach).
+/// For --json copy/move/remove: detach to background, write progress to log.
+/// Returns true if this process should exit (parent after fork).
 fn maybe_detach(cli: &cli::Cli) -> Result<bool> {
     let is_operation = matches!(
         cli.command,
@@ -684,21 +679,19 @@ fn maybe_detach(cli: &cli::Cli) -> Result<bool> {
         return Ok(false);
     }
 
-    // If --_bg is set, we ARE the background child: set up log file and continue.
     if let Some(ref job_id) = cli._bg {
         let log_path = commands::jobs::log_path(job_id);
         config::set_log_file(log_path);
         return Ok(false);
     }
 
-    // Parent: spawn background child with --_bg flag.
     commands::jobs::ensure_jobs_dir()?;
     let job_id = commands::jobs::new_job_id();
     let log_path = commands::jobs::log_path(&job_id);
 
     let exe = std::env::current_exe()?;
     let original_args: Vec<String> = std::env::args().skip(1).collect();
-    // --_bg must come before the subcommand (global flag)
+    // --_bg is a global flag; must come before the subcommand.
     let mut args = vec!["--_bg".to_string(), job_id.clone()];
     args.extend(original_args);
 
@@ -709,7 +702,6 @@ fn maybe_detach(cli: &cli::Cli) -> Result<bool> {
         .stderr(std::process::Stdio::null())
         .spawn()?;
 
-    // Write job start info to log file
     let job_info = commands::jobs::JobInfo {
         job_id: job_id.clone(),
         pid: child.id(),
@@ -720,13 +712,11 @@ fn maybe_detach(cli: &cli::Cli) -> Result<bool> {
     use std::io::Write;
     f.write_all(b"\n")?;
 
-    // Print job info to stdout for the caller
     println!("{}", serde_json::to_string(&job_info)?);
 
-    // Clean up old job logs (7 days)
     commands::jobs::cleanup_old_jobs(7 * 24 * 3600);
 
-    Ok(true) // parent exits
+    Ok(true)
 }
 
 fn status_detail(latest: &str) -> String {
@@ -766,7 +756,6 @@ fn handle_status_command(job_id: &Option<String>) {
             };
 
             if is_json_mode() {
-                // Emit a single JSON object wrapping state + latest line.
                 let latest_val: serde_json::Value =
                     serde_json::from_str(&latest).unwrap_or(serde_json::Value::Null);
                 let wrapper = serde_json::json!({
@@ -819,9 +808,8 @@ fn handle_status_command(job_id: &Option<String>) {
 async fn main() -> Result<()> {
     let cli = cli::parse_args();
 
-    // Handle detach for --json operations
     if maybe_detach(&cli)? {
-        return Ok(()); // parent exits after spawning background child
+        return Ok(());
     }
 
     set_json_mode(cli.json || cli._bg.is_some());
@@ -867,8 +855,15 @@ async fn main() -> Result<()> {
         }
         Commands::Init { .. } => handle_init_command(&cli.command)?,
         Commands::Update => commands::update::run()?,
-        Commands::Serve { root } => {
-            commands::serve::run(root.clone()).await?;
+        Commands::Serve { root, listen } => {
+            if let Some(addr) = listen {
+                let parsed: std::net::SocketAddr = addr.parse().map_err(|e| {
+                    anyhow::anyhow!("bcmr serve --listen: invalid address '{addr}': {e}")
+                })?;
+                commands::serve::run_listen(root.clone(), parsed).await?;
+            } else {
+                commands::serve::run(root.clone()).await?;
+            }
         }
         Commands::Deploy { target, path } => {
             let remote_path = path.as_deref().unwrap_or("~/.local/bin/bcmr");

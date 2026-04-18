@@ -1,28 +1,13 @@
-//! Wire compression for the serve protocol.
-//!
-//! Data frames may be sent as either `Data` (raw) or `DataCompressed`
-//! (LZ4/Zstd). The sender picks per-block based on the negotiated algorithm
-//! and an auto-skip heuristic — if the compressed size is within 5% of
-//! the original, the block is sent raw since the receiver would pay a
-//! decompression pass for negligible bandwidth savings. This makes the
-//! protocol robust to mixed workloads where some blocks compress well
-//! and others (already-compressed files, random data) don't.
+//! Wire compression with per-block auto-skip: if compressed output is within
+//! 5% of the original, the block is sent raw so the receiver skips the
+//! decompression pass on incompressible data.
 
 use crate::core::protocol::{CompressionAlgo, Message};
 
-/// Threshold below which compressed output is still worth sending. 0.95
-/// means we accept compression if the output is at most 95% of input.
 const AUTO_SKIP_RATIO: f64 = 0.95;
 
-/// Zstd compression level. 3 is Zstd's own default — decent ratio, fast
-/// enough that on a 1 Gbps link encode throughput is still multiples of
-/// the wire. Higher levels buy diminishing returns on file content.
 const ZSTD_LEVEL: i32 = 3;
 
-/// Encode a 4MB-ish block for transport. Returns either `Data` (raw) or
-/// `DataCompressed` depending on the negotiated algorithm and the
-/// per-block compressibility. Callers pass `algo = None` when no
-/// compression was negotiated.
 pub fn encode_block(algo: CompressionAlgo, raw: Vec<u8>) -> Message {
     if algo == CompressionAlgo::None || raw.is_empty() {
         return Message::Data { payload: raw };
@@ -39,7 +24,6 @@ pub fn encode_block(algo: CompressionAlgo, raw: Vec<u8>) -> Message {
     };
 
     if (encoded.len() as f64) > AUTO_SKIP_RATIO * original_size as f64 {
-        // Compression didn't help — drop the encoded buffer and send raw.
         return Message::Data { payload: raw };
     }
 
@@ -50,7 +34,6 @@ pub fn encode_block(algo: CompressionAlgo, raw: Vec<u8>) -> Message {
     }
 }
 
-/// Decode a DataCompressed message back into raw bytes.
 pub fn decode_block(
     algo_byte: u8,
     original_size: u32,
@@ -108,8 +91,6 @@ mod tests {
 
     #[test]
     fn auto_skip_incompressible() {
-        // High-entropy bytes from a strong LCG. LZ4 on a 4MB block of this
-        // comes back essentially at 1.00 ratio and should auto-skip.
         let mut data = vec![0u8; 4 * 1024 * 1024];
         let mut x: u64 = 0xdeadbeefcafebabe;
         for b in data.iter_mut() {

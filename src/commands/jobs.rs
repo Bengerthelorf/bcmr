@@ -2,11 +2,9 @@ use serde::Serialize;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// High-level state of a background job, derived from the log file and
-/// the process liveness. `done` means the job emitted a success result;
-/// `failed` means it emitted an error result; `interrupted` means the
-/// process died after the descriptor was written but before any terminal
-/// event reached the log (crash, SIGKILL, OOM, etc).
+/// `Interrupted` means the process died after the descriptor was
+/// written but before any terminal event reached the log (crash,
+/// SIGKILL, OOM).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum JobState {
@@ -29,7 +27,6 @@ impl JobState {
     }
 }
 
-/// Generate a short hex job ID based on timestamp + pid.
 pub fn new_job_id() -> String {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -39,7 +36,6 @@ pub fn new_job_id() -> String {
     format!("{:x}{:x}", ts & 0xFFFF_FFFF, pid & 0xFFFF)
 }
 
-/// Directory where job log files are stored.
 pub fn jobs_dir() -> PathBuf {
     let base = directories::BaseDirs::new()
         .map(|d| d.data_local_dir().to_path_buf())
@@ -47,12 +43,10 @@ pub fn jobs_dir() -> PathBuf {
     base.join("bcmr").join("jobs")
 }
 
-/// Full path for a job's log file.
 pub fn log_path(job_id: &str) -> PathBuf {
     jobs_dir().join(format!("{}.jsonl", job_id))
 }
 
-/// Ensure the jobs directory exists.
 pub fn ensure_jobs_dir() -> std::io::Result<()> {
     std::fs::create_dir_all(jobs_dir())
 }
@@ -64,15 +58,12 @@ pub struct JobInfo {
     pub log: String,
 }
 
-/// Classify a job from its log file and process liveness. `latest_line`
-/// is the last non-empty line of the log (or an empty string). The
-/// descriptor line (first line, carries pid+job_id) is distinguished
-/// from progress/result by the presence of the `type` field.
+/// The descriptor line (first line, pid+job_id only) has no `type`
+/// field, so it maps to the "no event yet" branch below.
 pub fn classify_job(latest_line: &str, pid_alive: bool) -> JobState {
     let v: serde_json::Value = match serde_json::from_str(latest_line) {
         Ok(v) => v,
         Err(_) => {
-            // Malformed tail — treat like no event yet.
             return if pid_alive {
                 JobState::Scanning
             } else {
@@ -100,7 +91,6 @@ pub fn classify_job(latest_line: &str, pid_alive: bool) -> JobState {
             }
         }
         _ => {
-            // Descriptor or unknown event.
             if pid_alive {
                 JobState::Scanning
             } else {
@@ -110,7 +100,6 @@ pub fn classify_job(latest_line: &str, pid_alive: bool) -> JobState {
     }
 }
 
-/// Look up a job's state from its id. Errors if the job log can't be read.
 pub fn job_state(job_id: &str) -> Result<(JobState, String), String> {
     let path = log_path(job_id);
     if !path.exists() {
@@ -134,7 +123,6 @@ pub fn job_state(job_id: &str) -> Result<(JobState, String), String> {
     Ok((classify_job(&latest, alive), latest))
 }
 
-/// Check if a process is still running.
 pub fn is_pid_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
@@ -142,20 +130,17 @@ pub fn is_pid_alive(pid: u32) -> bool {
     }
     #[cfg(not(unix))]
     {
-        // On Windows, just check if we can open the process
         let _ = pid;
         false
     }
 }
 
-/// A single job entry for listing purposes.
 pub struct JobEntry {
     pub id: String,
     pub state: JobState,
     pub latest: String,
 }
 
-/// List all jobs (active and recent).
 pub fn list_jobs() -> Vec<JobEntry> {
     let dir = jobs_dir();
     let mut jobs = Vec::new();
@@ -204,7 +189,6 @@ pub fn list_jobs() -> Vec<JobEntry> {
     jobs
 }
 
-/// Clean up completed job logs older than max_age_secs.
 pub fn cleanup_old_jobs(max_age_secs: u64) {
     let dir = jobs_dir();
     let entries = match std::fs::read_dir(&dir) {

@@ -5,19 +5,15 @@ use std::io;
 use std::path::PathBuf;
 
 pub trait ProgressRenderer: Send {
-    // -- Required: core progress tracking --
     fn inc_current(&mut self, delta: u64);
     fn finish(&mut self) -> io::Result<()>;
 
-    /// Terminate the renderer with a failure status. The default just
-    /// closes the renderer the same way as `finish` — JSON renderers
-    /// override this to emit an explicit error event so bg consumers can
-    /// distinguish failed jobs from successful ones.
+    /// JSON renderers override to emit an explicit error event so bg consumers
+    /// can distinguish failed jobs from successful ones.
     fn finish_err(&mut self, _msg: &str) -> io::Result<()> {
         self.finish()
     }
 
-    // -- Optional: metadata setters (no-op by default) --
     fn set_total_items(&mut self, _total: usize) {}
     fn inc_items_processed(&mut self) {}
     fn set_current_file(&mut self, _file_name: &str, _file_size: u64) {}
@@ -29,12 +25,10 @@ pub trait ProgressRenderer: Send {
     fn set_scanning(&mut self, _scanning: bool) {}
     fn set_files_found(&mut self, _count: u64) {}
 
-    // -- Optional: parallel worker tracking --
     fn set_parallel_mode(&mut self, _worker_count: usize) {}
     fn update_worker(&mut self, _slot: usize, _file_name: &str, _file_size: u64, _progress: u64) {}
     fn finish_worker(&mut self, _slot: usize) {}
 
-    // -- Optional: periodic refresh --
     fn tick(&mut self) {}
 }
 

@@ -1,25 +1,24 @@
 use crate::core::cas;
 use crate::core::compress;
+use crate::core::framing::Framing;
 use crate::core::protocol::{
-    self, CompressionAlgo, ListEntry, Message, CAP_DEDUP, CAP_FAST, CAP_LZ4, CAP_SYNC, CAP_ZSTD,
-    PROTOCOL_VERSION,
+    self, CompressionAlgo, ListEntry, Message, CAP_AEAD, CAP_DEDUP, CAP_DIRECT_TCP, CAP_FAST,
+    CAP_LZ4, CAP_SYNC, CAP_ZSTD, PROTOCOL_VERSION,
 };
+use crate::core::protocol_aead::Direction;
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::{self, AsyncWriteExt};
 
-const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
+const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
-/// Server advertises every cap it knows; the client picks by intersecting
-/// with its own. CAP_FAST is always offered — the actual implementation
-/// either skips inline hashing (any platform) or also uses splice(2) on
-/// Linux. Either way the client opts in via --fast.
-const SERVER_CAPS: u8 = CAP_LZ4 | CAP_ZSTD | CAP_DEDUP | CAP_FAST | CAP_SYNC;
+/// Advertised capability mask. The client picks by intersecting with
+/// its own; CAP_FAST is always offered since --fast is client-side opt-in.
+const SERVER_CAPS: u8 =
+    CAP_LZ4 | CAP_ZSTD | CAP_DEDUP | CAP_FAST | CAP_SYNC | CAP_DIRECT_TCP | CAP_AEAD;
 
-/// Resolve the configured root jail. Explicit `--root <path>` wins;
-/// otherwise the invoking user's `$HOME` is used. A user that really
-/// wants pre-v0.5.10 behaviour (no sandbox) can pass `--root /`.
+/// Default root is `$HOME`; pass `--root /` to opt out of the sandbox.
 fn resolve_root(arg: Option<PathBuf>) -> Result<PathBuf> {
     let raw = match arg {
         Some(p) => p,
@@ -31,19 +30,10 @@ fn resolve_root(arg: Option<PathBuf>) -> Result<PathBuf> {
     Ok(std::fs::canonicalize(&raw)?)
 }
 
-/// Validate a client path against the root jail.
-///
-/// Rules:
-/// - null byte → reject
-/// - reject any path component literally `..` (belt-and-suspenders; the
-///   canonicalize below would catch symlink tricks too)
-/// - canonicalize (for existing paths) or canonicalize the deepest
-///   existing ancestor and splice the remainder
-/// - require the result to be under `root` (lexical prefix after canon.)
-///
-/// With `root = /` the prefix check passes everything — that's the
-/// explicit opt-out. Default is $HOME so arbitrary `/etc/evil` is
-/// rejected even on a root-invoked serve.
+/// Reject null bytes and literal `..` components, then canonicalize
+/// (splicing the tail if the path doesn't yet exist) and require a
+/// lexical prefix match against `root`. The `..` check is belt-and-
+/// suspenders; canonicalize catches symlink tricks too.
 fn validate_path(raw: &str, root: &Path) -> Result<PathBuf> {
     if raw.contains('\0') {
         bail!("path contains null byte");
@@ -67,10 +57,8 @@ fn validate_path(raw: &str, root: &Path) -> Result<PathBuf> {
     Ok(canonical)
 }
 
-/// Canonicalize `path` if it exists; otherwise canonicalize the closest
-/// existing ancestor and re-append the remainder. Only follows symlinks
-/// on the existing prefix, so a symlink pointing outside `root` is
-/// caught by the caller's `starts_with` check.
+/// Only follows symlinks on the existing prefix, so a symlink escaping
+/// `root` is still caught by the caller's `starts_with` check.
 fn canonicalize_with_ancestor(path: &Path) -> Result<PathBuf> {
     if path.exists() {
         return Ok(std::fs::canonicalize(path)?);
@@ -106,102 +94,214 @@ pub async fn run(root: Option<PathBuf>) -> Result<()> {
     let root = resolve_root(root)?;
     let mut stdin = io::stdin();
     let mut stdout = io::stdout();
+    // stdin/stdout is the sshd-invoked transport:
+    // - allow_splice: writer is real STDOUT_FILENO
+    // - allow_direct_tcp: peer is already SSH-authenticated
+    // - direct_tcp_key=None: no session key, CAP_AEAD masked off
+    run_session(&mut stdin, &mut stdout, &root, true, true, None).await
+}
 
-    // --- Handshake ---
-    let effective_caps = match protocol::read_message(&mut stdin).await? {
+pub async fn run_listen(root: Option<PathBuf>, addr: std::net::SocketAddr) -> Result<()> {
+    // Non-loopback bind has no peer auth; gate behind an explicit env
+    // var so a copy-pasted dev command can't open the filesystem to
+    // the LAN by accident.
+    if !addr.ip().is_loopback() {
+        if std::env::var("BCMR_UNSAFE_LAN_LISTEN").is_ok_and(|v| v == "1") {
+            eprintln!(
+                "bcmr serve: WARNING — binding {addr} on a non-loopback address with no peer \
+                 authentication. Anyone who can reach this port can read and write files under \
+                 the --root jail."
+            );
+        } else {
+            bail!(
+                "bcmr serve --listen refuses non-loopback address {addr} without \
+                 BCMR_UNSAFE_LAN_LISTEN=1 (no peer auth on this transport yet)"
+            );
+        }
+    }
+    let root = resolve_root(root)?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let bound = listener.local_addr()?;
+    // INVARIANT: test harnesses parse this line to pick up the
+    // kernel-assigned port — don't change the format.
+    use tokio::io::AsyncWriteExt as _;
+    let mut stdout = io::stdout();
+    stdout
+        .write_all(format!("LISTENING {bound}\n").as_bytes())
+        .await?;
+    stdout.flush().await?;
+
+    loop {
+        let (stream, _peer) = listener.accept().await?;
+        let root = root.clone();
+        tokio::spawn(async move {
+            let (mut reader, mut writer) = stream.into_split();
+            // TCP peer can't splice (fd != STDOUT_FILENO) and must not
+            // escalate to another direct-TCP channel (recursive
+            // rendezvous = amplification / port exhaustion).
+            let _ = run_session(&mut reader, &mut writer, &root, false, false, None).await;
+        });
+    }
+}
+
+async fn run_session<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    root: &Path,
+    allow_splice: bool,
+    allow_direct_tcp: bool,
+    direct_tcp_key: Option<&[u8; 32]>,
+) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    // Closing CAP_DIRECT_TCP on non-TTY transports closes the recursive-
+    // rendezvous amplification vector. CAP_AEAD needs a session key.
+    let mut offered_caps = SERVER_CAPS;
+    if !allow_direct_tcp {
+        offered_caps &= !CAP_DIRECT_TCP;
+    }
+    if direct_tcp_key.is_none() {
+        offered_caps &= !CAP_AEAD;
+    }
+    let mut rendezvous_tasks = RendezvousTasks::new();
+
+    let mut framing = Framing::plain();
+
+    let effective_caps = match framing.read_message(reader).await? {
         Some(Message::Hello { version, caps }) => {
             if version != PROTOCOL_VERSION {
-                protocol::write_message(
-                    &mut stdout,
+                framing
+                    .write_message(
+                        writer,
+                        &Message::Error {
+                            message: format!(
+                                "protocol version mismatch: client={version} server={PROTOCOL_VERSION}"
+                            ),
+                        },
+                    )
+                    .await?;
+                writer.flush().await?;
+                return Ok(());
+            }
+            offered_caps & caps
+        }
+        Some(other) => {
+            framing
+                .write_message(
+                    writer,
                     &Message::Error {
-                        message: format!(
-                            "protocol version mismatch: client={version} server={PROTOCOL_VERSION}"
-                        ),
+                        message: format!("expected Hello, got {other:?}"),
                     },
                 )
                 .await?;
-                stdout.flush().await?;
-                return Ok(());
-            }
-            SERVER_CAPS & caps
-        }
-        Some(other) => {
-            protocol::write_message(
-                &mut stdout,
-                &Message::Error {
-                    message: format!("expected Hello, got {other:?}"),
-                },
-            )
-            .await?;
-            stdout.flush().await?;
+            writer.flush().await?;
             return Ok(());
         }
-        None => return Ok(()), // clean EOF before handshake
+        None => return Ok(()),
     };
 
-    // Server and client both call negotiate(caps, caps) with this shared
-    // intersection so they land on the same algorithm without a second
-    // round trip.
+    // Passing the same mask on both sides: client + server have already
+    // intersected caps, so a single-sided call agrees on algo here.
     let algo = CompressionAlgo::negotiate(effective_caps, effective_caps);
     let fast = (effective_caps & CAP_FAST) != 0;
     let sync = (effective_caps & CAP_SYNC) != 0;
+    let direct_tcp = (effective_caps & CAP_DIRECT_TCP) != 0;
+    let aead = (effective_caps & CAP_AEAD) != 0;
 
-    protocol::write_message(
-        &mut stdout,
-        &Message::Welcome {
-            version: PROTOCOL_VERSION,
-            caps: effective_caps,
-        },
-    )
-    .await?;
-    stdout.flush().await?;
+    // Downgrade guard: a MITM stripping CAP_AEAD from Hello/Welcome
+    // would otherwise run the rendezvous session in plain framing.
+    if direct_tcp_key.is_some() && !aead {
+        framing
+            .write_message(
+                writer,
+                &Message::Error {
+                    message: "direct-TCP transport requires CAP_AEAD; refusing plain session"
+                        .to_string(),
+                },
+            )
+            .await?;
+        writer.flush().await?;
+        return Ok(());
+    }
 
-    // --- Dispatch loop ---
+    framing
+        .write_message(
+            writer,
+            &Message::Welcome {
+                version: PROTOCOL_VERSION,
+                caps: effective_caps,
+            },
+        )
+        .await?;
+    writer.flush().await?;
+
+    // INVARIANT: Welcome is the plain→AEAD switchover boundary.
+    // Both sides MUST flip together here.
+    if aead {
+        let key = direct_tcp_key
+            .expect("cap mask guarantees direct_tcp_key is Some when CAP_AEAD negotiated");
+        framing = Framing::aead_from_key(
+            key,
+            Direction::ServerToClient,
+            Direction::ClientToServer,
+        )?;
+    }
+
     loop {
-        let msg = match protocol::read_message(&mut stdin).await? {
+        let msg = match framing.read_message(reader).await? {
             Some(m) => m,
-            None => break, // clean EOF
+            None => break,
         };
 
-        // Get writes Data+Ok directly to stdout (streaming), so it bypasses
-        // the normal dispatch-loop write. All other handlers return a message
-        // for the dispatch loop to write.
+        // Get/GetChunked write Data+Ok to `writer` themselves; the
+        // dispatch loop must NOT send a response for those arms.
         let response = match msg {
             Message::Get { path, offset } => {
-                match validate_path(&path, &root) {
+                match validate_path(&path, root) {
                     Ok(p) => {
-                        if let Err(e) =
-                            handle_get(p.to_str().unwrap_or(&path), offset, algo, fast, &mut stdout)
-                                .await
+                        if let Err(e) = handle_get(
+                            p.to_str().unwrap_or(&path),
+                            offset,
+                            algo,
+                            fast,
+                            allow_splice,
+                            writer,
+                            &mut framing,
+                        )
+                        .await
                         {
                             eprintln!("serve: handler error: {e}");
-                            protocol::write_message(
-                                &mut stdout,
+                            framing
+                                .write_message(
+                                    writer,
+                                    &Message::Error {
+                                        message: e.to_string(),
+                                    },
+                                )
+                                .await?;
+                        }
+                    }
+                    Err(e) => {
+                        framing
+                            .write_message(
+                                writer,
                                 &Message::Error {
                                     message: e.to_string(),
                                 },
                             )
                             .await?;
-                        }
-                    }
-                    Err(e) => {
-                        protocol::write_message(
-                            &mut stdout,
-                            &Message::Error {
-                                message: e.to_string(),
-                            },
-                        )
-                        .await?;
                     }
                 }
-                stdout.flush().await?;
+                writer.flush().await?;
                 continue;
             }
-            Message::Stat { path } => match validate_path(&path, &root) {
+            Message::Stat { path } => match validate_path(&path, root) {
                 Ok(p) => handle_stat(p.to_str().unwrap_or(&path)).await,
                 Err(e) => Err(e),
             },
-            Message::List { path } => match validate_path(&path, &root) {
+            Message::List { path } => match validate_path(&path, root) {
                 Ok(p) => handle_list(p.to_str().unwrap_or(&path)).await,
                 Err(e) => Err(e),
             },
@@ -209,31 +309,116 @@ pub async fn run(root: Option<PathBuf>) -> Result<()> {
                 path,
                 offset,
                 limit,
-            } => match validate_path(&path, &root) {
+            } => match validate_path(&path, root) {
                 Ok(p) => handle_hash(p.to_str().unwrap_or(&path), offset, limit).await,
                 Err(e) => Err(e),
             },
-            Message::Put { path, size } => match validate_path(&path, &root) {
+            Message::Put { path, size } => match validate_path(&path, root) {
                 Ok(p) => {
                     handle_put(
                         p.to_str().unwrap_or(&path),
                         size,
                         sync,
-                        &mut stdout,
-                        &mut stdin,
+                        writer,
+                        reader,
+                        &mut framing,
                     )
                     .await
                 }
                 Err(e) => Err(e),
             },
-            Message::Mkdir { path } => match validate_path(&path, &root) {
+            Message::PutChunked {
+                path,
+                offset,
+                length,
+            } => match validate_path(&path, root) {
+                Ok(p) => {
+                    handle_put_chunked(
+                        p.to_str().unwrap_or(&path),
+                        offset,
+                        length,
+                        sync,
+                        reader,
+                        &mut framing,
+                    )
+                    .await
+                }
+                Err(e) => Err(e),
+            },
+            Message::GetChunked {
+                path,
+                offset,
+                length,
+            } => {
+                match validate_path(&path, root) {
+                    Ok(p) => {
+                        if let Err(e) = handle_get_chunked(
+                            p.to_str().unwrap_or(&path),
+                            offset,
+                            length,
+                            algo,
+                            writer,
+                            &mut framing,
+                        )
+                        .await
+                        {
+                            eprintln!("serve: handler error: {e}");
+                            framing
+                                .write_message(
+                                    writer,
+                                    &Message::Error {
+                                        message: e.to_string(),
+                                    },
+                                )
+                                .await?;
+                        }
+                    }
+                    Err(e) => {
+                        framing
+                            .write_message(
+                                writer,
+                                &Message::Error {
+                                    message: e.to_string(),
+                                },
+                            )
+                            .await?;
+                    }
+                }
+                writer.flush().await?;
+                continue;
+            }
+            Message::Mkdir { path } => match validate_path(&path, root) {
                 Ok(p) => handle_mkdir(p.to_str().unwrap_or(&path)).await,
                 Err(e) => Err(e),
             },
-            Message::Resume { path } => match validate_path(&path, &root) {
+            Message::Truncate { path, size } => match validate_path(&path, root) {
+                Ok(p) => handle_truncate(p.to_str().unwrap_or(&path), size).await,
+                Err(e) => Err(e),
+            },
+            Message::Resume { path } => match validate_path(&path, root) {
                 Ok(p) => handle_resume(p.to_str().unwrap_or(&path)).await,
                 Err(e) => Err(e),
             },
+            Message::OpenDirectChannel => {
+                if !direct_tcp {
+                    Err(anyhow::anyhow!(
+                        "CAP_DIRECT_TCP not negotiated on this session"
+                    ))
+                } else if rendezvous_tasks.len() >= MAX_RENDEZVOUS_PER_SESSION {
+                    Err(anyhow::anyhow!(
+                        "too many concurrent direct-TCP rendezvous requests \
+                         on this session (limit {MAX_RENDEZVOUS_PER_SESSION})"
+                    ))
+                } else {
+                    match handle_open_direct_channel(root.to_path_buf()) {
+                        Ok((msg, handle)) => {
+                            rendezvous_tasks.push(handle);
+                            Ok(msg)
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+            }
             other => Err(anyhow::anyhow!("unexpected message: {other:?}")),
         };
 
@@ -247,10 +432,11 @@ pub async fn run(root: Option<PathBuf>) -> Result<()> {
             }
         };
 
-        protocol::write_message(&mut stdout, &reply).await?;
-        stdout.flush().await?;
+        framing.write_message(writer, &reply).await?;
+        writer.flush().await?;
     }
 
+    rendezvous_tasks.drain_gracefully().await;
     Ok(())
 }
 
@@ -332,31 +518,32 @@ async fn handle_hash(path: &str, offset: u64, limit: Option<u64>) -> Result<Mess
     Ok(Message::HashResponse { hash })
 }
 
-/// Stream file data in 4 MiB chunks. Sends Data messages then Ok { hash }.
-/// Returns Ok(Message::Ok{..}) but writes Data messages directly to `out`.
-/// Streams file data as Data messages, then writes Ok with hash directly.
-/// Returns Result<()> because it writes responses directly to the output —
-/// the dispatch loop must NOT write another response for Get commands.
+/// Writes Data messages + terminal Ok directly to `out`; returns
+/// `Result<()>` so the dispatch loop doesn't double-send.
 async fn handle_get<W>(
     path: &str,
     offset: u64,
     algo: CompressionAlgo,
     fast: bool,
+    allow_splice: bool,
     out: &mut W,
+    framing: &mut Framing,
 ) -> Result<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
-    // The Linux splice fast path skips compression too — by definition
-    // we don't have userspace bytes to feed the encoder. fall back to
-    // the buffered path whenever compression is active or we're not on
-    // Linux. CAP_FAST without splice still wins from skipping the hash.
+    // splice(2) bypasses userspace, so it can't run with compression
+    // (no bytes to feed the encoder) or AEAD (no bytes to encrypt).
+    // `allow_splice` guards against non-STDOUT_FILENO writers (TCP
+    // sockets) — the splice path hardcodes that fd. CAP_FAST without
+    // splice still wins from skipping the inline hash.
     #[cfg(target_os = "linux")]
     {
-        if fast && algo == CompressionAlgo::None {
+        if fast && algo == CompressionAlgo::None && allow_splice && !framing.is_aead() {
             return handle_get_splice_linux(path, offset, out).await;
         }
     }
+    let _ = allow_splice;
 
     use tokio::io::AsyncReadExt;
 
@@ -377,37 +564,24 @@ where
             h.update(&buf[..n]);
         }
         let frame = compress::encode_block(algo, buf[..n].to_vec());
-        protocol::write_message(out, &frame).await?;
+        framing.write_message(out, &frame).await?;
     }
 
     let hash = hasher.map(|h| h.finalize().to_hex().to_string());
-    protocol::write_message(out, &Message::Ok { hash }).await?;
+    framing.write_message(out, &Message::Ok { hash }).await?;
     Ok(())
 }
 
 /// Linux zero-copy GET: file → pipe → stdout via splice(2).
 ///
-/// v0.5.10 reshaped this path after Experiment 14 caught the original
-/// implementation being *slower* than the buffered path. Two fixes:
+/// The entire loop runs inside ONE spawn_blocking and writes frame
+/// headers directly with write(2). An earlier implementation that used
+/// one spawn_blocking per 4 MiB chunk + async stdout for headers was
+/// *slower* than the buffered path (~256 thread bounces per GiB).
 ///
-/// 1. **One spawn_blocking for the whole file**. The previous version
-///    dispatched a fresh blocking task per 4 MiB chunk — 256 thread
-///    bounces per GiB, the same anti-pattern Exp 13 caught in the
-///    local copy path. Now the loop owns the file fd, both pipe fds,
-///    and the stdout fd, and never crosses back into the async reactor
-///    until the Ok frame.
-/// 2. **Frame headers via raw write(2)**. The headers used to go
-///    through the tokio async stdout; that forced the splice loop to
-///    re-acquire async context per chunk. Writing the 9 bytes of
-///    frame header directly to the stdout fd inside the blocking
-///    closure keeps everything on one thread.
-///
-/// `F_SETPIPE_SZ(CHUNK_SIZE)` is still attempted and still
-/// best-effort: on Ubuntu default `/proc/sys/fs/pipe-max-size` is
-/// 1 MiB, so the pipe stays at 1 MiB and each 4 MiB chunk takes 4
-/// splice rounds instead of 1. That's fine — the syscall cost is
-/// negligible; the regression was the thread bounces, not the round
-/// count.
+/// F_SETPIPE_SZ is advisory; on distros where `/proc/sys/fs/pipe-max-
+/// size` is 1 MiB each 4 MiB chunk takes 4 splice rounds, which is
+/// fine — the syscall cost is negligible.
 #[cfg(target_os = "linux")]
 async fn handle_get_splice_linux<W>(path: &str, offset: u64, out: &mut W) -> Result<()>
 where
@@ -417,8 +591,8 @@ where
     use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
     use tokio::io::AsyncWriteExt;
 
-    // Flush anything the async stdout has buffered so the raw write(2)
-    // calls inside the blocking loop don't race with it.
+    // Flush the async stdout buffer so raw write(2) in the blocking
+    // loop doesn't race with it.
     out.flush().await?;
 
     let path = path.to_owned();
@@ -429,8 +603,6 @@ where
         }
         let total_size = std_file.metadata()?.len() - offset;
 
-        // Create a pipe. F_SETPIPE_SZ is advisory; the actual size the
-        // kernel picks is whatever fcntl returns (negative = err).
         let mut fds = [0i32; 2];
         if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
             return Err(std::io::Error::last_os_error());
@@ -445,9 +617,6 @@ where
                 CHUNK_SIZE as libc::c_int,
             )
         };
-        // Record the actual pipe size — at least for diagnostic logs.
-        // We don't need to read it back; the splice loop handles
-        // whatever number of rounds the kernel ends up needing.
 
         let file_fd = std_file.as_raw_fd();
         let pipe_w_fd = pipe_w.as_raw_fd();
@@ -458,11 +627,11 @@ where
         while remaining > 0 {
             let chunk = remaining.min(CHUNK_SIZE as u64) as usize;
 
-            // Frame header: [4B payload_len_total][1B TYPE_DATA][4B payload_len].
-            // payload_len_total = 1 + 4 + chunk = 5 + chunk.
+            // Wire frame: [u32 payload_len][u8 TYPE_DATA=0x84][u32 chunk_len].
+            // payload_len = 1 + 4 + chunk.
             let mut header = [0u8; 9];
             header[0..4].copy_from_slice(&((5 + chunk) as u32).to_le_bytes());
-            header[4] = 0x84; // TYPE_DATA
+            header[4] = 0x84;
             header[5..9].copy_from_slice(&(chunk as u32).to_le_bytes());
             write_all_fd(stdout_fd, &header)?;
 
@@ -470,11 +639,11 @@ where
             remaining -= chunk as u64;
         }
 
-        // Ok { hash: None } frame = [4B payload_len=2][1B TYPE_OK=0x82][1B present=0].
+        // Ok { hash: None } = [u32 payload_len=2][u8 TYPE_OK=0x82][u8 present=0].
         let mut ok_frame = [0u8; 6];
         ok_frame[0..4].copy_from_slice(&2u32.to_le_bytes());
-        ok_frame[4] = 0x82; // TYPE_OK
-        ok_frame[5] = 0; // hash option: absent
+        ok_frame[4] = 0x82;
+        ok_frame[5] = 0;
         write_all_fd(stdout_fd, &ok_frame)?;
 
         drop(pipe_r);
@@ -486,11 +655,8 @@ where
     result.map_err(Into::into)
 }
 
-/// Move exactly `n` bytes through the pipe from `file_fd` to `stdout_fd`.
-/// Loops because splice may move fewer bytes than requested (pipe size
-/// smaller than `n`, or PIPE_BUF semantics). Pairs the read-side and
-/// write-side splices one after the other — standard file→pipe→sock
-/// pattern.
+/// Loops because splice may move fewer bytes than requested (pipe
+/// smaller than `n`). Standard file→pipe→sock pairing.
 #[cfg(target_os = "linux")]
 fn splice_n(
     file_fd: i32,
@@ -543,9 +709,7 @@ fn splice_n(
     Ok(())
 }
 
-/// Equivalent of Write::write_all on a raw fd — loops on short writes
-/// / EINTR. Used inside the splice-path spawn_blocking so headers and
-/// the Ok frame share the same thread as the splice loop.
+/// Write::write_all on a raw fd. Loops on short writes / EINTR.
 #[cfg(target_os = "linux")]
 fn write_all_fd(fd: i32, mut buf: &[u8]) -> std::io::Result<()> {
     while !buf.is_empty() {
@@ -568,46 +732,36 @@ fn write_all_fd(fd: i32, mut buf: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Receive Data messages until Done, write to file, fsync, compute hash.
-///
-/// When the client opens a put with HaveBlocks (CAP_DEDUP negotiated), we
-/// short-circuit by serving any blocks already in the local CAS without
-/// the wire transfer. New blocks are written to the file *and* deposited
-/// in the CAS for future requests. The composite hash returned in Ok
-/// still covers the entire file regardless of whether each byte arrived
-/// over the wire or came out of the cache.
+/// When the client opens with HaveBlocks (CAP_DEDUP negotiated), blocks
+/// already in the local CAS are served from cache without the wire
+/// transfer; new blocks are written to the file AND deposited in the
+/// CAS. The returned composite hash covers the whole file regardless.
 async fn handle_put<W, R>(
     path: &str,
     declared_size: u64,
     sync: bool,
     out: &mut W,
     reader: &mut R,
+    framing: &mut Framing,
 ) -> Result<Message>
 where
     W: tokio::io::AsyncWrite + Unpin,
     R: tokio::io::AsyncRead + Unpin,
 {
-    let parent = Path::new(path).parent();
-    if let Some(p) = parent {
-        if !p.as_os_str().is_empty() {
-            fs::create_dir_all(p).await?;
-        }
-    }
+    ensure_parent_dir(path).await?;
 
     let mut file = fs::File::create(path).await?;
     let mut hasher = blake3::Hasher::new();
     let mut written: u64 = 0;
 
-    // Peek at the first message: the client might open with HaveBlocks
-    // (dedup mode) or jump straight to Data (legacy / dedup-disabled).
-    let first = protocol::read_message(reader).await?;
+    // HaveBlocks = dedup open; anything else = straight-to-Data.
+    let first = framing.read_message(reader).await?;
     let mut dedup_state: Option<DedupState> = None;
     let mut next: Option<Message> = first;
 
     if let Some(Message::HaveBlocks { hashes, .. }) = next {
-        // Trim CAS before processing so this PUT doesn't push the
-        // store further past the cap. Failure here is non-fatal —
-        // worst case the disk fills up later.
+        // Evict before writing so this PUT doesn't push further past
+        // the cap. Non-fatal; worst case the disk fills up later.
         if let Some(cap) = cas::cap_bytes() {
             let _ = tokio::task::spawn_blocking(move || cas::evict_to_cap(cap)).await;
         }
@@ -618,7 +772,9 @@ where
                 bits[i / 8] |= 1 << (i % 8);
             }
         }
-        protocol::write_message(out, &Message::MissingBlocks { bits: bits.clone() }).await?;
+        framing
+            .write_message(out, &Message::MissingBlocks { bits: bits.clone() })
+            .await?;
         out.flush().await?;
         dedup_state = Some(DedupState {
             hashes,
@@ -632,7 +788,7 @@ where
     loop {
         let m = match msg.take() {
             Some(m) => m,
-            None => match protocol::read_message(reader).await? {
+            None => match framing.read_message(reader).await? {
                 Some(m) => m,
                 None => break,
             },
@@ -658,9 +814,8 @@ where
         }
     }
 
-    // Serve any trailing blocks that weren't sent because the CAS already
-    // had them. We do this *after* draining the wire so the server's
-    // stream of writes follows source order.
+    // Serve trailing cache-hit blocks *after* draining the wire so
+    // writes preserve source order.
     if let Some(state) = dedup_state.as_mut() {
         flush_remaining_cas_blocks(state, &mut file, &mut hasher, &mut written, declared_size)
             .await?;
@@ -695,19 +850,16 @@ async fn consume_block(
     dedup: Option<&mut DedupState>,
 ) -> Result<()> {
     if let Some(state) = dedup {
-        // Walk the cursor over any cached blocks ahead of the wire bytes.
         while state.cursor < state.hashes.len() && !state.is_missing(state.cursor) {
             let cached = cas::read(&state.hashes[state.cursor])?;
             hasher.update(&cached);
             file.write_all(&cached).await?;
             state.cursor += 1;
         }
-        // The just-arrived bytes correspond to the next missing index.
         if state.cursor < state.hashes.len() && state.is_missing(state.cursor) {
-            // Deposit into CAS for future runs.
             let mut h = [0u8; 32];
             h.copy_from_slice(blake3::hash(block).as_bytes());
-            // Best-effort write; serving the file matters more than caching.
+            // Best-effort CAS write; serving the file matters more.
             let _ = cas::write(&h, block);
             state.cursor += 1;
         }
@@ -726,7 +878,6 @@ async fn flush_remaining_cas_blocks(
 ) -> Result<()> {
     while state.cursor < state.hashes.len() {
         if state.is_missing(state.cursor) {
-            // Should have been delivered over the wire already.
             return Err(anyhow::anyhow!(
                 "client said block {} was missing but never sent it",
                 state.cursor
@@ -742,12 +893,8 @@ async fn flush_remaining_cas_blocks(
     Ok(())
 }
 
-/// Refuse to grow the destination past the size the client declared
-/// on PUT. Protects the server from a malicious or buggy client that
-/// sends unbounded Data frames — without this, `size: 100` could
-/// followed by TB of Data and the server would dutifully write it all.
-/// A small per-block tolerance isn't meaningful; the declared size
-/// should equal the final dst size exactly.
+/// Without this a malicious client could declare `size: 100` then
+/// stream TB of Data frames.
 fn enforce_write_bound(written: u64, incoming: usize, declared: u64) -> Result<()> {
     if written + incoming as u64 > declared {
         bail!(
@@ -761,9 +908,319 @@ fn enforce_write_bound(written: u64, incoming: usize, declared: u64) -> Result<(
     Ok(())
 }
 
+/// No truncate: parallel serve processes from the same pool write
+/// disjoint ranges without clobbering. Integrity comes from the AEAD
+/// per-frame MAC (or client-side `--verify` rehash), not per-chunk
+/// server-side hashes.
+async fn handle_put_chunked<R>(
+    path: &str,
+    offset: u64,
+    length: u64,
+    sync: bool,
+    reader: &mut R,
+    framing: &mut Framing,
+) -> Result<Message>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::{AsyncSeekExt, AsyncWriteExt as _};
+
+    ensure_parent_dir(path).await?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .await?;
+    file.seek(std::io::SeekFrom::Start(offset)).await?;
+
+    let mut written: u64 = 0;
+    loop {
+        if written == length {
+            break;
+        }
+        match framing.read_message(reader).await? {
+            Some(Message::Data { payload }) => {
+                if written + payload.len() as u64 > length {
+                    bail!(
+                        "put_chunked: client sent {} bytes past the declared {}",
+                        written + payload.len() as u64 - length,
+                        length
+                    );
+                }
+                file.write_all(&payload).await?;
+                written += payload.len() as u64;
+            }
+            Some(Message::DataCompressed {
+                algo,
+                original_size,
+                payload,
+            }) => {
+                let decoded = compress::decode_block(algo, original_size, &payload)?;
+                if written + decoded.len() as u64 > length {
+                    bail!(
+                        "put_chunked: client sent {} bytes past the declared {}",
+                        written + decoded.len() as u64 - length,
+                        length
+                    );
+                }
+                file.write_all(&decoded).await?;
+                written += decoded.len() as u64;
+            }
+            Some(Message::Done) => break,
+            Some(other) => bail!("put_chunked: unexpected message {other:?}"),
+            None => bail!("put_chunked: client closed connection before Done"),
+        }
+    }
+    if written != length {
+        bail!(
+            "put_chunked: declared {} bytes, received {}",
+            length,
+            written
+        );
+    }
+    if sync {
+        file.sync_all().await?;
+    }
+    Ok(Message::Ok { hash: None })
+}
+
+async fn handle_get_chunked<W>(
+    path: &str,
+    offset: u64,
+    length: u64,
+    algo: CompressionAlgo,
+    out: &mut W,
+    framing: &mut Framing,
+) -> Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let mut file = fs::File::open(path).await?;
+    file.seek(std::io::SeekFrom::Start(offset)).await?;
+
+    let mut remaining = length;
+    let mut buf = vec![0u8; CHUNK_SIZE];
+    while remaining > 0 {
+        let want = remaining.min(CHUNK_SIZE as u64) as usize;
+        let n = file.read(&mut buf[..want]).await?;
+        if n == 0 {
+            bail!(
+                "get_chunked: unexpected EOF at offset {} (still needed {} bytes)",
+                offset + length - remaining,
+                remaining
+            );
+        }
+        let frame = compress::encode_block(algo, buf[..n].to_vec());
+        framing.write_message(out, &frame).await?;
+        remaining -= n as u64;
+    }
+    framing
+        .write_message(out, &Message::Ok { hash: None })
+        .await?;
+    Ok(())
+}
+
 async fn handle_mkdir(path: &str) -> Result<Message> {
     fs::create_dir_all(path).await?;
     Ok(Message::Ok { hash: None })
+}
+
+async fn ensure_parent_dir(path: &str) -> Result<()> {
+    if let Some(parent) = Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_truncate(path: &str, size: u64) -> Result<Message> {
+    ensure_parent_dir(path).await?;
+    let f = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .await?;
+    f.set_len(size).await?;
+    Ok(Message::Ok { hash: None })
+}
+
+/// Overridable via `BCMR_RENDEZVOUS_TIMEOUT_SECS` for tests.
+const RENDEZVOUS_ACCEPT_TIMEOUT_SECS: u64 = 30;
+
+/// Per-connection read budget, sub-leased from the accept deadline so
+/// hostile `connect+stall` attempts can't drain it.
+const AUTH_HELLO_READ_TIMEOUT_SECS: u64 = 2;
+
+const MAX_RENDEZVOUS_PER_SESSION: usize = 16;
+
+fn rendezvous_accept_timeout() -> std::time::Duration {
+    let secs = std::env::var("BCMR_RENDEZVOUS_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(RENDEZVOUS_ACCEPT_TIMEOUT_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Happy path: `drain_gracefully` awaits running data sessions to
+/// completion. Error path: Drop aborts orphans so a `?`-propagated
+/// error doesn't leak listeners past the control session's lifetime.
+struct RendezvousTasks {
+    handles: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl RendezvousTasks {
+    fn new() -> Self {
+        Self {
+            handles: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, h: tokio::task::JoinHandle<()>) {
+        self.handles.push(h);
+    }
+
+    fn len(&self) -> usize {
+        self.handles.len()
+    }
+
+    async fn drain_gracefully(mut self) {
+        for h in self.handles.drain(..) {
+            let _ = h.await;
+        }
+    }
+}
+
+impl Drop for RendezvousTasks {
+    fn drop(&mut self) {
+        for h in &self.handles {
+            h.abort();
+        }
+    }
+}
+
+/// Domain-separation tag for the AuthHello MAC — must match the
+/// client side.
+const AUTH_HELLO_TAG: &[u8] = b"bcmr-direct-v1";
+
+/// Bind on the SSH-facing interface (from `$SSH_CONNECTION.server_ip`)
+/// so the listener is only exposed on the network the SSH session
+/// already traversed — not 0.0.0.0 across every local interface.
+fn rendezvous_bind_ip() -> std::net::IpAddr {
+    use std::net::{IpAddr, Ipv4Addr};
+    let parsed = std::env::var("SSH_CONNECTION").ok().and_then(|v| {
+        let parts: Vec<&str> = v.split_whitespace().collect();
+        if parts.len() == 4 {
+            parts[2].parse::<IpAddr>().ok()
+        } else {
+            None
+        }
+    });
+    parsed.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
+}
+
+fn handle_open_direct_channel(
+    root: PathBuf,
+) -> Result<(Message, tokio::task::JoinHandle<()>)> {
+    use ring::rand::{SecureRandom, SystemRandom};
+    use zeroize::Zeroizing;
+
+    // INVARIANT: sync body — adding `.await` here re-introduces the
+    // type-level recursion run_session → this → run_direct_session
+    // → run_session that won't compile. Use spawn_blocking or
+    // Box::pin if you need async bind work.
+    let bind_addr = std::net::SocketAddr::new(rendezvous_bind_ip(), 0);
+    let std_listener = std::net::TcpListener::bind(bind_addr)?;
+    std_listener.set_nonblocking(true)?;
+    let addr = std_listener.local_addr()?;
+    let listener = tokio::net::TcpListener::from_std(std_listener)?;
+
+    let rng = SystemRandom::new();
+    let mut session_key: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
+    rng.fill(session_key.as_mut())
+        .map_err(|_| anyhow::anyhow!("ring::rand failed to produce session key"))?;
+    let key_out = *session_key;
+
+    let handle = tokio::spawn(run_rendezvous(listener, session_key, root));
+
+    Ok((
+        Message::DirectChannelReady {
+            addr: addr.to_string(),
+            session_key: key_out,
+        },
+        handle,
+    ))
+}
+
+async fn run_rendezvous(
+    listener: tokio::net::TcpListener,
+    session_key: zeroize::Zeroizing<[u8; 32]>,
+    root: PathBuf,
+) {
+    // Loop-accept-verify until either an authenticated peer dials in
+    // or the outer deadline elapses — a squatter that flunks AuthHello
+    // must not consume the single rendezvous slot.
+    let deadline = tokio::time::Instant::now() + rendezvous_accept_timeout();
+    let authed = loop {
+        let remaining = match deadline.checked_duration_since(tokio::time::Instant::now()) {
+            Some(d) if !d.is_zero() => d,
+            _ => return,
+        };
+        let mut stream = match tokio::time::timeout(remaining, listener.accept()).await {
+            Ok(Ok((stream, _peer))) => stream,
+            Ok(Err(e)) => {
+                eprintln!("serve: direct-tcp accept failed: {e}");
+                return;
+            }
+            Err(_) => return,
+        };
+        if verify_auth_hello(&mut stream, &session_key).await {
+            break stream;
+        }
+    };
+    drop(listener);
+
+    if let Err(e) = run_direct_session(authed, &session_key, &root).await {
+        eprintln!("serve: direct-tcp session error: {e}");
+    }
+}
+
+async fn verify_auth_hello(
+    stream: &mut tokio::net::TcpStream,
+    session_key: &[u8; 32],
+) -> bool {
+    let read_budget = std::time::Duration::from_secs(AUTH_HELLO_READ_TIMEOUT_SECS);
+    let mac = match tokio::time::timeout(read_budget, protocol::read_message(stream)).await {
+        Ok(Ok(Some(Message::AuthHello { mac }))) => mac,
+        _ => return false,
+    };
+    // blake3::Hash::PartialEq is constant-time.
+    blake3::Hash::from(mac) == blake3::keyed_hash(session_key, AUTH_HELLO_TAG)
+}
+
+async fn run_direct_session(
+    stream: tokio::net::TcpStream,
+    session_key: &[u8; 32],
+    root: &Path,
+) -> Result<()> {
+    let (mut reader, mut writer) = stream.into_split();
+
+    // Box::pin breaks the type-level recursion between run_session
+    // and run_direct_session. Flags: no splice (fd != STDOUT_FILENO),
+    // no nested direct-TCP, session_key present so CAP_AEAD is offered.
+    Box::pin(run_session(
+        &mut reader,
+        &mut writer,
+        root,
+        false,
+        false,
+        Some(session_key),
+    ))
+    .await
 }
 
 async fn handle_resume(path: &str) -> Result<Message> {

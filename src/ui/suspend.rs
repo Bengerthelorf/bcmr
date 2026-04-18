@@ -23,7 +23,6 @@ pub fn suspend_now(suspended: &AtomicBool) {
     unsafe {
         libc::raise(libc::SIGSTOP);
     }
-    // Execution resumes here after SIGCONT — the signal thread handles resume.
 }
 
 #[cfg(not(unix))]
@@ -49,11 +48,9 @@ pub fn install_suspend_handler() -> io::Result<Arc<AtomicBool>> {
                         let _ = disable_raw_mode();
                         suspended_clone.store(true, Ordering::SeqCst);
 
-                        // Actually stop the process (SIGSTOP cannot be caught).
                         unsafe {
                             libc::raise(libc::SIGSTOP);
                         }
-                        // Execution resumes here after SIGCONT.
                     }
                     SIGCONT => {
                         let in_foreground = unsafe {
@@ -68,7 +65,6 @@ pub fn install_suspend_handler() -> io::Result<Arc<AtomicBool>> {
                             let _ = execute!(std::io::stdout(), Hide);
                             suspended_clone.store(false, Ordering::SeqCst);
                         }
-                        // If backgrounded, stay suspended — the flag remains true.
                     }
                     _ => {}
                 }

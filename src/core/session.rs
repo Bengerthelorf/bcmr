@@ -7,13 +7,11 @@ use super::io as durable_io;
 
 const SESSION_MAGIC: &[u8; 4] = b"BCMR";
 const SESSION_VERSION: u8 = 1;
-const BLOCK_SIZE: u64 = 4 * 1024 * 1024; // 4MB, matches copy buffer
-const SESSION_MAX_AGE_SECS: u64 = 7 * 24 * 3600; // 7 days
+const BLOCK_SIZE: u64 = 4 * 1024 * 1024;
+const SESSION_MAX_AGE_SECS: u64 = 7 * 24 * 3600;
 
-/// Persistent session state for crash-safe resume.
-///
-/// Stores source file identity (path, size, mtime, inode), bytes written,
-/// and per-block BLAKE3 hashes for tail-block verification on resume.
+/// Persistent session state for crash-safe resume. `block_hashes` enables
+/// tail-block verification; `src_{size,mtime,inode}` validate source identity.
 #[derive(Debug)]
 pub struct Session {
     pub src_path: PathBuf,
@@ -29,7 +27,6 @@ pub struct Session {
 }
 
 impl Session {
-    /// Create a new session for a copy operation.
     pub fn new(src: &Path, dst: &Path, src_size: u64, src_mtime: u64, src_inode: u64) -> Self {
         let now = now_secs();
         Self {
@@ -46,40 +43,34 @@ impl Session {
         }
     }
 
-    /// Add a block hash and update bytes_written.
     pub fn add_block(&mut self, hash: [u8; 32], block_bytes: u64) {
         self.block_hashes.push(hash);
         self.bytes_written += block_bytes;
         self.updated_at = now_secs();
     }
 
-    /// Set the final source hash (computed inline during copy).
     pub fn set_src_hash(&mut self, hash: [u8; 32]) {
         self.src_hash = Some(hash);
     }
 
-    /// Session file path for a given src→dst pair.
     pub fn session_path(src: &Path, dst: &Path) -> PathBuf {
         let key = format!("{}:{}", src.display(), dst.display());
         let hash = blake3::hash(key.as_bytes());
-        let hex = &hash.to_hex()[..16]; // first 16 hex chars = 8 bytes
+        let hex = &hash.to_hex()[..16];
         session_dir().join(format!("{}.session", hex))
     }
 
-    /// Load an existing session, if valid.
     pub fn load(src: &Path, dst: &Path) -> Option<Self> {
         let path = Self::session_path(src, dst);
         let data = fs::read(&path).ok()?;
         let session = Self::deserialize(&data)?;
 
-        // Check expiry
         let age = now_secs().saturating_sub(session.updated_at);
         if age > SESSION_MAX_AGE_SECS {
             let _ = fs::remove_file(&path);
             return None;
         }
 
-        // Verify source identity
         if session.src_path != src || session.dst_path != dst {
             return None;
         }
@@ -87,12 +78,11 @@ impl Session {
         Some(session)
     }
 
-    /// Validate that the source file hasn't changed since this session was created.
     pub fn source_matches(&self, src_size: u64, src_mtime: u64, src_inode: u64) -> bool {
         self.src_size == src_size && self.src_mtime == src_mtime && self.src_inode == src_inode
     }
 
-    /// Atomically save session to disk (write → fsync → rename).
+    /// Atomic write → fsync → rename.
     pub fn save(&self) -> io::Result<()> {
         let dir = session_dir();
         fs::create_dir_all(&dir)?;
@@ -112,19 +102,16 @@ impl Session {
         Ok(())
     }
 
-    /// Remove session file (called on successful copy completion).
     pub fn remove(src: &Path, dst: &Path) {
         let path = Self::session_path(src, dst);
         let _ = fs::remove_file(path);
     }
 
-    /// Get the hash of the last completed block.
     #[cfg(test)]
     pub fn last_block_hash(&self) -> Option<&[u8; 32]> {
         self.block_hashes.last()
     }
 
-    /// Get the byte offset where the last completed block starts.
     #[cfg(test)]
     pub fn last_block_offset(&self) -> u64 {
         if self.block_hashes.is_empty() {
@@ -134,14 +121,9 @@ impl Session {
         }
     }
 
-    /// Find the safe resume offset by verifying the tail block of the destination.
-    ///
-    /// Walks backward from the last recorded block, checking each block's hash
-    /// against the destination file. Returns the byte offset from which copying
-    /// can safely resume, or 0 if no blocks are verified.
-    ///
-    /// Complexity: O(1) in the common case (only tail block needs checking),
-    /// O(k) in the worst case where k is the number of corrupt trailing blocks.
+    /// Walks backward from the last recorded block, returning the offset
+    /// immediately after the last block whose hash still matches the dst.
+    /// O(1) in the common case (tail block only).
     pub fn find_resume_offset(&self, dst: &Path) -> u64 {
         use std::io::Read;
 
@@ -155,18 +137,15 @@ impl Session {
             Err(_) => return 0,
         };
 
-        // Walk backward from the last block to find the last verified one
         let mut buf = vec![0u8; BLOCK_SIZE as usize];
         for i in (0..self.block_hashes.len()).rev() {
             let block_offset = i as u64 * BLOCK_SIZE;
 
-            // Block must be fully within the destination file
             let block_end = block_offset + BLOCK_SIZE;
             if block_end > dst_len {
                 continue;
             }
 
-            // Read and hash this block
             use std::io::Seek;
             if file.seek(std::io::SeekFrom::Start(block_offset)).is_err() {
                 continue;
@@ -185,48 +164,38 @@ impl Session {
 
             let hash = blake3::hash(&buf[..read]);
             if hash.as_bytes() == &self.block_hashes[i] {
-                // This block is verified — resume after it
                 return block_end;
             }
-            // Block doesn't match — continue walking backward
         }
 
         0
     }
 
-    /// Binary format serialization with trailing integrity checksum.
     fn serialize(&self) -> Vec<u8> {
         let mut buf = Vec::new();
 
-        // Header
         buf.extend_from_slice(SESSION_MAGIC);
         buf.push(SESSION_VERSION);
 
-        // Source path
         let src_bytes = self.src_path.to_string_lossy().into_owned().into_bytes();
         buf.extend_from_slice(&(src_bytes.len() as u32).to_le_bytes());
         buf.extend_from_slice(&src_bytes);
 
-        // Dest path
         let dst_bytes = self.dst_path.to_string_lossy().into_owned().into_bytes();
         buf.extend_from_slice(&(dst_bytes.len() as u32).to_le_bytes());
         buf.extend_from_slice(&dst_bytes);
 
-        // Source identity
         buf.extend_from_slice(&self.src_size.to_le_bytes());
         buf.extend_from_slice(&self.src_mtime.to_le_bytes());
         buf.extend_from_slice(&self.src_inode.to_le_bytes());
 
-        // Progress
         buf.extend_from_slice(&self.bytes_written.to_le_bytes());
 
-        // Block hashes
         buf.extend_from_slice(&(self.block_hashes.len() as u32).to_le_bytes());
         for hash in &self.block_hashes {
             buf.extend_from_slice(hash);
         }
 
-        // Source hash (optional)
         match &self.src_hash {
             Some(h) => {
                 buf.push(1);
@@ -237,35 +206,29 @@ impl Session {
             }
         }
 
-        // Timestamps
         buf.extend_from_slice(&self.created_at.to_le_bytes());
         buf.extend_from_slice(&self.updated_at.to_le_bytes());
 
-        // Integrity checksum: BLAKE3 of the payload, truncated to 8 bytes.
-        // Detects corrupted session files (bad sectors, partial writes).
+        // Trailing BLAKE3[..8] detects bad sectors / partial writes.
         let checksum = blake3::hash(&buf);
         buf.extend_from_slice(&checksum.as_bytes()[..8]);
 
         buf
     }
 
-    /// Binary format deserialization with integrity verification.
     fn deserialize(data: &[u8]) -> Option<Self> {
-        // Need at least 8 bytes for the trailing checksum
         if data.len() < 8 {
             return None;
         }
 
-        // Verify integrity checksum before parsing
         let (payload, stored_checksum) = data.split_at(data.len() - 8);
         let computed = blake3::hash(payload);
         if &computed.as_bytes()[..8] != stored_checksum {
-            return None; // corrupted session file
+            return None;
         }
 
         let mut r = Reader::new(payload);
 
-        // Header
         let magic = r.read_bytes(4)?;
         if magic != SESSION_MAGIC {
             return None;
@@ -275,25 +238,20 @@ impl Session {
             return None;
         }
 
-        // Source path
         let src_len = r.read_u32()? as usize;
         let src_bytes = r.read_bytes(src_len)?;
         let src_path = PathBuf::from(String::from_utf8_lossy(src_bytes).into_owned());
 
-        // Dest path
         let dst_len = r.read_u32()? as usize;
         let dst_bytes = r.read_bytes(dst_len)?;
         let dst_path = PathBuf::from(String::from_utf8_lossy(dst_bytes).into_owned());
 
-        // Source identity
         let src_size = r.read_u64()?;
         let src_mtime = r.read_u64()?;
         let src_inode = r.read_u64()?;
 
-        // Progress
         let bytes_written = r.read_u64()?;
 
-        // Block hashes
         let block_count = r.read_u32()? as usize;
         let mut block_hashes = Vec::with_capacity(block_count);
         for _ in 0..block_count {
@@ -303,7 +261,6 @@ impl Session {
             block_hashes.push(hash);
         }
 
-        // Source hash
         let has_src_hash = r.read_u8()?;
         let src_hash = if has_src_hash == 1 {
             let h = r.read_bytes(32)?;
@@ -314,7 +271,6 @@ impl Session {
             None
         };
 
-        // Timestamps
         let created_at = r.read_u64()?;
         let updated_at = r.read_u64()?;
 
@@ -346,7 +302,6 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// Minimal binary reader for deserialization.
 struct Reader<'a> {
     data: &'a [u8],
     pos: usize,
@@ -386,8 +341,7 @@ impl<'a> Reader<'a> {
 
 pub const COPY_BLOCK_SIZE: u64 = BLOCK_SIZE;
 
-/// Default checkpoint interval: sync + save session every 16 blocks (64MB).
-/// Chosen based on ablation study: ~4% overhead on Linux, ~16% on macOS.
+/// 16 blocks = 64 MiB. Ablation: ~4% overhead on Linux, ~16% on macOS.
 pub const CHECKPOINT_INTERVAL_BLOCKS: u32 = 16;
 
 #[cfg(test)]
@@ -447,11 +401,11 @@ mod tests {
 
         session.add_block([1; 32], BLOCK_SIZE);
         assert_eq!(*session.last_block_hash().unwrap(), [1; 32]);
-        assert_eq!(session.last_block_offset(), 0); // first block starts at 0
+        assert_eq!(session.last_block_offset(), 0);
 
         session.add_block([2; 32], BLOCK_SIZE);
         assert_eq!(*session.last_block_hash().unwrap(), [2; 32]);
-        assert_eq!(session.last_block_offset(), BLOCK_SIZE); // second block
+        assert_eq!(session.last_block_offset(), BLOCK_SIZE);
     }
 
     #[test]
@@ -459,7 +413,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src.bin");
         let dst = dir.path().join("dst.bin");
-        // Create dummy files so paths are valid
         std::fs::write(&src, b"hello").unwrap();
         std::fs::write(&dst, b"world").unwrap();
 
@@ -472,7 +425,6 @@ mod tests {
         assert_eq!(loaded.src_inode, 99);
         assert_eq!(loaded.block_hashes.len(), 1);
 
-        // Cleanup
         Session::remove(&src, &dst);
     }
 }

@@ -17,8 +17,9 @@ fn is_cross_device_error(err: &std::io::Error) -> bool {
 
     #[cfg(windows)]
     {
+        // 17 = ERROR_NOT_SAME_DEVICE
         err.raw_os_error() == Some(17)
-    } // ERROR_NOT_SAME_DEVICE
+    }
 
     #[cfg(not(any(unix, windows)))]
     {
@@ -166,8 +167,8 @@ where
                 return Ok(());
             }
 
-            // Excludes: rename ignores excludes -> Copy + Remove source(files) + Remove source(dir, if empty)
-
+            // rename(2) ignores excludes, so with excludes we must
+            // fall back to copy-then-remove to honour them.
             copy::copy_path(
                 src,
                 dst,
@@ -181,7 +182,6 @@ where
             remove_directory_contents(src, excludes).await?;
             let _ = fs::remove_dir(src).await;
         } else {
-            // Calculate size before rename (for progress reporting on success)
             let dir_size = copy::get_total_size(&[src.to_path_buf()], true, cli, excludes)
                 .await
                 .unwrap_or(0);
@@ -212,7 +212,6 @@ where
                         durable_io::fsync_dir_async(parent).await;
                     }
                 }
-                // Rename succeeded instantly — report full progress
                 on_new_file(&dir_name, dir_size);
                 progress_callback(dir_size);
                 if cli.is_verbose() {
@@ -242,7 +241,7 @@ async fn remove_directory_contents(
         if path.is_file() {
             fs::remove_file(path).await?;
         } else if path.is_dir() {
-            // remove_dir ensures only empty dirs are removed
+            // remove_dir (not remove_dir_all) — only empties are removed.
             let _ = fs::remove_dir(path).await;
         }
     }
