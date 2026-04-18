@@ -2,7 +2,9 @@
 // fire for items used only by other test files.
 #![allow(dead_code)]
 
-use std::path::PathBuf;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 pub fn bcmr_bin() -> PathBuf {
@@ -39,10 +41,6 @@ pub fn spawn_serve_with_env(root: &str, env: &[(&str, &str)]) -> ServeChild {
         stdout,
     }
 }
-
-use std::fs;
-use std::io::Write;
-use std::path::Path;
 
 /// Deterministic pseudo-random bytes (LCG) so hash collisions are detectable.
 pub fn create_file(path: &Path, size: usize) {

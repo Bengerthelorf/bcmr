@@ -1408,11 +1408,12 @@ fn divide_ranges(total: u64, n: usize) -> Vec<(u64, u64)> {
 fn spawn_blake3_file(
     path: std::path::PathBuf,
 ) -> tokio::task::JoinHandle<Result<[u8; 32], BcmrError>> {
+    const READ_CHUNK: usize = 4 * 1024 * 1024;
     tokio::task::spawn_blocking(move || {
         use std::io::Read;
         let mut f = std::fs::File::open(&path)?;
         let mut hasher = blake3::Hasher::new();
-        let mut buf = vec![0u8; DEDUP_BLOCK_SIZE];
+        let mut buf = vec![0u8; READ_CHUNK];
         loop {
             let n = f.read(&mut buf)?;
             if n == 0 {
