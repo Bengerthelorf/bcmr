@@ -274,6 +274,15 @@ direct-TCP-plain are the same decorator stacked differently.
   wants plaintext on a trusted LAN, reinstate a separate `direct=plain`
   flag that flips the server-side guard off, clearly gated behind the
   explicit user choice.
+- **SSH ProxyJump**: the server binds the rendezvous listener on
+  the IP from `$SSH_CONNECTION`'s `server_ip` field — the interface
+  the inbound SSH session actually arrived on. When SSH uses
+  `ProxyJump` to reach a host across subnets, that IP is routable
+  from the jump host but not from the client. The direct-TCP dial
+  then times out, and bcmr's fast-path fallback kicks in (with a
+  visible warning, not a silent downgrade). Resolving this properly
+  would mean tunnelling the data TCP through the same jump — not
+  v1 scope. Users who hit this can stay on `--direct=ssh`.
 
 ## Downgrade-attack guard
 
