@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::process::Child;
 
 use crate::core::compress;
 use crate::core::error::BcmrError;
@@ -10,6 +10,19 @@ use crate::core::protocol::{
     self, CompressionAlgo, ListEntry, Message, CAP_DEDUP, CAP_LZ4, CAP_ZSTD, PROTOCOL_VERSION,
 };
 use crate::core::transport::ssh as ssh_transport;
+
+type BoxedReader = Box<dyn AsyncRead + Send + Unpin>;
+type BoxedWriter = Box<dyn AsyncWrite + Send + Unpin>;
+
+/// Transport-specific cleanup state. The byte streams themselves live
+/// as `reader`/`writer` fields on `ServeClient` (type-erased so every
+/// transport goes through the same protocol framing code), but the
+/// kill-on-drop handle is transport-specific — SSH needs to terminate
+/// the child process; a plain TCP connection would just drop the
+/// socket.
+enum Transport {
+    Ssh { child: Child },
+}
 
 /// Default client caps: LZ4 + Zstd + dedup. CAP_FAST is opt-in via
 /// `--fast` because the trade-off (no server-side hash) only makes
@@ -22,9 +35,9 @@ const DEDUP_MIN_FILE_SIZE: u64 = 16 * 1024 * 1024;
 const DEDUP_BLOCK_SIZE: usize = 4 * 1024 * 1024;
 
 pub struct ServeClient {
-    child: Child,
-    stdin: Option<ChildStdin>,
-    stdout: ChildStdout,
+    transport: Transport,
+    reader: BoxedReader,
+    writer: Option<BoxedWriter>,
     algo: CompressionAlgo,
     dedup_enabled: bool,
 }
@@ -58,7 +71,7 @@ impl ServeClient {
 
     pub async fn connect_with_caps(ssh_target: &str, caps: u8) -> Result<Self, BcmrError> {
         let spawn = ssh_transport::spawn_remote(ssh_target).await?;
-        let mut client = Self::from_child(spawn.child, spawn.stdin, spawn.stdout);
+        let mut client = Self::from_ssh_spawn(spawn);
         client.handshake(caps).await?;
         Ok(client)
     }
@@ -110,14 +123,14 @@ impl ServeClient {
             .clone();
 
         let spawn = ssh_transport::spawn_local(&bcmr_path).await?;
-        Ok(Self::from_child(spawn.child, spawn.stdin, spawn.stdout))
+        Ok(Self::from_ssh_spawn(spawn))
     }
 
-    fn from_child(child: Child, stdin: ChildStdin, stdout: ChildStdout) -> Self {
+    fn from_ssh_spawn(spawn: ssh_transport::SshSpawn) -> Self {
         Self {
-            child,
-            stdin: Some(stdin),
-            stdout,
+            transport: Transport::Ssh { child: spawn.child },
+            reader: Box::new(spawn.stdout),
+            writer: Some(Box::new(spawn.stdin)),
             algo: CompressionAlgo::None,
             dedup_enabled: false,
         }
@@ -280,14 +293,14 @@ impl ServeClient {
 
     async fn put_streaming(&mut self, data: &Path) -> Result<(), BcmrError> {
         let algo = self.algo;
-        let stdin = self
-            .stdin
+        let w = self
+            .writer
             .as_mut()
-            .ok_or_else(|| BcmrError::InvalidInput("stdin already taken".into()))?;
+            .ok_or_else(|| BcmrError::InvalidInput("writer already taken".into()))?;
         // Single-file put() has no batch-level progress channel; skip
         // reporting here and let the caller drive progress via their own
         // means (the single-file CLI path already owns a per-byte meter).
-        write_file_data_frames(stdin, data, algo, &|_| {}).await
+        write_file_data_frames(w, data, algo, &|_| {}).await
     }
 
     async fn put_with_dedup(&mut self, data: &Path, size: u64) -> Result<(), BcmrError> {
@@ -337,13 +350,13 @@ impl ServeClient {
         Ok(())
     }
 
-    /// Take ownership of `stdin` for a pipelined operation. Pairs with
-    /// `reap_writer_task`, which puts it back (or surfaces the writer's
-    /// failure).
-    fn take_stdin(&mut self) -> Result<ChildStdin, BcmrError> {
-        self.stdin
+    /// Take ownership of the write half for a pipelined operation.
+    /// Pairs with `reap_writer_task`, which puts it back (or surfaces
+    /// the writer's failure).
+    fn take_writer(&mut self) -> Result<BoxedWriter, BcmrError> {
+        self.writer
             .take()
-            .ok_or_else(|| BcmrError::InvalidInput("stdin already taken (concurrent op?)".into()))
+            .ok_or_else(|| BcmrError::InvalidInput("writer already taken (concurrent op?)".into()))
     }
 
     /// Common tail for the two pipelined methods. The reader task is the
@@ -365,15 +378,15 @@ impl ServeClient {
     ///   wrong upstream.
     async fn reap_writer_task(
         &mut self,
-        writer: tokio::task::JoinHandle<Result<ChildStdin, BcmrError>>,
+        writer: tokio::task::JoinHandle<Result<BoxedWriter, BcmrError>>,
         reader_errored: bool,
     ) -> Result<(), BcmrError> {
         if reader_errored {
             writer.abort();
         }
         match writer.await {
-            Ok(Ok(stdin_back)) => {
-                self.stdin = Some(stdin_back);
+            Ok(Ok(writer_back)) => {
+                self.writer = Some(writer_back);
                 Ok(())
             }
             Ok(Err(writer_err)) => {
@@ -447,29 +460,28 @@ impl ServeClient {
             return Ok(Vec::new());
         }
 
-        let stdin = self.take_stdin()?;
+        let mut wire = self.take_writer()?;
         let algo = self.algo;
         // Reader-side views of the input (just what on_complete needs).
         // The writer task consumes `files` so we snapshot here.
         let progress: Vec<(std::path::PathBuf, u64)> =
             files.iter().map(|f| (f.local.clone(), f.size)).collect();
 
-        let writer: tokio::task::JoinHandle<Result<ChildStdin, BcmrError>> =
+        let writer_task: tokio::task::JoinHandle<Result<BoxedWriter, BcmrError>> =
             tokio::spawn(async move {
-                let mut stdin = stdin;
                 for ft in files {
                     protocol::write_message(
-                        &mut stdin,
+                        &mut wire,
                         &Message::Put {
                             path: ft.remote,
                             size: ft.size,
                         },
                     )
                     .await?;
-                    write_file_data_frames(&mut stdin, &ft.local, algo, &on_chunk).await?;
-                    protocol::write_message(&mut stdin, &Message::Done).await?;
+                    write_file_data_frames(&mut wire, &ft.local, algo, &on_chunk).await?;
+                    protocol::write_message(&mut wire, &Message::Done).await?;
                 }
-                Ok(stdin)
+                Ok(wire)
             });
 
         let mut hashes: Vec<[u8; 32]> = Vec::with_capacity(n);
@@ -507,7 +519,8 @@ impl ServeClient {
             }
         }
 
-        self.reap_writer_task(writer, recv_err.is_some()).await?;
+        self.reap_writer_task(writer_task, recv_err.is_some())
+            .await?;
 
         if let Some(e) = recv_err {
             return Err(e);
@@ -563,7 +576,7 @@ impl ServeClient {
             return Ok(());
         }
 
-        let stdin = self.take_stdin()?;
+        let mut wire = self.take_writer()?;
 
         let request_paths: Vec<String> = files.iter().map(|f| f.remote.clone()).collect();
 
@@ -572,13 +585,12 @@ impl ServeClient {
         // OS pipe + SSH socket buffer with room to spare. If the buffer
         // *did* fill, write_message().await would naturally backpressure,
         // so we don't bother with an explicit channel.
-        let writer: tokio::task::JoinHandle<Result<ChildStdin, BcmrError>> =
+        let writer_task: tokio::task::JoinHandle<Result<BoxedWriter, BcmrError>> =
             tokio::spawn(async move {
-                let mut stdin = stdin;
                 for path in request_paths {
-                    protocol::write_message(&mut stdin, &Message::Get { path, offset: 0 }).await?;
+                    protocol::write_message(&mut wire, &Message::Get { path, offset: 0 }).await?;
                 }
-                Ok(stdin)
+                Ok(wire)
             });
 
         let mut recv_err: Option<BcmrError> = None;
@@ -700,7 +712,8 @@ impl ServeClient {
             }
         }
 
-        self.reap_writer_task(writer, recv_err.is_some()).await?;
+        self.reap_writer_task(writer_task, recv_err.is_some())
+            .await?;
 
         if let Some(e) = recv_err {
             return Err(e);
@@ -747,41 +760,59 @@ impl ServeClient {
         // Drop stdin to send EOF → server exits cleanly.
         // After wait(), the Drop impl's start_kill() is a harmless no-op
         // on an already-exited child.
-        self.stdin.take();
-        let _ = self.child.wait().await;
+        self.writer.take();
+        self.transport.wait().await;
         Ok(())
     }
 
-    /// Hook for the pool's `close`: drop stdin + wait without consuming
+    /// Hook for the pool's `close`: drop writer + wait without consuming
     /// self, so the pool can drive the same shutdown across N clients
     /// via `&mut self` iteration instead of by-value consumption.
     async fn close_in_place(&mut self) -> Result<(), BcmrError> {
-        self.stdin.take();
-        let _ = self.child.wait().await;
+        self.writer.take();
+        self.transport.wait().await;
         Ok(())
     }
 
     async fn send(&mut self, msg: &Message) -> Result<(), BcmrError> {
-        let stdin = self
-            .stdin
+        let w = self
+            .writer
             .as_mut()
             .ok_or_else(|| BcmrError::InvalidInput("connection closed".into()))?;
-        protocol::write_message(stdin, msg).await?;
-        stdin.flush().await?;
+        protocol::write_message(w, msg).await?;
+        w.flush().await?;
         Ok(())
     }
 
     async fn recv(&mut self) -> Result<Message, BcmrError> {
-        protocol::read_message(&mut self.stdout)
+        protocol::read_message(&mut self.reader)
             .await?
             .ok_or_else(|| BcmrError::InvalidInput("server closed connection unexpectedly".into()))
+    }
+}
+
+impl Transport {
+    async fn wait(&mut self) {
+        match self {
+            Transport::Ssh { child } => {
+                let _ = child.wait().await;
+            }
+        }
+    }
+
+    fn start_kill(&mut self) {
+        match self {
+            Transport::Ssh { child } => {
+                let _ = child.start_kill();
+            }
+        }
     }
 }
 
 /// Kill child process on drop to prevent orphaned bcmr serve processes.
 impl Drop for ServeClient {
     fn drop(&mut self) {
-        let _ = self.child.start_kill();
+        self.transport.start_kill();
     }
 }
 
