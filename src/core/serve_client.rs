@@ -974,7 +974,7 @@ impl ServeClientPool {
 
         let mut out: Vec<Option<[u8; 32]>> = (0..n_files).map(|_| None).collect();
         for (indices, hashes) in results {
-            for (idx, hash) in indices.into_iter().zip(hashes.into_iter()) {
+            for (idx, hash) in indices.into_iter().zip(hashes) {
                 out[idx] = Some(hash);
             }
         }
