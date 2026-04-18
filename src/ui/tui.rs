@@ -97,7 +97,6 @@ impl TuiProgress {
             self.initialize()?;
         }
 
-        // Clear leftover lines when switching between modes with different heights
         let new_lines = self.total_lines();
         if self.last_rendered_lines > new_lines {
             let mut stdout = stdout();
@@ -165,7 +164,7 @@ impl TuiProgress {
                 "double" => ('╔', '╗', '╚', '╝', '═', '║'),
                 "heavy" => ('┏', '┓', '┗', '┛', '━', '┃'),
                 "single" => ('┌', '┐', '└', '┘', '─', '│'),
-                _ => ('╭', '╮', '╰', '╯', '─', '│'), // rounded is default
+                _ => ('╭', '╮', '╰', '╯', '─', '│'),
             };
 
         let border_color = parse_hex_color(&theme.border_color);
@@ -313,9 +312,8 @@ impl TuiProgress {
             draw_line_content(&mut stdout, 3, &workers_header)?;
 
             let num_width = if self.data.parallel_total >= 10 { 2 } else { 1 };
-            // Worker bar is fixed width; extra space goes to file name
             let worker_bar_width = 20usize.min(box_width.saturating_sub(30));
-            // Fixed parts: "│ " (2) + "[N] " (num_width+3) + " [" (2) + "] " (2) + "100%" (4) + " xx.xx MiB/s" (13) + " │" (2)
+            // "│ " (2) + "[N] " (num_width+3) + " [" (2) + "] " (2) + "100%" (4) + " xx.xx MiB/s" (13) + " │" (2)
             let fixed_chars = num_width + 26;
             let name_max = box_width
                 .saturating_sub(worker_bar_width + fixed_chars)
@@ -574,7 +572,7 @@ impl ProgressRenderer for TuiProgress {
             return Ok(());
         }
 
-        // If suspended, the signal handler already cleaned up raw mode.
+        // Signal handler already cleaned up raw mode if we got here via SIGTSTP.
         let was_suspended = self.suspended.load(Ordering::SeqCst);
 
         let _ = self.redraw();

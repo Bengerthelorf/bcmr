@@ -4,7 +4,6 @@ use once_cell::sync::Lazy;
 use serde::Deserialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-// Set once at startup, read thereafter.
 static JSON_MODE: AtomicBool = AtomicBool::new(false);
 
 pub fn set_json_mode(enabled: bool) {
@@ -41,19 +40,15 @@ pub struct Config {
     pub update_check: UpdateCheck,
 }
 
-/// Cross-transport settings for remote operations. Introduced in
-/// v0.5.19 so `scp`-specific knobs (parallel_transfers, compression)
-/// stay there and pan-remote knobs have their own home.
+/// Cross-transport settings for remote operations. Pan-remote knobs
+/// live here; `scp`-specific knobs stay on ScpConfig.
 #[derive(Debug, Deserialize, Clone)]
 pub struct TransferConfig {
     /// When the `bcmr serve` fast path is unavailable and we fall back
-    /// to legacy SSH-per-file transfer, print a one-line stderr
-    /// warning explaining why and pointing at the fix. Default on:
-    /// silent fallback silently costs users 10× wall time with no
-    /// visible reason (the trap documented in Experiment 17). Set to
-    /// false in config if the noise outweighs the diagnostic value
-    /// (e.g. you're scripting a mixed-fleet rollout where some hosts
-    /// genuinely don't have bcmr installed yet).
+    /// to legacy SSH-per-file transfer, print a stderr warning. Silent
+    /// fallback costs users ~10× wall time with no visible reason; set
+    /// to false for scripted mixed-fleet rollouts where the noise
+    /// outweighs the signal.
     #[serde(default = "default_fallback_warning")]
     pub fallback_warning: bool,
 }
@@ -73,16 +68,12 @@ impl Default for TransferConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum UpdateCheck {
-    /// Check GitHub for a new release on every invocation and print a
-    /// one-line "update available" notice at the end. Requires network
-    /// and a GitHub API round trip per run.
+    /// Check GitHub each run, print "update available" notice at end.
     Notify,
     /// Same network check, no print.
     Quiet,
     /// No network. Default — bcmr is a local-first tool and shouldn't
-    /// hit the network for a local `cp`. Users who want update alerts
-    /// set this explicitly (notify / quiet) in
-    /// `~/.config/bcmr/config.toml`.
+    /// hit the network for a local `cp`.
     #[default]
     Off,
 }

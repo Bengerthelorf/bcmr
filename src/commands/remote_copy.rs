@@ -39,10 +39,9 @@ const COMPRESSED_EXTENSIONS: &[&str] = &[
     "docx", "xlsx", "pptx", "dmg", "iso", "whl", "egg",
 ];
 
-/// Files smaller than this don't benefit from single-file striping —
-/// the extra rendezvous handshakes (one per pool member) cost more
-/// than a single pipelined stream saves. 64 MiB is the knee in the
-/// curve on typical LAN links.
+/// Below this size the per-pool-member rendezvous handshake cost
+/// outweighs a striped stream's throughput win. 64 MiB is the knee
+/// on typical LAN links.
 const STRIPING_MIN_FILE_SIZE: u64 = 64 * 1024 * 1024;
 
 fn should_compress(items: &[TransferItem]) -> bool {
@@ -278,21 +277,14 @@ pub async fn handle_remote_copy(
     };
     remote::validate_ssh_connection(&check_target).await?;
 
-    // One knob for both transports. Serve pool size (N independent SSH
-    // sessions for mscp-style crypto parallelism) and SCP fallback
-    // worker count share the same user-facing default — there's no
-    // ergonomic case for tuning them separately, and `scp.parallel_
-    // transfers` is the established config key (legacy name, applies
-    // to both now). Default = 4: enough to beat scp under normal load,
-    // within sshd's default MaxStartups headroom, handshake tax on
-    // small batches is bounded.
+    // `scp.parallel_transfers` is the legacy config key; it now also
+    // controls the serve-pool size. Default 4: beats scp under normal
+    // load, stays inside sshd's default MaxStartups headroom.
     let parallel = args.get_parallel().unwrap_or(CONFIG.scp.parallel_transfers);
     let serve_parallel = parallel.max(1);
 
-    // Try bcmr serve protocol first — much faster than per-file SSH.
-    // Falls back to legacy SSH if remote doesn't have bcmr, OR if the
-    // server's --root jail rejected a path (common cause: default root
-    // is $HOME, a path like /tmp/foo escapes it and serve errors out).
+    // Falls back to legacy SSH if remote has no bcmr, or if serve's
+    // --root jail (default $HOME) rejects a path like /tmp/foo.
     let ssh_target = check_target.ssh_target();
     let serve_result = if let Some(ref rdest) = remote_dest {
         handle_serve_upload(args, sources, rdest, &ssh_target, excludes, serve_parallel).await
@@ -303,21 +295,13 @@ pub async fn handle_remote_copy(
     match serve_result {
         Ok(()) => return Ok(()),
         Err(e) => {
-            // Don't silently fall back. Even the "remote doesn't have
-            // bcmr" case is worth telling the user about — installing
-            // bcmr on the remote is ~5 minutes and recovers 5-10x
-            // throughput on many-file batches. The config knob
-            // `transfer.fallback_warning = false` lets ops folks
-            // silence it for scripted mixed-fleet rollouts where the
-            // message is pure noise.
+            // Silent fallback costs users 5-10× throughput on many-file
+            // batches; warn loudly unless they opted out.
             let msg = e.to_string();
             let is_dry_run_redirect = msg.contains("dry-run fallback");
             if !is_dry_run_redirect && CONFIG.transfer.fallback_warning {
-                // Leading newline: if a TUI progress bar was up before
-                // the error, its last rendered line is still on the
-                // terminal until the fallback runner repaints. Starting
-                // on a fresh line keeps the warning from visually
-                // gluing onto the progress bar's tail.
+                // Leading '\n' keeps the warning off the last TUI line
+                // that may still be on the terminal.
                 eprintln!(
                     "\nbcmr: serve fast path unavailable ({msg}).\n\
                      bcmr: falling back to legacy SSH (per-file scp \
@@ -640,14 +624,11 @@ async fn handle_remote_download(
     runner.finish_ok()
 }
 
-// ===== Serve-based transfers =====
-
-/// Upload files via bcmr serve protocol. Returns Err if serve is unavailable.
+/// Upload via bcmr serve protocol. Err if serve is unavailable.
 ///
-/// `parallel` controls how many SSH connections the pool opens. Each
-/// connection has its own cipher stream, so on multi-core hardware
-/// this scales near-linearly until the NIC or disk saturates. N=1 is
-/// the default and identical in behavior to pre-v0.5.17.
+/// `parallel` = SSH connections opened by the pool; each has its own
+/// cipher stream, so throughput scales near-linearly on multi-core
+/// until NIC/disk saturate.
 async fn handle_serve_upload(
     args: &Commands,
     sources: &[PathBuf],
@@ -708,14 +689,10 @@ async fn handle_serve_upload(
             let size = src.metadata()?.len();
             (runner.file_callback())(&src.file_name().unwrap_or_default().to_string_lossy(), size);
 
-            // Striping: only on the direct-TCP transport (AEAD per-frame
-            // MAC gives us chunk-level integrity without per-chunk
-            // server-side hashing), only for files big enough that the
-            // extra rendezvous handshakes pay for themselves, and only
-            // when the user actually asked for N>1 parallelism. Dedup
-            // and --verify both rely on a whole-file server-side hash,
-            // which we can't assemble across chunks — those paths still
-            // use the single-connection put().
+            // Striping requires direct-TCP (AEAD per-frame MAC gives
+            // chunk-level integrity without a whole-file hash). Skipped
+            // for --verify and dedup since those need a server-side
+            // hash we can't assemble across chunks.
             let use_stripe = args.use_direct_tcp()
                 && pool.len() > 1
                 && size >= STRIPING_MIN_FILE_SIZE
@@ -761,12 +738,8 @@ async fn serve_upload_dir(
     let remote_dir = format!("{}/{}", remote_base.path, dir_name);
     pool.mkdir(&remote_dir).await?;
 
-    // Two-pass: mkdir all subdirectories first (cheap, must be sequential
-    // so parents exist before children), then batch-pipeline all file
-    // PUTs through the pool's striped method. With pool size > 1 the
-    // files are round-robin partitioned across the N connections and
-    // each connection runs its own pipeline concurrently, giving us up
-    // to N× the crypto throughput ceiling.
+    // Two-pass: mkdir all subdirs sequentially (parents before
+    // children), then striped-pipeline all file PUTs through the pool.
     let mut files_to_put: Vec<FileTransfer> = Vec::new();
     for entry in crate::core::traversal::walk(local_dir, true, false, 1, excludes) {
         let entry = entry?;
@@ -784,9 +757,9 @@ async fn serve_upload_dir(
         }
     }
 
-    // Snapshot local paths up-front only when we actually need them
-    // (--verify is off by default). The pool's striped PUT moves files
-    // into per-bucket writer tasks, so we snapshot before handing over.
+    // The pool's striped PUT moves files into per-bucket writer tasks,
+    // so snapshot local paths before handing over when --verify needs
+    // them post-transfer.
     let verify_inputs: Option<Vec<PathBuf>> =
         verify.then(|| files_to_put.iter().map(|f| f.local.clone()).collect());
 
@@ -816,11 +789,10 @@ async fn serve_upload_dir(
     Ok(())
 }
 
-/// Download files via bcmr serve protocol. Returns Err if serve is unavailable.
+/// Download via bcmr serve protocol. Err if serve is unavailable.
 ///
-/// `parallel` controls how many SSH connections the pool opens. N=1
-/// preserves pre-v0.5.17 behavior; N>1 stripes files round-robin
-/// across connections for N× crypto throughput until NIC/disk saturates.
+/// `parallel` = SSH connections in the pool; N>1 stripes files round-
+/// robin across connections for N× crypto throughput.
 async fn handle_serve_download(
     args: &Commands,
     sources: &[PathBuf],
@@ -857,8 +829,6 @@ async fn handle_serve_download(
         }
         let src_str = src.to_string_lossy();
         if let Some(rp) = parse_remote_path(&src_str) {
-            // Stat/list run on a single connection (no parallelism win for
-            // one-shot protocol round trips). Use pool.first_mut().
             let (size, _mtime, is_dir) = pool.first_mut().stat(&rp.path).await?;
             if is_dir && args.is_recursive() {
                 let entries = pool.first_mut().list(&rp.path).await?;
@@ -919,16 +889,10 @@ async fn handle_serve_download(
         .lock()
         .set_operation_type("Downloading (serve)");
 
-    // Two-pass: directories serially first (parents before children), then
-    // files via pipelined_get_files so request and reply streams overlap
-    // through SSH instead of paying one full RTT per file.
-    // Split file list into "big" (striping candidates) and "normal"
-    // (pipelined batch). A big file eligible for striping monopolises
-    // the whole pool for one file at a time; pipelined batches run
-    // everything else afterwards. The striping threshold + use_stripe
-    // gate match the PUT path exactly — direct-TCP only, pool N>1,
-    // file above size knee, and no --verify (whole-file server hash
-    // can't be assembled from chunks).
+    // Directories go serially (parents before children); files split
+    // into "big" (striped, one at a time, whole pool) and "normal"
+    // (pipelined batch). Stripe gate matches PUT: direct-TCP, pool>1,
+    // file above knee, no --verify.
     let use_stripe = args.use_direct_tcp() && pool.len() > 1 && !args.is_verify();
     let mut big_files: Vec<(String, PathBuf, u64)> = Vec::new();
     let mut files_to_get: Vec<FileTransfer> = Vec::new();

@@ -1,9 +1,4 @@
 #![cfg(unix)]
-//! End-to-end tests for Path B: SSH rendezvous → direct-TCP data
-//! plane with AES-256-GCM framing. Covers the reply well-formedness,
-//! cap gating, the full PUT+GET round-trip, the squatter
-//! DoS-resistance of the accept loop, and both sides' downgrade
-//! guards around CAP_AEAD.
 
 mod common;
 
@@ -15,8 +10,6 @@ use std::sync::{Arc, Mutex};
 use bcmr::core::checksum;
 use bcmr::core::serve_client::{FileTransfer, ServeClient, ServeClientPool};
 
-/// OpenDirectChannel → DirectChannelReady: reply addr is reachable, key
-/// is random, two requests get two different keys.
 #[tokio::test]
 async fn serve_open_direct_channel_reply_is_well_formed() {
     use bcmr::core::protocol::{
@@ -24,8 +17,8 @@ async fn serve_open_direct_channel_reply_is_well_formed() {
     };
     use tokio::net::TcpStream;
 
-    // Tight rendezvous timeout so the per-channel listeners don't
-    // pin the child for the full 30 s default.
+    // Tight rendezvous timeout so the per-channel listener doesn't pin the
+    // child for the full 30 s default.
     let ServeChild {
         mut child,
         mut stdin,
@@ -59,7 +52,6 @@ async fn serve_open_direct_channel_reply_is_well_formed() {
     let sock = TcpStream::connect(parsed).await.expect("dial accept");
     drop(sock);
 
-    // Fresh rendezvous → fresh key.
     write_message(&mut stdin, &Message::OpenDirectChannel)
         .await
         .unwrap();
@@ -77,9 +69,6 @@ async fn serve_open_direct_channel_reply_is_well_formed() {
     let _ = child.wait().await;
 }
 
-/// Without CAP_DIRECT_TCP in the negotiated caps, the server must
-/// refuse OpenDirectChannel with an Error. Forward compat for old
-/// clients that don't know about Path B.
 #[tokio::test]
 async fn serve_open_direct_channel_requires_cap() {
     use bcmr::core::protocol::{read_message, write_message, Message, PROTOCOL_VERSION};
@@ -118,9 +107,6 @@ async fn serve_open_direct_channel_requires_cap() {
     let _ = child.wait().await;
 }
 
-/// Full SSH → OpenDirectChannel → TCP rendezvous → AuthHello → PUT →
-/// GET round-trip. Proves the direct-TCP transport carries a complete
-/// data session end-to-end with AEAD framing active.
 #[tokio::test]
 async fn serve_direct_tcp_put_get_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
@@ -157,10 +143,8 @@ async fn serve_direct_tcp_put_get_roundtrip() {
     assert_eq!(checksum::calculate_hash(&remote_dst).unwrap(), src_hash);
 }
 
-/// DoS-resistance: a squatter that connects first with a bogus
-/// AuthHello must NOT consume the rendezvous listener. The real
-/// client, dialing in second with the right MAC, still reaches an
-/// open listener and completes the handshake.
+/// Regression guard against a DoS: a squatter that connects first with a
+/// bogus AuthHello must NOT consume the rendezvous listener.
 #[tokio::test]
 async fn serve_direct_tcp_squatter_does_not_starve_real_client() {
     use bcmr::core::protocol::{
@@ -192,7 +176,6 @@ async fn serve_direct_tcp_squatter_does_not_starve_real_client() {
         other => panic!("expected DirectChannelReady, got {other:?}"),
     };
 
-    // Squatter: connects first, sends an AuthHello with a bogus MAC.
     let squatter = TcpStream::connect(&addr).await.unwrap();
     let (_sr, mut sw) = squatter.into_split();
     write_message(
@@ -205,8 +188,8 @@ async fn serve_direct_tcp_squatter_does_not_starve_real_client() {
     .unwrap();
     drop(sw);
 
-    // Real client: mirror the real bcmr client flow — close SSH stdin
-    // once the rendezvous has handed off, then run the TCP handshake.
+    // Mirror the real bcmr client flow: close SSH stdin once the rendezvous
+    // has handed off, then run the TCP handshake.
     let real = TcpStream::connect(&addr).await.unwrap();
     drop(ssh_stdin);
     let (mut rr, mut rw) = real.into_split();
@@ -233,8 +216,8 @@ async fn serve_direct_tcp_squatter_does_not_starve_real_client() {
     let _ = child.wait().await;
 }
 
-/// Downgrade-attack guard: a rendezvous-authenticated peer that does
-/// NOT advertise CAP_AEAD must be rejected on the direct-TCP channel.
+/// Downgrade-attack guard: a rendezvous-authenticated peer that does NOT
+/// advertise CAP_AEAD must be rejected on the direct-TCP channel.
 #[tokio::test]
 async fn serve_direct_tcp_refuses_session_without_aead() {
     use bcmr::core::protocol::{
@@ -276,7 +259,7 @@ async fn serve_direct_tcp_refuses_session_without_aead() {
         &mut wtr,
         &Message::Hello {
             version: PROTOCOL_VERSION,
-            caps: 0, // CAP_AEAD deliberately missing
+            caps: 0,
         },
     )
     .await
@@ -296,9 +279,9 @@ async fn serve_direct_tcp_refuses_session_without_aead() {
     let _ = child.wait().await;
 }
 
-/// CAP_AEAD must be masked off on the SSH transport: the server has no
-/// session key to derive the AEAD key from, so advertising the cap
-/// would be a lie that the data plane can't honor.
+/// The SSH transport has no session key to derive an AEAD key from, so it
+/// must mask CAP_AEAD off; otherwise clients would attempt AEAD framing that
+/// the data plane can't honor.
 #[tokio::test]
 async fn serve_ssh_transport_does_not_offer_cap_aead() {
     use bcmr::core::protocol::{read_message, write_message, CAP_AEAD, PROTOCOL_VERSION};
@@ -332,11 +315,9 @@ async fn serve_ssh_transport_does_not_offer_cap_aead() {
     let _ = child.wait().await;
 }
 
-/// Pipelined PUT of many small files over direct-TCP. Exercises the
-/// split SendHalf / RecvHalf framing: the writer task owns the send
-/// counter + TCP write half, the reader task owns the recv counter +
-/// TCP read half. Must produce byte-identical dst files with correct
-/// hashes returned in input order.
+/// Exercises the split SendHalf / RecvHalf framing over direct-TCP: the
+/// writer task owns the send counter + TCP write half, the reader task owns
+/// the recv counter + TCP read half.
 #[tokio::test]
 async fn serve_direct_tcp_pipelined_put_many_files_succeeds() {
     let dir = tempfile::tempdir().unwrap();
@@ -387,9 +368,8 @@ async fn serve_direct_tcp_pipelined_put_many_files_succeeds() {
     client.close().await.unwrap();
 }
 
-/// Pipelined GET of many small files over direct-TCP. Mirror of the
-/// PUT test above. Proves the AEAD recv counter advances correctly
-/// across the demultiplexed Data*/Ok stream.
+/// Regression guard: the AEAD recv counter must advance correctly across the
+/// demultiplexed Data*/Ok stream during pipelined GET.
 #[tokio::test]
 async fn serve_direct_tcp_pipelined_get_many_files_succeeds() {
     let dir = tempfile::tempdir().unwrap();
@@ -437,11 +417,9 @@ async fn serve_direct_tcp_pipelined_get_many_files_succeeds() {
     }
 }
 
-/// ServeClientPool with N=4 direct-TCP connections: four independent
-/// rendezvous + TCP + AEAD sessions running concurrently, files
-/// round-robin'd across them. Proves the pool layer is transport-
-/// agnostic — every bucket flips to its own AEAD state and the
-/// striped scatter/gather still works.
+/// Regression guard: the pool layer must be transport-agnostic — every
+/// bucket flips to its own AEAD state and striped scatter/gather still works
+/// across four concurrent rendezvous sessions.
 #[tokio::test]
 async fn serve_direct_tcp_pool_striped_put_n4_succeeds() {
     let dir = tempfile::tempdir().unwrap();
@@ -500,17 +478,12 @@ async fn serve_direct_tcp_pool_striped_put_n4_succeeds() {
     assert_eq!(*received.lock().unwrap(), total_expected);
 }
 
-/// Striping: pool with N=4 direct-TCP connections splits a single
-/// 16 MiB file into 4 non-overlapping ranges, each connection pwrites
-/// its range to the shared dst path. Proves the per-client pwrite
-/// concurrency actually composes: total file must be byte-identical
-/// to the source and correctly sized.
 #[tokio::test]
 async fn serve_direct_tcp_striped_put_single_large_file() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("big.bin");
     let dst = dir.path().join("big_dst.bin");
-    create_file(&src, 16 * 1024 * 1024 + 731); // non-aligned for range-split edge case
+    create_file(&src, 16 * 1024 * 1024 + 731);
     let src_hash_hex = checksum::calculate_hash(&src).unwrap();
 
     let mut pool = ServeClientPool::connect_direct_local(4).await.unwrap();
@@ -537,10 +510,6 @@ async fn serve_direct_tcp_striped_put_single_large_file() {
     );
 }
 
-/// Mirror: striped GET over direct-TCP for a single large file. Pool
-/// with N=4, source file on the server side, each client pulls its
-/// range and writes into the shared local dst. Must produce a
-/// byte-identical copy.
 #[tokio::test]
 async fn serve_direct_tcp_striped_get_single_large_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -562,21 +531,16 @@ async fn serve_direct_tcp_striped_get_single_large_file() {
     assert_eq!(std::fs::metadata(&dst).unwrap().len(), src_size);
 }
 
-/// I1 regression guard: a striped PUT to a dst that is already
-/// larger than the new src must leave the dst at exactly the new
-/// src's size — not silently keep stale tail bytes past the new
-/// end. The Truncate preamble before the chunk fanout is what
-/// makes this correct; without it the smaller new file's chunks
-/// would only overwrite the prefix and the tail would survive.
+/// I1 regression guard: without the Truncate preamble before the chunk
+/// fanout, a smaller new src would only overwrite the prefix and the old
+/// dst's tail bytes would survive past the new end.
 #[tokio::test]
 async fn serve_direct_tcp_striped_put_truncates_existing_dst() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("small.bin");
     let dst = dir.path().join("dst.bin");
-    // Prior run: a larger dst with recognisable sentinel bytes.
     std::fs::write(&dst, vec![0xEEu8; 20 * 1024 * 1024]).unwrap();
-    // New run: overwrite with a smaller src.
-    create_file(&src, 2 * 1024 * 1024 + 17); // above dedup threshold? no — we go through striped anyway
+    create_file(&src, 2 * 1024 * 1024 + 17);
     let src_hash_hex = checksum::calculate_hash(&src).unwrap();
 
     let mut pool = ServeClientPool::connect_direct_local(4).await.unwrap();
@@ -598,10 +562,8 @@ async fn serve_direct_tcp_striped_put_truncates_existing_dst() {
     );
 }
 
-/// M4 regression guard: striping a zero-byte file must still
-/// produce an empty file on the server. The fanout skips empty
-/// ranges, so without the Truncate preamble the dst would simply
-/// not exist after the call.
+/// M4 regression guard: the fanout skips empty ranges, so without the
+/// Truncate preamble a zero-byte src would leave the dst non-existent.
 #[tokio::test]
 async fn serve_direct_tcp_striped_put_zero_byte_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -618,23 +580,21 @@ async fn serve_direct_tcp_striped_put_zero_byte_file() {
 
     assert!(dst.exists(), "striped PUT of an empty file must still create the dst");
     assert_eq!(std::fs::metadata(&dst).unwrap().len(), 0);
-    // BLAKE3 of empty input is a known constant.
     assert_eq!(
         bytes_to_hex(&returned_hash),
         "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
     );
 }
 
-/// Edge case: striping a file smaller than pool-size * 1 byte. Some
-/// buckets end up with a zero-byte share. Those buckets must be
-/// skipped rather than sending a PutChunked with length=0 (which
-/// would create a degenerate no-op frame).
+/// Regression guard: buckets that end up with a zero-byte share on a
+/// tiny-file stripe must be skipped, not sent as a degenerate
+/// PutChunked{length=0} frame.
 #[tokio::test]
 async fn serve_direct_tcp_striped_put_tiny_file_skips_empty_buckets() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("tiny.bin");
     let dst = dir.path().join("tiny_dst.bin");
-    create_file(&src, 7); // 7 bytes, pool N=4 → chunk sizes 2, 2, 2, 1
+    create_file(&src, 7);
     let src_hash_hex = checksum::calculate_hash(&src).unwrap();
 
     let mut pool = ServeClientPool::connect_direct_local(4).await.unwrap();

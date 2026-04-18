@@ -1,11 +1,5 @@
 #![cfg(unix)]
-//! End-to-end tests for `bcmr serve --listen`: the TCP-direct
-//! transport where the server binds its own listener and clients
-//! dial without going through SSH. Covers the basic handshake +
-//! PUT round-trip and the transport's cap mask.
 
-/// `bcmr serve --listen` binds a TCP port, announces it on stdout,
-/// and runs the full protocol dispatch loop over the accepted socket.
 #[tokio::test]
 async fn serve_listen_tcp_handshake_and_put() {
     use bcmr::core::protocol::{read_message, write_message, Message, PROTOCOL_VERSION};
@@ -96,8 +90,8 @@ async fn serve_listen_tcp_handshake_and_put() {
     let _ = child.wait().await;
 }
 
-/// Server running over `--listen` (TCP transport) must not advertise
-/// CAP_DIRECT_TCP in its Welcome. Prevents recursive rendezvous.
+/// Regression guard: `--listen` (TCP transport) must mask CAP_DIRECT_TCP out
+/// of its Welcome to prevent recursive rendezvous.
 #[tokio::test]
 async fn serve_listen_does_not_offer_direct_tcp_cap() {
     use bcmr::core::protocol::{

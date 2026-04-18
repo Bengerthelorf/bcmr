@@ -1,18 +1,10 @@
 use anyhow::{bail, Result};
 use tokio::process::Command;
 
-/// Deploy bcmr binary to a remote host.
-///
-/// 1. Detect remote OS + architecture
-/// 2. If same as local → scp the running binary
-/// 3. If different → download matching binary from GitHub Releases
-/// 4. Verify installation
 pub async fn run(target: &str, remote_path: &str) -> Result<()> {
-    // Expand ~ in remote path for display
     let display_path = remote_path.replace("~", "$HOME");
     eprintln!("Deploying bcmr to {}:{}", target, display_path);
 
-    // Step 1: Check if bcmr is already installed
     let check = ssh(target, "bcmr --version 2>/dev/null || echo NOTFOUND").await?;
     if !check.contains("NOTFOUND") {
         eprintln!("  Remote already has: {}", check.trim());
@@ -24,7 +16,6 @@ pub async fn run(target: &str, remote_path: &str) -> Result<()> {
         eprintln!("  Upgrading to v{}...", local_version);
     }
 
-    // Step 2: Detect remote platform
     let remote_info = ssh(target, "uname -sm").await?;
     let remote_info = remote_info.trim();
     let (remote_os, remote_arch) = parse_uname(remote_info)?;
@@ -34,7 +25,6 @@ pub async fn run(target: &str, remote_path: &str) -> Result<()> {
     let local_arch = std::env::consts::ARCH;
     eprintln!("  Local:  {} {}", local_os, local_arch);
 
-    // Step 3: Ensure remote directory exists
     let dir = if remote_path.contains('/') {
         remote_path.rsplit_once('/').map(|(d, _)| d).unwrap_or(".")
     } else {
@@ -42,21 +32,17 @@ pub async fn run(target: &str, remote_path: &str) -> Result<()> {
     };
     ssh(target, &format!("mkdir -p {}", shell_escape(dir))).await?;
 
-    // Step 4: Get binary and transfer
     if remote_os == local_os && remote_arch == local_arch {
-        // Same platform — transfer local binary directly
         eprintln!("  Same platform. Transferring local binary...");
         let local_bin = std::env::current_exe()?;
         scp_to(target, &local_bin, remote_path).await?;
     } else {
-        // Cross-platform — download from GitHub Releases
         eprintln!("  Cross-platform. Downloading from GitHub Releases...");
         let asset_name = release_asset_name(remote_os, remote_arch)?;
         let url = format!(
             "https://github.com/Bengerthelorf/bcmr/releases/latest/download/{}",
             asset_name
         );
-        // Download and extract tar.gz on remote directly
         let download_cmd = format!(
             "curl -fsSL '{}' | tar xz -C {} bcmr && mv {}/bcmr {}",
             url,
@@ -66,7 +52,6 @@ pub async fn run(target: &str, remote_path: &str) -> Result<()> {
         );
         let output = ssh(target, &download_cmd).await;
         if output.is_err() {
-            // Fallback: download locally, extract, then scp
             eprintln!("  Direct download failed. Downloading locally...");
             let tmp_dir = std::env::temp_dir().join("bcmr-deploy-tmp");
             let _ = tokio::fs::create_dir_all(&tmp_dir).await;
@@ -83,7 +68,6 @@ pub async fn run(target: &str, remote_path: &str) -> Result<()> {
                     asset_name
                 );
             }
-            // Extract locally
             let status = Command::new("tar")
                 .args(["xzf"])
                 .arg(&tmp_archive)
@@ -100,7 +84,6 @@ pub async fn run(target: &str, remote_path: &str) -> Result<()> {
         }
     }
 
-    // Step 5: Make executable and verify
     ssh(target, &format!("chmod +x {}", shell_escape(remote_path))).await?;
     let verify = ssh(target, &format!("{} --version", shell_escape(remote_path))).await?;
     eprintln!("  Installed: {}", verify.trim());
@@ -157,7 +140,7 @@ fn parse_uname(info: &str) -> Result<(&str, &str)> {
 }
 
 fn release_asset_name(os: &str, arch: &str) -> Result<String> {
-    // Must match actual GitHub Release asset names
+    // Must match the asset names uploaded by the release workflow.
     let name = match (os, arch) {
         ("linux", "x86_64") => "bcmr-x86_64-linux.tar.gz",
         ("linux", "aarch64") => "bcmr-aarch64-linux.tar.gz",

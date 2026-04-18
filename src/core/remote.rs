@@ -104,7 +104,6 @@ pub struct RemoteFileInfo {
     pub size: u64,
 }
 
-/// Transfer options shared between local copy and remote operations.
 #[derive(Clone, Default)]
 pub struct TransferOptions {
     pub preserve: bool,
@@ -194,10 +193,9 @@ async fn check_resume_state(
     })
 }
 
-// ── SSH connection multiplexing ──
-// Uses ControlMaster to reuse a single TCP connection for all SSH commands
-// to the same host. The first connection may prompt for a password (if TTY
-// is available); subsequent connections piggyback on the master socket.
+// ControlMaster reuses one TCP connection for all SSH commands to the same
+// host. First connection may prompt for a password; subsequent ones
+// piggyback on the master socket.
 
 fn control_path(target: &str) -> String {
     let dir = std::env::temp_dir().join("bcmr-ssh");
@@ -239,12 +237,9 @@ fn ssh_base_args(target: &str) -> Vec<String> {
     args
 }
 
-/// Per-worker SSH args with separate ControlPath for true parallel TCP connections.
-///
-/// The default ControlMaster multiplexing serializes all SSH channels through
-/// one TCP connection and one encryption context, bottlenecking parallel throughput.
-/// By giving each worker its own control socket, each gets an independent TCP stream.
-/// mscp (https://github.com/upa/mscp) demonstrated 5.98x speedup with 8 connections.
+/// Each worker gets its own ControlPath so N workers run as N independent
+/// TCP streams with N cipher contexts — the default shared ControlMaster
+/// would serialize them on one. mscp demonstrated ~6x speedup at N=8.
 fn ssh_base_args_for_worker(target: &str, worker_id: usize) -> Vec<String> {
     let dir = std::env::temp_dir().join("bcmr-ssh");
     let _ = std::fs::create_dir_all(&dir);
@@ -263,7 +258,7 @@ fn ssh_base_args_for_worker(target: &str, worker_id: usize) -> Vec<String> {
         "-o".into(),
         "ControlMaster=auto".into(),
         "-o".into(),
-        "ControlPersist=60".into(), // shorter persist for worker sockets
+        "ControlPersist=60".into(),
         "-o".into(),
         "ConnectTimeout=10".into(),
     ];
@@ -276,8 +271,6 @@ fn ssh_base_args_for_worker(target: &str, worker_id: usize) -> Vec<String> {
     args
 }
 
-/// Create an SSH command that uses a per-worker control socket for true
-/// parallel TCP connections. Use this in parallel transfer workers.
 fn ssh_command_for_worker(target: &str, worker_id: usize) -> Command {
     let args = ssh_base_args_for_worker(target, worker_id);
     let mut cmd = Command::new("ssh");
@@ -288,10 +281,6 @@ fn ssh_command_for_worker(target: &str, worker_id: usize) -> Command {
     cmd
 }
 
-/// Create an SSH command with optional worker isolation.
-/// When worker_id is Some, uses a per-worker control socket for independent
-/// TCP connections (5-6x throughput improvement for parallel transfers).
-/// When None, uses the shared ControlMaster connection.
 fn make_ssh_cmd(target: &str, worker_id: Option<usize>) -> Command {
     match worker_id {
         Some(id) => ssh_command_for_worker(target, id),
@@ -340,7 +329,6 @@ fn ssh_error_message(stderr: &str, context: &str) -> String {
 
 pub async fn validate_ssh_connection(remote: &RemotePath) -> Result<(), BcmrError> {
     let target = remote.ssh_target();
-    // Establishes the ControlMaster connection; may prompt for password if TTY
     let output = ssh_command(&target).arg("echo ok").output().await?;
 
     if !output.status.success() {
@@ -392,8 +380,8 @@ pub async fn remote_stat(remote: &RemotePath) -> Result<RemoteFileInfo, BcmrErro
     let stdout = String::from_utf8_lossy(&output.stdout);
     let line = stdout.trim();
 
-    // Linux stat -c '%F %s': "regular file 12345" or "directory 4096"
-    // macOS stat -f '%HT %z': "Regular File 12345" or "Directory 4096"
+    // Linux: "regular file 12345" / "directory 4096"
+    // macOS: "Regular File 12345" / "Directory 4096"
     let is_dir = line.to_lowercase().starts_with("directory");
     let size: u64 = line
         .rsplit_once(' ')
@@ -837,7 +825,7 @@ async fn preserve_remote_attrs(local_src: &Path, remote: &RemotePath) -> Result<
 
     let mtime_ts = unix_to_touch_ts(mtime_secs as i64);
     let atime_ts = unix_to_touch_ts(atime_secs as i64);
-    // touch -t sets both atime+mtime; use -a/-m to set them independently
+    // -a/-m set atime and mtime independently; plain -t would set both.
     let cmd = format!(
         "TZ=UTC touch -m -t '{}' '{}'; TZ=UTC touch -a -t '{}' '{}'; chmod {:o} '{}'",
         mtime_ts,
@@ -935,7 +923,7 @@ fn unix_to_touch_ts(secs: i64) -> String {
     let minutes = (rem % 3600) / 60;
     let seconds = rem % 60;
 
-    // Civil days from epoch to y/m/d (Howard Hinnant's algorithm)
+    // Howard Hinnant's civil-from-days algorithm.
     let z = days as i32 + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
     let doe = (z - era * 146097) as u32;
@@ -1263,14 +1251,12 @@ mod tests {
 
     #[test]
     fn test_unix_to_touch_ts_known_date() {
-        // 2020-01-01 12:00:00 UTC = 1577880000
         let ts = unix_to_touch_ts(1577880000);
         assert_eq!(ts, "202001011200.00");
     }
 
     #[test]
     fn test_unix_to_touch_ts_with_seconds() {
-        // 2020-06-15 08:30:45 UTC = 1592210445 (approx, computed manually)
         let ts = unix_to_touch_ts(1592210445);
         assert!(ts.ends_with(".45"));
     }

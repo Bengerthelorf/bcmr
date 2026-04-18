@@ -265,13 +265,11 @@ fn test_empty_input_returns_none() {
 
 #[test]
 fn test_truncated_length_returns_none() {
-    // Only 3 bytes — can't read 4-byte length prefix
     assert_eq!(decode_message(&[0x01, 0x00, 0x00]), None);
 }
 
 #[test]
 fn test_truncated_payload_returns_none() {
-    // Length says 10 bytes, only 3 bytes of payload follow
     let mut frame = vec![10u8, 0, 0, 0];
     frame.extend_from_slice(&[0x02, 0x03, 0x04]);
     assert_eq!(decode_message(&frame), None);
@@ -279,9 +277,8 @@ fn test_truncated_payload_returns_none() {
 
 #[test]
 fn test_unknown_message_type_returns_none() {
-    // Payload of 1 byte with an unrecognised type
     let mut frame = vec![1u8, 0, 0, 0];
-    frame.push(0xFF); // unknown type
+    frame.push(0xFF);
     assert_eq!(decode_message(&frame), None);
 }
 
@@ -321,14 +318,12 @@ async fn test_async_write_read_roundtrip() {
         assert_eq!(received.as_ref(), Some(expected));
     }
 
-    // After all messages, EOF should yield None
     let eof = read_message(&mut server).await.unwrap();
     assert_eq!(eof, None);
 }
 
 #[test]
 fn test_open_direct_channel_roundtrip() {
-    // Zero-field message — wire form is just the type tag.
     assert_eq!(
         roundtrip(Message::OpenDirectChannel),
         Message::OpenDirectChannel
@@ -337,8 +332,7 @@ fn test_open_direct_channel_roundtrip() {
 
 #[test]
 fn test_auth_hello_roundtrip() {
-    // Fixed 32-byte MAC payload; values chosen to be distinct from 0/ff
-    // so a "forgot to copy" bug would show up.
+    // Distinct-from-0/ff pattern so a "forgot to copy" bug would show up.
     let mut mac = [0u8; 32];
     for (i, b) in mac.iter_mut().enumerate() {
         *b = (i * 7 + 3) as u8;
@@ -351,8 +345,6 @@ fn test_auth_hello_roundtrip() {
 
 #[test]
 fn test_direct_channel_ready_roundtrip() {
-    // String + fixed 32-byte key. Verifies the two-field layout
-    // decodes in the right order.
     let mut key = [0u8; 32];
     for (i, b) in key.iter_mut().enumerate() {
         *b = 0xA0u8.wrapping_add(i as u8);
@@ -366,8 +358,6 @@ fn test_direct_channel_ready_roundtrip() {
 
 #[test]
 fn test_direct_ready_addr_empty_string() {
-    // Edge case: empty addr. String length 0, but key bytes must still
-    // follow correctly.
     let msg = Message::DirectChannelReady {
         addr: String::new(),
         session_key: [0x42; 32],
@@ -375,12 +365,11 @@ fn test_direct_ready_addr_empty_string() {
     assert_eq!(roundtrip(msg.clone()), msg);
 }
 
+/// Regression guard: a decoder that accepted 31 bytes for a MAC would corrupt
+/// the stream. Build a frame with type + 31 bytes (needs 32).
 #[test]
 fn test_auth_hello_truncated_payload_returns_none() {
-    // A buggy implementation that accepted 31 bytes would corrupt the
-    // stream — the decode must reject short-tagged AuthHello frames.
-    // Build a frame manually: 1-byte type + 31 bytes (should need 32).
-    let mut payload = vec![0x0cu8]; // TYPE_AUTH_HELLO
+    let mut payload = vec![0x0cu8];
     payload.extend_from_slice(&[0u8; 31]);
     let mut frame = (payload.len() as u32).to_le_bytes().to_vec();
     frame.extend_from_slice(&payload);

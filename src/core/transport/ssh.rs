@@ -23,9 +23,8 @@ pub async fn spawn_remote(ssh_target: &str) -> Result<SshSpawn, BcmrError> {
 
 #[allow(dead_code)]
 pub async fn spawn_local(bcmr_path: &std::path::Path) -> Result<SshSpawn, BcmrError> {
-    // `--root /` so integration tests can write under tempdirs outside
-    // the default `$HOME` jail. `kill_on_drop(true)` matches spawn();
-    // see its comment for the reasoning.
+    // `--root /` lets integration tests write under tempdirs outside the
+    // default `$HOME` jail.
     let child = Command::new(bcmr_path)
         .args(["serve", "--root", "/"])
         .stdin(std::process::Stdio::piped())
@@ -37,21 +36,16 @@ pub async fn spawn_local(bcmr_path: &std::path::Path) -> Result<SshSpawn, BcmrEr
 }
 
 async fn spawn(args: &[&str]) -> Result<SshSpawn, BcmrError> {
-    // stderr goes to /dev/null because OpenSSH diagnostics
-    // (`Could not request local forwarding`, key-probe chatter) would
-    // interleave with the protocol stdout if passed through. Set
-    // BCMR_DEBUG_SSH_STDERR=1 in the environment to surface remote
-    // bcmr stderr during local debugging.
+    // OpenSSH diagnostics would interleave with protocol stdout. Set
+    // BCMR_DEBUG_SSH_STDERR=1 to surface remote bcmr stderr.
     let stderr_dest = if std::env::var("BCMR_DEBUG_SSH_STDERR").is_ok_and(|v| v == "1") {
         std::process::Stdio::inherit()
     } else {
         std::process::Stdio::null()
     };
-    // kill_on_drop(true): if the ServeClient is abandoned via plain
-    // drop (not close()), the local ssh process must not survive
-    // indefinitely. For direct-TCP ServeClients the Child is held
-    // alive deliberately during the data session, so the `drop` only
-    // fires at end-of-client — the right moment to terminate ssh.
+    // kill_on_drop: a dropped-not-closed ServeClient must not leak its
+    // ssh. Direct-TCP clients hold the Child through the data session,
+    // so drop only fires at end-of-client.
     let child = Command::new("ssh")
         .args(args)
         .stdin(std::process::Stdio::piped())

@@ -1,10 +1,8 @@
-// Wire format:  [4B LE (ct + tag)][ciphertext][16B Poly1305 tag]
-//
-// Nonce is not on the wire. Both sides derive it from a per-direction
-// u64 counter; the direction byte prevents nonce collision when both
-// endpoints' counters start at 0 under the same session key. A
-// dropped / reordered / tampered frame desyncs the counters and the
-// next tag check fails, killing the session — loud failure by design.
+// Wire: [4B LE (ct + tag)][ciphertext][16B Poly1305 tag].
+// Nonce = direction byte || per-direction u64 counter (never on the wire).
+// The direction byte disambiguates the two counters-from-zero streams that
+// share this session key; any drop/reorder/tamper desyncs counters so the
+// next decrypt fails.
 
 #![allow(dead_code)]
 
@@ -80,7 +78,6 @@ pub fn decrypt_message(
     let plaintext = key
         .open_in_place(nonce, Aad::empty(), ct_and_tag)
         .map_err(|_| {
-            // counter stays put so a retry on a fresh session starts clean
             BcmrError::CryptoFailure(format!(
                 "AEAD open failed (dir {:?} counter {})",
                 dir, *counter
@@ -105,9 +102,8 @@ where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut len_buf = [0u8; 4];
-    // Distinguish clean EOF (read 0 bytes) from a half-read length
-    // prefix (1-3 bytes then socket close) — the latter is a protocol
-    // error, not a graceful shutdown.
+    // Distinguish clean EOF (0 bytes) from a half-read length prefix
+    // (1-3 bytes then close) — the latter is a protocol error.
     let first = reader.read(&mut len_buf[..1]).await?;
     if first == 0 {
         return Ok(None);
@@ -197,10 +193,6 @@ mod tests {
         .unwrap();
         let mut body = frame[4..].to_vec();
         let mut recv = 0u64;
-        // Receiver misconfigured — reading a C→S frame as if it were S→C
-        // gives a different nonce, so the tag fails. Not an attacker
-        // capability (direction byte isn't on the wire) but this is the
-        // only path the mismatch could reach in production.
         decrypt_message(&mut body, &key, Direction::ServerToClient, &mut recv).unwrap_err();
     }
 
@@ -311,9 +303,6 @@ mod tests {
 
     #[tokio::test]
     async fn stream_tampered_mid_byte_fails_next_decode() {
-        // Real TCP tamper scenario: N frames arrive, byte flipped in frame
-        // 2, frame 1 decodes fine and frame 2 fails. Counters never
-        // recover so frame 3 also fails if we tried to read past.
         let key = test_key();
         let mut send_c = 0u64;
         let f1 = encrypt_message(

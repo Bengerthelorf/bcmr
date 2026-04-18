@@ -4,12 +4,9 @@ use crate::core::io as durable_io;
 use crate::core::session::{Session, CHECKPOINT_INTERVAL_BLOCKS, COPY_BLOCK_SIZE};
 use std::path::Path;
 use tokio::fs;
-// streaming_copy moved to a sync inner function — async I/O traits no
-// longer needed here.
 
 use super::copy::TempFileGuard;
 
-/// Post-copy: sync, rename, preserve, verify, session cleanup.
 #[allow(clippy::too_many_arguments)]
 pub async fn finalize(
     dst_file: tokio::fs::File,
@@ -52,7 +49,6 @@ pub async fn finalize(
     Ok(())
 }
 
-/// Returns Ok(true) if reflink succeeded.
 pub async fn try_reflink(
     src: &Path,
     write_target: &Path,
@@ -88,15 +84,10 @@ pub async fn try_reflink(
     }
 }
 
-/// Create a session, carrying forward block hashes from a prior session if resuming.
-///
-/// A session costs us the per-block hash, the checkpoint fdatasync
-/// every 64 MiB, and the atomic save of the session file itself.
-/// Before v0.5.10 we also created one automatically for any file
-/// over 64 MiB on the theory that the user might want to resume
-/// later. That was over-cautious: users who actually want resume
-/// pass -C / -s / -a. For one-shot large copies the session cost
-/// showed up as a ~2x gap vs cp. Gate on explicit intent only.
+/// Gate session creation on explicit intent (-C / -s / -a). A session
+/// costs per-block hash + checkpoint fdatasync + session-file save;
+/// creating one implicitly for large files showed up as a ~2x gap vs
+/// `cp` on one-shot copies.
 #[allow(clippy::too_many_arguments)]
 pub fn create_session(
     src: &Path,
@@ -136,17 +127,13 @@ pub fn create_session(
 
 /// Returns the inline source hash if the full file was copied (start_offset == 0).
 ///
-/// `need_src_hash` controls whether we compute the whole-source BLAKE3 at
-/// all. Verify (-V) needs it, and so do file-level resumes (the session
-/// stores it to detect source-changed-between-runs). Otherwise it's pure
-/// overhead --- on macOS NEON BLAKE3 runs at ~1 GB/s, so the unused source
-/// hash doubled wall time on streaming copies of large files.
+/// `need_src_hash` is tri-state: -V needs it, resume sessions store it
+/// to detect source-changed-between-runs, everything else skips (BLAKE3
+/// at ~1 GB/s would otherwise double wall time on large streaming copies).
 ///
-/// The hot loop runs inside one spawn_blocking on a dedicated thread.
-/// Tokio's async fs wraps each read/write in its own spawn_blocking, so
-/// a 2 GB file with 4 MiB blocks paid 1024 round trips through the
-/// blocking pool — measured on Linux NVMe at ~170 MB/s vs ~1 GB/s for
-/// `cp`. Doing one spawn_blocking for the whole loop closes that gap.
+/// One spawn_blocking owns the whole loop — tokio's async fs dispatches
+/// a blocking task per read/write, which cost us ~1024 bounces per 2 GB
+/// and ~6x throughput on Linux NVMe.
 pub async fn streaming_copy(
     src_file: &mut tokio::fs::File,
     dst_file: &mut tokio::fs::File,
@@ -179,11 +166,6 @@ pub async fn streaming_copy(
     Ok(hash)
 }
 
-/// Synchronous core of the streaming copy. Owns the file descriptors
-/// and the session for the duration of the loop. All the previous
-/// `.await` points (read, write, seek, durable_sync, posix_fadvise)
-/// become plain syscalls; nothing leaves the dedicated thread until
-/// EOF.
 #[allow(clippy::too_many_arguments)]
 fn streaming_copy_sync(
     mut src_file: std::fs::File,
@@ -201,11 +183,9 @@ fn streaming_copy_sync(
     let mut buffer = vec![0u8; COPY_BLOCK_SIZE as usize];
     let mut pending_hole = 0u64;
     let mut src_hasher = need_src_hash.then(blake3::Hasher::new);
-    // Per-block hashes only exist to populate the session; if there's no
-    // session (one-shot copy, no -C/-s/-a), skip the per-byte hash
-    // entirely. Block_hasher at ~1 GB/s on NEON was the biggest
-    // remaining gap vs `cp` on large one-shot copies; this closes it
-    // for non-resume workloads without changing resume behaviour.
+    // Per-block hashes exist only to populate the session. With no
+    // session (one-shot copy, no -C/-s/-a), skip entirely — the BLAKE3
+    // pass was the largest remaining gap vs `cp`.
     let mut block_hasher = session.as_ref().map(|_| blake3::Hasher::new());
     let mut bytes_in_block = 0u64;
     let mut blocks_since_checkpoint = 0u32;
@@ -264,12 +244,9 @@ fn streaming_copy_sync(
             blocks_since_checkpoint += 1;
 
             if blocks_since_checkpoint >= CHECKPOINT_INTERVAL_BLOCKS {
-                // The checkpoint exists to keep the session consistent
-                // with the on-disk dst: durable_sync lets us promise
-                // "every block ≤ session.n is physically on disk"
-                // (the crash-safety invariant). Without a session,
-                // nobody reads that promise — cp doesn't fsync
-                // mid-copy either. Skip.
+                // Crash-safety invariant: every block in the session is
+                // physically on disk before the session file records it.
+                // No session → no reader of that promise → skip fsync.
                 if let Some(ref s) = session {
                     durable_io::durable_sync(&dst_file)?;
                     let _ = s.save();

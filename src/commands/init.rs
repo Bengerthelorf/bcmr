@@ -21,12 +21,7 @@ pub fn generate_init_script(
             if let Some(path) = path {
                 script.push_str(&format!(
                     r#"
-# =============================================================================
-#
 # Add bcmr directory to PATH
-#
-# =============================================================================
-
 export PATH="{}:$PATH"
 "#,
                     path.display()
@@ -43,15 +38,7 @@ export PATH="{}:$PATH"
 
                 script.push_str(&format!(
                     r#"
-# =============================================================================
-#
-# BCMR shell integration for {shell_name}
-#
-# This provides convenient shell functions that wrap bcmr commands with
-# progress tracking and safety features.
-#
-# =============================================================================
-
+# bcmr shell integration for {shell_name}
 function {prefix}cp{suffix}() {{
     "{exe_path}" copy "$@"
 }}
@@ -73,8 +60,8 @@ function {prefix}rm{suffix}() {{
                 if matches!(shell, Shell::Zsh) {
                     script.push_str(&format!(
                         r#"
-# Completion wrappers for aliased commands
-# Use _bcmr_with_remote if available (supports remote path completion)
+# Completion wrappers for aliased commands. Use _bcmr_with_remote
+# (remote path completion) if present, else fall back to _bcmr.
 _{prefix}cp{suffix}() {{
     words=("bcmr" "copy" "${{words[@]:1}}")
     (( CURRENT += 1 ))
@@ -111,17 +98,10 @@ compdef _{prefix}rm{suffix} {prefix}rm{suffix}
 
                 script.push_str(&format!(
                     r#"
-# =============================================================================
-#
-# To initialize bcmr, add this to your shell configuration file:
-#
+# To initialize bcmr, add this to your shell rc file:
 #   eval "$(bcmr init {shell_name})"
-#
-# For custom prefix (e.g., 'b' creates bcp, bmv, brm):
-#
+# For a custom prefix (e.g. 'b' creates bcp/bmv/brm):
 #   eval "$(bcmr init {shell_name} --cmd b)"
-#
-# =============================================================================
 "#,
                     shell_name = shell,
                 ));
@@ -233,7 +213,6 @@ mod tests {
 
     #[test]
     fn test_compat_cmd_with_suffix() {
-        // cmd="b" acts as prefix, suffix="+" -> bcp+
         let script = generate_init_script(&Shell::Bash, "b", None, Some("+"), None, false);
         assert!(script.contains("function bcp+()"));
     }

@@ -133,7 +133,6 @@ impl InlineProgress {
                     } else {
                         0
                     };
-                    // Dynamic name width: divide available space among active workers
                     let active = self.data.active_worker_count().max(1);
                     let per_worker = term_width.saturating_sub(active * 14) / active;
                     let name_max = per_worker.max(12);
@@ -264,7 +263,6 @@ impl ProgressRenderer for InlineProgress {
     }
 
     fn finish(&mut self) -> io::Result<()> {
-        // Print a final overall summary (useful for logs / scrolling terminals)
         let elapsed = self.data.elapsed();
         let avg_bps = self.data.average_bytes_per_sec().unwrap_or(0.0);
         println!();

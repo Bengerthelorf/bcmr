@@ -3,7 +3,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub const PROTOCOL_VERSION: u8 = 1;
 
-// Message type discriminants
 const TYPE_HELLO: u8 = 0x01;
 const TYPE_LIST: u8 = 0x02;
 const TYPE_STAT: u8 = 0x03;
@@ -32,56 +31,35 @@ const TYPE_DATA_COMPRESSED: u8 = 0x89;
 const TYPE_MISSING_BLOCKS: u8 = 0x8a;
 const TYPE_DIRECT_READY: u8 = 0x8b;
 
-/// Capability bit advertised in Hello/Welcome to enable content-addressed
-/// dedup. When negotiated, PUT operations first exchange block hashes and
-/// only the hashes the server doesn't already have go on the wire.
+/// Content-addressed dedup: PUT first exchanges block hashes, only missing
+/// blocks go on the wire.
 pub const CAP_DEDUP: u8 = 0x04;
 
-/// "Fast" mode: client opts out of server-side BLAKE3 hashing in
-/// exchange for higher GET throughput. The server's Ok response carries
-/// hash:None instead of the digest, so the client must verify integrity
-/// itself if it wants to (typically via -V which re-hashes the dst).
-/// On Linux the server additionally uses splice(2) for the file-to-stdout
-/// path, bypassing the userspace memcpy that would otherwise be needed
-/// to fill the Data frame buffer.
+/// Client opts out of server-side BLAKE3 hashing (Ok reply carries no
+/// digest). On Linux the server additionally uses splice(2) for the
+/// file→stdout path. Client must verify integrity itself if it wants to.
 pub const CAP_FAST: u8 = 0x08;
 
-/// Per-file fsync after PUT/GET completes. Off by default (matches the
-/// local copy behavior, which gates fsync on `--sync`). With this off, a
-/// 10000-file batch saves ~10-20s of fdatasync barrier latency on NVMe.
-/// The server only fsyncs the destination file in handle_put when this
-/// bit is in the negotiated caps; the client only fsyncs the GET dst
-/// file when the bit is in its own caps (the GET-side fsync happens on
-/// the client, not the server). Mirrors local copy's `--sync` semantics
-/// — explicit opt-in for crash-safe durability, default off so we don't
-/// silently take a 5x perf hit.
+/// Per-file fsync after PUT/GET. Opt-in because a 10000-file batch otherwise
+/// pays ~10-20s of fdatasync barrier latency on NVMe. Server fsyncs in
+/// handle_put; client fsyncs the GET dst.
 pub const CAP_SYNC: u8 = 0x10;
 
-/// Client opts in to the direct-TCP transport. Server advertises when
-/// it supports the rendezvous handler. Without this bit set on both
-/// ends `OpenDirectChannel` is rejected — old clients never see it,
-/// old servers never expose it.
+/// Direct-TCP transport. Rejected on either side that doesn't set it, so
+/// old clients/servers never attempt the rendezvous path.
 pub const CAP_DIRECT_TCP: u8 = 0x20;
 
-/// Wrap every post-Welcome message in AES-256-GCM on the direct-TCP
-/// data plane. Server masks this off on transports that don't carry
-/// a session key (SSH control, raw listen). The Hello/Welcome handshake
-/// itself is always plain — the caps bit is what flips subsequent
-/// framing to encrypted.
+/// AES-256-GCM on every post-Welcome message on the direct-TCP data plane.
+/// Server masks this off on transports without a session key (SSH control,
+/// raw listen). Hello/Welcome itself is always plain.
 pub const CAP_AEAD: u8 = 0x40;
 
-/// Capability bits advertised in Hello/Welcome.
-///
-/// Caps are an optional trailing byte appended after the version. A peer
-/// that doesn't understand caps sends a shorter Hello/Welcome; decoders
-/// treat the absence as "no caps supported", which is the safe default
-/// and gives v1 clients talking to v2 servers (and vice versa) automatic
-/// fallback to uncompressed Data frames.
+/// Caps is an optional trailing byte after the version. A peer that doesn't
+/// understand caps sends a shorter Hello/Welcome; decoders treat absence
+/// as "no caps supported" for automatic v1↔v2 fallback.
 pub const CAP_LZ4: u8 = 0x01;
 pub const CAP_ZSTD: u8 = 0x02;
 
-/// Which compression algorithm a peer has advertised/selected for Data
-/// frames. Negotiation picks the highest bit both peers set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompressionAlgo {
     None,
@@ -106,9 +84,8 @@ impl CompressionAlgo {
         }
     }
 
-    /// Pick the preferred algorithm both peers support. Zstd wins if
-    /// both offer it (better ratio for typical file content); LZ4 is the
-    /// fallback when only one peer speaks zstd.
+    /// Zstd wins if both offer it (better ratio on file content); LZ4 is
+    /// the fallback when one side lacks zstd.
     pub fn negotiate(local: u8, remote: u8) -> Self {
         let both = local & remote;
         if both & CAP_ZSTD != 0 {
@@ -130,7 +107,6 @@ pub struct ListEntry {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Message {
-    // Requests (client → server)
     Hello {
         version: u8,
         caps: u8,
@@ -165,30 +141,26 @@ pub enum Message {
     AuthHello {
         mac: [u8; 32],
     },
-    /// One slice of a striped PUT. `length` bytes at `offset` in
-    /// `path`. Server reply: `Ok { hash: None }`; integrity comes
-    /// from the AEAD per-frame MAC.
+    /// One slice of a striped PUT. Server reply `Ok { hash: None }`;
+    /// integrity comes from the AEAD per-frame MAC.
     PutChunked {
         path: String,
         offset: u64,
         length: u64,
     },
-    /// Mirror of `PutChunked` on the download side.
     GetChunked {
         path: String,
         offset: u64,
         length: u64,
     },
-    /// Preamble to a striped PUT: create-or-truncate `path` to
-    /// exactly `size`. Covers the "new src smaller than existing
-    /// dst" and "zero-byte src" edge cases the chunk fanout can't
-    /// handle on its own.
+    /// Preamble to a striped PUT: create-or-truncate to exactly `size`.
+    /// Handles "new src smaller than existing dst" and zero-byte src,
+    /// which the chunk fanout can't cover.
     Truncate {
         path: String,
         size: u64,
     },
 
-    // Responses (server → client)
     Welcome {
         version: u8,
         caps: u8,
@@ -202,28 +174,19 @@ pub enum Message {
     Data {
         payload: Vec<u8>,
     },
-    /// Compressed Data frame. `algo` matches `CompressionAlgo::to_byte`.
-    /// `original_size` is the decompressed payload length so the receiver
-    /// can pre-allocate. Consumers that see this type without having
-    /// negotiated it during Hello/Welcome should treat it as a protocol
-    /// error.
+    /// `algo` matches `CompressionAlgo::to_byte`; seeing this without a
+    /// negotiated compression cap is a protocol error.
     DataCompressed {
         algo: u8,
         original_size: u32,
         payload: Vec<u8>,
     },
-    /// Sent by the client before streaming Data frames during a PUT,
-    /// when both peers advertised CAP_DEDUP. Each entry is the BLAKE3
-    /// hash of one 4 MiB block of the source file (the last entry may
-    /// represent a smaller tail block --- order is significant).
+    /// Block hashes in source order; last entry may be a shorter tail block.
     HaveBlocks {
         block_size: u32,
         hashes: Vec<[u8; 32]>,
     },
-    /// Server's response to HaveBlocks: the bitset of indices for which
-    /// the server has no local copy and therefore expects raw bytes.
-    /// `bits.len()` equals (hashes.len() + 7) / 8 with bit i (LSB-first
-    /// in byte i/8) set iff hash[i] is missing.
+    /// Bit i (LSB-first in byte i/8) set iff the server lacks hashes[i].
     MissingBlocks {
         bits: Vec<u8>,
     },
@@ -247,8 +210,6 @@ pub enum Message {
         session_key: [u8; 32],
     },
 }
-
-// --- Encoding helpers ---
 
 fn write_u8(buf: &mut Vec<u8>, v: u8) {
     buf.push(v);
@@ -303,7 +264,7 @@ fn write_list_entry(buf: &mut Vec<u8>, entry: &ListEntry) {
     write_u8(buf, entry.is_dir as u8);
 }
 
-/// Encode `msg` into a framed byte vector: `[4 LE payload_len][1 type][payload...]`.
+/// Frame layout: `[4 LE payload_len][1 type][payload...]`.
 pub fn encode_message(msg: &Message) -> Vec<u8> {
     let mut payload = Vec::new();
 
@@ -462,8 +423,6 @@ pub fn encode_message(msg: &Message) -> Vec<u8> {
     frame
 }
 
-// --- Decoding helpers ---
-
 struct Cursor<'a> {
     data: &'a [u8],
     pos: usize,
@@ -549,10 +508,7 @@ impl<'a> Cursor<'a> {
     }
 }
 
-/// Decode a complete framed message from `data`.
-///
-/// `data` must begin with the 4-byte LE payload length followed by the payload.
-/// Returns `None` for empty input, truncated frames, or unknown/malformed messages.
+/// `None` on empty input, truncated frames, or unknown/malformed messages.
 pub fn decode_message(data: &[u8]) -> Option<Message> {
     if data.is_empty() {
         return None;
@@ -678,16 +634,13 @@ pub fn decode_message(data: &[u8]) -> Option<Message> {
     Some(msg)
 }
 
-/// Write a framed message to an async writer.
 pub async fn write_message<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     msg: &Message,
 ) -> io::Result<()> {
-    // DirectChannelReady carries the rendezvous session key. Allocate
-    // its encoded frame inside Zeroizing so the plaintext key doesn't
-    // linger in heap memory after the write completes. Zeroize is only
-    // a defense-in-depth measure here — the session key already travels
-    // under the authenticated, encrypted SSH channel.
+    // DirectChannelReady carries a session key; Zeroizing scrubs the
+    // plaintext from the heap after the write (defense-in-depth on top of
+    // the authenticated SSH channel the frame travels through).
     if matches!(msg, Message::DirectChannelReady { .. }) {
         let frame = zeroize::Zeroizing::new(encode_message(msg));
         writer.write_all(&frame).await
@@ -697,9 +650,7 @@ pub async fn write_message<W: AsyncWriteExt + Unpin>(
     }
 }
 
-/// Read a framed message from an async reader.
-///
-/// Returns `Ok(None)` on clean EOF (zero bytes read for the length prefix).
+/// `Ok(None)` on clean EOF (zero bytes read for the length prefix).
 pub async fn read_message<R: AsyncReadExt + Unpin>(reader: &mut R) -> io::Result<Option<Message>> {
     let mut len_buf = [0u8; 4];
     match reader.read_exact(&mut len_buf).await {
@@ -710,8 +661,7 @@ pub async fn read_message<R: AsyncReadExt + Unpin>(reader: &mut R) -> io::Result
 
     let payload_len = u32::from_le_bytes(len_buf) as usize;
 
-    // Guard against malicious/corrupt peers sending huge frame sizes.
-    const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
+    const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
     if payload_len > MAX_FRAME_SIZE {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -725,7 +675,6 @@ pub async fn read_message<R: AsyncReadExt + Unpin>(reader: &mut R) -> io::Result
     let mut payload = vec![0u8; payload_len];
     reader.read_exact(&mut payload).await?;
 
-    // Reconstruct the framed buffer so decode_message can parse it uniformly.
     let mut frame = Vec::with_capacity(4 + payload_len);
     frame.extend_from_slice(&len_buf);
     frame.extend_from_slice(&payload);

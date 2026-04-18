@@ -1,15 +1,6 @@
-//! Transport-framing layer. Wraps `protocol::read_message` /
-//! `protocol::write_message` with an optional AEAD envelope so the
-//! dispatch loop and its handlers stay agnostic to which wire
-//! format is actually in use.
-//!
-//! A `Framing` is created as `Plain` during the Hello/Welcome
-//! handshake (which is negotiated in cleartext on both SSH and
-//! direct-TCP channels), then `upgrade_to_aead` flips it to `Aead`
-//! once both peers agree on `CAP_AEAD`. Once upgraded, the MAC on
-//! each frame binds to a direction-and-counter nonce so any dropped,
-//! reordered, or tampered frame desyncs both sides and the session
-//! dies on the next decrypt.
+//! Framing wrapper over `protocol::{read,write}_message` with an optional
+//! AEAD envelope. Created Plain for the cleartext Hello/Welcome; flipped
+//! to Aead after both peers agree on CAP_AEAD.
 
 use std::sync::Arc;
 
@@ -28,8 +19,7 @@ pub struct AeadState {
     recv_counter: u64,
 }
 
-// The Aead variant holds an AES-256-GCM key schedule (~576 bytes); one
-// Framing per session, held as a stack local in run_session, so the
+// Aead variant holds ~576 B key schedule; one Framing per session so the
 // variant-size asymmetry is not a hot-path cost.
 #[allow(clippy::large_enum_variant)]
 pub enum Framing {
@@ -42,10 +32,7 @@ impl Framing {
         Framing::Plain
     }
 
-    /// Build an AEAD framing around the 32-byte session key delivered
-    /// over the authenticated control channel. `send_dir` is this
-    /// peer's transmit direction (server → client on the server side,
-    /// client → server on the client side); `recv_dir` is the opposite.
+    /// `send_dir` is this peer's transmit direction; `recv_dir` the opposite.
     pub fn aead_from_key(
         key_bytes: &[u8; 32],
         send_dir: Direction,
@@ -61,8 +48,7 @@ impl Framing {
         }))
     }
 
-    #[allow(dead_code)] // used only on Linux (splice-gate); non-Linux
-                        // builds never reach the check.
+    #[allow(dead_code)] // splice-gate on Linux only
     pub fn is_aead(&self) -> bool {
         matches!(self, Framing::Aead(_))
     }
@@ -109,10 +95,8 @@ impl Framing {
     }
 }
 
-/// Send-side half of a Framing. The client splits its Framing into
-/// (SendHalf, RecvHalf) when spawning a pipelined writer task so the
-/// writer and reader can each hold their direction's counter without
-/// contending on a single `&mut`.
+/// Split-half of a Framing so the pipelined writer task and the reader task
+/// can each hold their own direction's counter without sharing a `&mut`.
 pub enum SendHalf {
     Plain,
     Aead {
@@ -131,16 +115,11 @@ pub enum RecvHalf {
     },
 }
 
-/// Build a plain pair — delegates reads/writes straight to the
-/// protocol module.
 pub fn plain_halves() -> (SendHalf, RecvHalf) {
     (SendHalf::Plain, RecvHalf::Plain)
 }
 
-/// Build an AEAD pair sharing one underlying AES-256-GCM key. Each
-/// half carries its own direction byte and counter; the key lives
-/// behind Arc so the pair can be moved into separate tasks
-/// independently.
+/// Key lives behind Arc so each half can move into its own task.
 pub fn aead_halves(
     key_bytes: &[u8; 32],
     send_dir: Direction,

@@ -1,14 +1,6 @@
 #![cfg(unix)]
-//! End-to-end tests for single-client bcmr serve operations:
-//! handshake, the basic per-op handlers (stat / list / hash / get /
-//! put / mkdir / resume), wire compression round-trips, fast-mode
-//! GET, and the CAS / dedup paths.
-//!
-//! Each test spins up a local `bcmr serve` subprocess via
-//! `ServeClient::connect_local()` and exercises a single protocol op
-//! against it. `cfg(unix)` on the whole file: bcmr serve is invoked
-//! over SSH, which on Windows means OpenSSH-on-Windows behaves
-//! differently enough that we don't claim Windows as a serve target.
+// bcmr serve is invoked over SSH; OpenSSH-on-Windows is different enough
+// that we don't claim Windows as a serve target.
 
 mod common;
 
@@ -25,10 +17,9 @@ async fn serve_handshake() {
     client.close().await.unwrap();
 }
 
-/// Security: with a root jail, PUT to a path outside the jail must be
-/// rejected. The connect_local helper uses `--root /` so the default
-/// test path is unrestricted; this test explicitly spawns a serve
-/// with a narrower root and confirms writes outside it fail.
+/// Security regression: PUT outside the `--root` jail must be rejected.
+/// `connect_local` uses `--root /`, so this test explicitly spawns a narrower
+/// root.
 #[tokio::test]
 async fn serve_root_jail_rejects_escape() {
     let jail = tempfile::tempdir().unwrap();
@@ -81,8 +72,8 @@ async fn serve_root_jail_rejects_escape() {
     let _ = child.wait().await;
 }
 
-/// Security: PUT must refuse data beyond the declared size. Without
-/// this bound a malicious client could declare size=1 and send TBs.
+/// Security regression: PUT must refuse data beyond the declared size, else
+/// a malicious client could declare size=1 and send TBs.
 #[tokio::test]
 async fn serve_put_size_bound_rejects_oversized() {
     let dir = tempfile::tempdir().unwrap();
@@ -243,8 +234,6 @@ async fn serve_get_download() {
     }
 }
 
-/// Compressible content: the server's GET path must produce DataCompressed
-/// frames that the client decompresses back to the exact source bytes.
 #[tokio::test]
 async fn serve_get_compressible_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
@@ -274,9 +263,6 @@ async fn serve_get_compressible_roundtrip() {
     assert_eq!(data, text.as_bytes());
 }
 
-/// CAS LRU eviction end-to-end: cap the store small, upload three
-/// dedup-eligible files of distinct content, verify the cap is held
-/// and the freshest file's blocks survived.
 #[tokio::test]
 async fn serve_cas_lru_eviction_under_load() {
     let _g = cas_test_lock();
@@ -331,9 +317,6 @@ async fn serve_cas_lru_eviction_under_load() {
     std::env::remove_var("BCMR_CAS_CAP_MB");
 }
 
-/// Content-addressed dedup: upload the same 32 MiB file twice. The
-/// second run should populate every block from the local CAS and the
-/// resulting file must still be byte-identical to the source.
 #[tokio::test]
 async fn serve_dedup_repeats_use_cas() {
     let _g = cas_test_lock();
@@ -362,8 +345,6 @@ async fn serve_dedup_repeats_use_cas() {
     std::env::remove_var("BCMR_CAS_DIR");
 }
 
-/// Fast-mode GET: server skips its hash, client sees Ok{hash:None},
-/// downloaded bytes still match the source.
 #[tokio::test]
 async fn serve_get_fast_returns_no_hash_but_correct_bytes() {
     use bcmr::core::protocol::CAP_FAST;
@@ -399,8 +380,6 @@ async fn serve_get_fast_returns_no_hash_but_correct_bytes() {
     assert_eq!(dst_hash, src_hash, "fast-mode download must match source");
 }
 
-/// Compressible content via PUT: client compresses, server decompresses,
-/// stored file matches the source byte-for-byte.
 #[tokio::test]
 async fn serve_put_compressible_roundtrip() {
     let dir = tempfile::tempdir().unwrap();

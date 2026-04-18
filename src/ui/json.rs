@@ -7,13 +7,6 @@ use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
-/// NDJSON progress renderer.
-///
-/// Writes one JSON object per line:
-/// - `{"type":"progress",...}` on every tick (throttled)
-/// - `{"type":"result",...}`  on finish
-///
-/// Output goes to a log file (detach mode) or stdout (stream mode).
 pub struct JsonProgress {
     data: ProgressData,
     last_emit: Option<Instant>,
@@ -60,8 +53,6 @@ impl JsonWriter {
     }
 }
 
-// ── NDJSON line types ──────────────────────────────────────────────────
-
 #[derive(Serialize)]
 struct ProgressLine<'a> {
     r#type: &'static str,
@@ -95,12 +86,9 @@ struct ResultLine<'a> {
     error: Option<&'a str>,
 }
 
-// ── Implementation ─────────────────────────────────────────────────────
-
 const EMIT_INTERVAL_MS: u128 = 200;
 
 impl JsonProgress {
-    /// Stream mode: write NDJSON to stdout.
     pub fn new(total_bytes: u64) -> Self {
         Self {
             data: ProgressData::new(total_bytes),
@@ -110,7 +98,6 @@ impl JsonProgress {
         }
     }
 
-    /// Detach mode: write NDJSON to a log file.
     pub fn with_log_file(total_bytes: u64, path: &PathBuf) -> io::Result<Self> {
         let file = fs::OpenOptions::new()
             .create(true)

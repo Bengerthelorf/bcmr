@@ -15,20 +15,11 @@ use crate::core::protocol_aead::Direction;
 use crate::core::transport::ssh as ssh_transport;
 
 /// Must match `AUTH_HELLO_TAG` on the server. Domain-separates the
-/// rendezvous MAC from any other keyed hash a future protocol step
-/// might compute over the same session key.
+/// rendezvous MAC from any other keyed hash that might share the session key.
 const AUTH_HELLO_TAG: &[u8] = b"bcmr-direct-v1";
 
-/// Ask `ssh -G <target>` whether the config resolves to a ProxyJump
-/// hop. Used only for error diagnostics on direct-TCP dial failures:
-/// ProxyJump'd targets reach the server through a hop that plain TCP
-/// can't follow, so we point the user at `--direct=ssh` rather than
-/// at a generic timeout message.
-///
-/// `ssh -G` can take 50-500 ms (DNS, ssh_config parsing), so we run
-/// it off the async executor via `spawn_blocking` to avoid stalling
-/// other tasks. Always-false on failure — the diagnostic is best-
-/// effort.
+/// Best-effort diagnostic for direct-TCP dial failures. `ssh -G` can take
+/// 50-500 ms (DNS + ssh_config parsing), hence spawn_blocking.
 async fn ssh_target_uses_proxyjump(target: &str) -> bool {
     let target = target.to_owned();
     tokio::task::spawn_blocking(move || {
@@ -54,66 +45,41 @@ async fn ssh_target_uses_proxyjump(target: &str) -> bool {
 type BoxedReader = Box<dyn AsyncRead + Send + Unpin>;
 type BoxedWriter = Box<dyn AsyncWrite + Send + Unpin>;
 
-/// Byte streams live on `ServeClient::reader`/`writer` (type-erased);
-/// this owns the SSH `Child` separately so Drop can kill it.
-/// `_drain` only exists on the direct-TCP path — it reads whatever
-/// sshd writes to stdout after rendezvous hand-off so local ssh
-/// doesn't wedge on a full pipe buffer.
+/// `_drain` only on the direct-TCP path: reads sshd's post-rendezvous
+/// stdout so local ssh doesn't wedge on a full pipe buffer.
 struct Transport {
     child: Child,
     _drain: Option<tokio::task::JoinHandle<()>>,
 }
 
-/// Default client caps: LZ4 + Zstd + dedup. CAP_FAST is opt-in via
-/// `--fast` because the trade-off (no server-side hash) only makes
-/// sense when the user has another way to verify integrity.
+/// CAP_FAST is opt-in via `--fast` because dropping server-side hashing
+/// only makes sense when the user has another integrity check.
 const CLIENT_CAPS: u8 = CAP_LZ4 | CAP_ZSTD | CAP_DEDUP;
 
-/// Files smaller than this skip the dedup pre-flight: the round-trip
-/// cost of HaveBlocks/MissingBlocks dominates for tiny payloads.
+/// Below this size the HaveBlocks/MissingBlocks round trip dominates.
 const DEDUP_MIN_FILE_SIZE: u64 = 16 * 1024 * 1024;
 const DEDUP_BLOCK_SIZE: usize = 4 * 1024 * 1024;
 
 pub struct ServeClient {
     transport: Transport,
     reader: BoxedReader,
+    /// `Option` because pipelined paths move writer + tx into a writer
+    /// task and restore them via `reap_writer_task`.
     writer: Option<BoxedWriter>,
-    /// Send-side framing. Plain during Hello/Welcome; may flip to
-    /// Aead after Welcome iff both peers negotiated CAP_AEAD. Held
-    /// as a separate half from `rx` so pipelined code can move the
-    /// send half into a writer task while the main task keeps
-    /// reading through `rx`. `Option` for the same reason as
-    /// `writer`: pipelined paths move it out for the duration of
-    /// the batch and restore it through `reap_writer_task`.
     tx: Option<SendHalf>,
     rx: RecvHalf,
     algo: CompressionAlgo,
     dedup_enabled: bool,
 }
 
-/// One file's worth of transfer metadata. Used as the batch input to
-/// `pipelined_put_files` / `pipelined_get_files` so callers get
-/// self-documenting field names instead of the `(.0, .1, .2)` mystery
-/// that an ad-hoc tuple would force.
 #[derive(Debug, Clone)]
 pub struct FileTransfer {
-    /// Path on the server side. For PUT this is where the server
-    /// writes to; for GET it's where the server reads from.
     pub remote: String,
-    /// Path on the client side. For PUT this is the source file to
-    /// read; for GET it's the destination file to create.
     pub local: std::path::PathBuf,
-    /// Size of the file as the client understands it. For PUT this
-    /// goes into the `Put { size }` declaration the server uses to
-    /// bound incoming writes; for GET this is the server-reported
-    /// size the client uses to validate the received stream.
     pub size: u64,
 }
 
 impl ServeClient {
-    /// Connect with default capabilities (advertise all compression the
-    /// client supports). Prefer `connect_with_caps` when the caller has
-    /// a user-specified `--compress` value to honour.
     pub async fn connect(ssh_target: &str) -> Result<Self, BcmrError> {
         Self::connect_with_caps(ssh_target, CLIENT_CAPS).await
     }
@@ -125,8 +91,6 @@ impl ServeClient {
         Ok(client)
     }
 
-    /// Test-only connect that lets the caller dictate the caps byte
-    /// (default `connect_local` advertises everything except CAP_FAST).
     #[allow(dead_code)]
     pub async fn connect_local_with_caps(caps: u8) -> Result<Self, BcmrError> {
         let mut client = Self::spawn_local_serve().await?;
@@ -134,18 +98,15 @@ impl ServeClient {
         Ok(client)
     }
 
-    #[allow(dead_code)] // used by integration tests
+    #[allow(dead_code)]
     pub async fn connect_local() -> Result<Self, BcmrError> {
         let mut client = Self::spawn_local_serve().await?;
         client.handshake(CLIENT_CAPS).await?;
         Ok(client)
     }
 
-    /// Connect over SSH, then promote to a direct-TCP data channel.
-    /// Requires the server to advertise CAP_DIRECT_TCP (v0.5.20+).
-    /// `caps` are the client-offered capabilities for the *data*
-    /// session; CAP_DIRECT_TCP is set internally on the control
-    /// handshake regardless of what the caller passed.
+    /// `caps` are the data-session caps; CAP_DIRECT_TCP is set internally
+    /// on the control handshake regardless.
     #[allow(dead_code)]
     pub async fn connect_direct_with_caps(
         ssh_target: &str,
@@ -155,7 +116,6 @@ impl ServeClient {
         Self::promote_to_direct_tcp(spawn, caps, Some(ssh_target)).await
     }
 
-    /// Test helper: local `bcmr serve` subprocess → rendezvous → TCP.
     #[allow(dead_code)]
     pub async fn connect_direct_local_with_caps(caps: u8) -> Result<Self, BcmrError> {
         let bcmr_path = Self::locate_bcmr_binary()?;
@@ -177,8 +137,7 @@ impl ServeClient {
 
     #[allow(dead_code)]
     fn locate_bcmr_binary() -> Result<std::path::PathBuf, BcmrError> {
-        // Find the bcmr binary in the same directory as the test binary.
-        // current_exe() returns the test binary itself, not bcmr.
+        // current_exe() is the test binary itself, so look alongside it.
         let exe = std::env::current_exe()?;
         let bin_dir = exe
             .parent()
@@ -213,10 +172,6 @@ impl ServeClient {
     ) -> Result<Self, BcmrError> {
         use tokio::io::{AsyncWriteExt as _, AsyncReadExt as _};
 
-        // Control handshake: advertise CAP_DIRECT_TCP alongside whatever
-        // the caller wants for the data session. The data-session
-        // handshake over TCP happens below with `caps` unchanged so
-        // compression negotiation stays the caller's choice.
         protocol::write_message(
             &mut spawn.stdin,
             &Message::Hello {
@@ -251,11 +206,8 @@ impl ServeClient {
 
         protocol::write_message(&mut spawn.stdin, &Message::OpenDirectChannel).await?;
         spawn.stdin.flush().await?;
-        // Wrap the received session key in Zeroizing as early as the
-        // decode boundary, so every downstream reference to it
-        // (AuthHello MAC, AEAD half construction) flows through a
-        // scope that scrubs the stack copy on drop. Matches what the
-        // server side does for its own copy.
+        // Zeroize the session key at decode — downstream AuthHello MAC +
+        // AEAD half construction inherit the scrubbing scope.
         let (addr, session_key) = match protocol::read_message(&mut spawn.stdout).await? {
             Some(Message::DirectChannelReady { addr, session_key }) => {
                 (addr, zeroize::Zeroizing::new(session_key))
@@ -273,9 +225,8 @@ impl ServeClient {
             }
         };
 
-        // Open the data channel before releasing SSH stdin, so the
-        // server's rendezvous listener still has the connection in its
-        // backlog if EOF on SSH triggers any cascade timing.
+        // Dial before releasing SSH stdin so the rendezvous listener
+        // has us in its backlog even if the SSH EOF cascade is fast.
         let stream = match tokio::net::TcpStream::connect(&addr).await {
             Ok(s) => s,
             Err(e) => {
@@ -298,15 +249,12 @@ impl ServeClient {
         };
         let (tcp_reader, tcp_writer) = stream.into_split();
 
-        // Drop SSH stdin to EOF the control session; remote exits its
-        // SSH run_session and falls through to await the rendezvous
-        // task that will run our TCP session.
+        // EOF the control session so the remote falls through to the
+        // rendezvous task.
         drop(spawn.stdin);
 
-        // Keep local ssh happy by draining whatever it forwards after
-        // we stopped reading. In practice the remote writes nothing
-        // past DirectChannelReady, but an unread pipe would wedge
-        // ssh's output loop.
+        // Local ssh would wedge on a full pipe buffer if we stopped
+        // reading — drain whatever still arrives.
         let mut stdout = spawn.stdout;
         let stdout_drain = tokio::spawn(async move {
             let mut buf = [0u8; 512];
@@ -332,10 +280,8 @@ impl ServeClient {
             dedup_enabled: false,
         };
 
-        // Prove to the server that we learned the session key over the
-        // authenticated SSH channel, then do the normal protocol
-        // handshake on the data plane — advertising CAP_AEAD so the
-        // server upgrades framing to AES-256-GCM post-Welcome.
+        // Prove knowledge of the SSH-delivered session key, then handshake
+        // on the data plane advertising CAP_AEAD.
         let mac = *blake3::keyed_hash(&session_key, AUTH_HELLO_TAG).as_bytes();
         client.send(&Message::AuthHello { mac }).await?;
         client
@@ -364,10 +310,9 @@ impl ServeClient {
         self.handshake_with_key(caps, None).await
     }
 
-    /// Hello/Welcome handshake that additionally knows about a
-    /// direct-TCP session key. If CAP_AEAD ends up in the negotiated
-    /// caps AND a key was provided, framing is flipped to AEAD
-    /// immediately after Welcome — matching the server-side flip point.
+    /// Flips framing to AEAD immediately after Welcome iff CAP_AEAD is in
+    /// the negotiated caps AND a session key was provided. Matches the
+    /// server's flip point.
     async fn handshake_with_key(
         &mut self,
         caps: u8,
@@ -399,11 +344,9 @@ impl ServeClient {
                     self.tx = Some(tx);
                     self.rx = rx;
                 } else if session_key.is_some() {
-                    // Mirror the server-side downgrade guard: if we
-                    // have a session key (we asked for direct-TCP)
-                    // but the intersection dropped CAP_AEAD, something
-                    // between us and the server stripped the bit.
-                    // Bail rather than run the data plane unencrypted.
+                    // Downgrade guard: if we asked for direct-TCP but the
+                    // caps intersection dropped CAP_AEAD, something stripped
+                    // the bit — refuse to run the data plane in cleartext.
                     return Err(BcmrError::CryptoFailure(
                         "direct-TCP negotiated without CAP_AEAD — possible downgrade, refusing"
                             .into(),
@@ -418,15 +361,11 @@ impl ServeClient {
         }
     }
 
-    /// Override the caps the client will advertise on the next handshake
-    /// (takes effect only if called before `connect*`, which currently
-    /// isn't exposed — kept as an internal knob for tests).
     #[allow(dead_code)]
     pub fn negotiated_algo(&self) -> CompressionAlgo {
         self.algo
     }
 
-    /// Tests only: did the post-Welcome framing flip to AEAD?
     #[allow(dead_code)]
     pub fn is_aead_negotiated(&self) -> bool {
         matches!(
@@ -467,7 +406,7 @@ impl ServeClient {
         }
     }
 
-    #[allow(dead_code)] // used by integration tests
+    #[allow(dead_code)]
     pub async fn hash(
         &mut self,
         path: &str,
@@ -489,10 +428,7 @@ impl ServeClient {
         }
     }
 
-    /// Single-file GET. Kept for the e2e test surface (each test still
-    /// drives one file end-to-end through the protocol). Production
-    /// download path uses `pipelined_get_files`, which sends all GET
-    /// requests up-front so request and reply streams overlap.
+    /// Kept for e2e tests; production path is `pipelined_get_files`.
     #[allow(dead_code)]
     pub async fn get(
         &mut self,
@@ -571,17 +507,11 @@ impl ServeClient {
             .tx
             .as_mut()
             .ok_or_else(|| BcmrError::InvalidInput("send framing taken".into()))?;
-        // Single-file put() has no batch-level progress channel; skip
-        // reporting here and let the caller drive progress via their own
-        // means (the single-file CLI path already owns a per-byte meter).
         write_file_data_frames(w, tx, data, algo, &|_| {}).await
     }
 
-    /// Single-chunk of a striped PUT: streams exactly `length` bytes
-    /// of `local` starting at `local_offset` to the server, declaring
-    /// the dst `remote` with range `[remote_offset, remote_offset +
-    /// length)`. Paired with `handle_put_chunked` on the server.
-    #[allow(dead_code)] // CLI integration comes in a later commit
+    /// Paired with `handle_put_chunked` on the server.
+    #[allow(dead_code)]
     pub async fn put_chunked(
         &mut self,
         remote: &str,
@@ -636,11 +566,8 @@ impl ServeClient {
         }
     }
 
-    /// Single-chunk of a striped GET: requests `[remote_offset,
-    /// remote_offset + length)` of `remote` and writes the bytes to
-    /// `local` at `local_offset`. Paired with `handle_get_chunked` on
-    /// the server.
-    #[allow(dead_code)] // CLI integration comes in a later commit
+    /// Paired with `handle_get_chunked` on the server.
+    #[allow(dead_code)]
     pub async fn get_chunked(
         &mut self,
         remote: &str,
@@ -658,8 +585,8 @@ impl ServeClient {
         })
         .await?;
 
-        // Pre-open + seek the dst so concurrent chunks from other
-        // pool clients don't serialise on `OpenOptions::open`.
+        // Pre-open + seek so concurrent chunks from other pool clients
+        // don't serialise on `OpenOptions::open`.
         let mut dst = tokio::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -717,9 +644,8 @@ impl ServeClient {
     }
 
     async fn put_with_dedup(&mut self, data: &Path, size: u64) -> Result<(), BcmrError> {
-        // Compute one hash per block. We re-read the file later for the
-        // actual transfer of missing blocks; the alternative (hash and
-        // buffer everything in memory) caps file size at RAM.
+        // Re-read the file for the transfer rather than buffering — the
+        // alternative caps file size at RAM.
         let hashes = compute_block_hashes(data, size).await?;
         let n_blocks = hashes.len();
 
@@ -742,8 +668,7 @@ impl ServeClient {
         let mut file = File::open(data).await?;
         let mut buf = vec![0u8; DEDUP_BLOCK_SIZE];
         for idx in 0..n_blocks {
-            // tokio's read() may return short; loop until we have a full
-            // block or hit EOF (last block can be partial).
+            // read() may return short; loop to a full block or EOF.
             let mut filled = 0;
             while filled < DEDUP_BLOCK_SIZE {
                 let n = file.read(&mut buf[filled..]).await?;
@@ -763,11 +688,8 @@ impl ServeClient {
         Ok(())
     }
 
-    /// Take ownership of the write half for a pipelined operation.
-    /// Pairs with `reap_writer_task`, which puts both back (or surfaces
-    /// the writer's failure). The `SendHalf` goes along with the
-    /// `BoxedWriter` because AEAD framing carries a per-direction
-    /// counter that only the writer task mutates.
+    /// Pair: `reap_writer_task` restores both. SendHalf moves with the
+    /// writer because AEAD's per-direction counter belongs to one side.
     fn take_writer(&mut self) -> Result<(BoxedWriter, SendHalf), BcmrError> {
         let writer = self.writer.take().ok_or_else(|| {
             BcmrError::InvalidInput("writer already taken (concurrent op?)".into())
@@ -778,10 +700,6 @@ impl ServeClient {
         Ok((writer, tx))
     }
 
-    /// Common tail for the two pipelined methods. See the comment on
-    /// `take_writer` for the ownership contract. On clean success we
-    /// reclaim both the writer and the SendHalf so the client can be
-    /// reused for further (non-pipelined) ops.
     async fn reap_writer_task(
         &mut self,
         writer: tokio::task::JoinHandle<Result<(BoxedWriter, SendHalf), BcmrError>>,
@@ -798,10 +716,9 @@ impl ServeClient {
             }
             Ok(Err(writer_err)) => {
                 if reader_errored {
-                    // reader's error is the "proximate cause"; the writer
-                    // I/O error is almost certainly the same wire closing
-                    // under it. Return Ok here and let the caller surface
-                    // the reader error.
+                    // Reader's error is the proximate cause; the writer
+                    // I/O error is the same wire closing under it. Let
+                    // the caller surface the reader error.
                     Ok(())
                 } else {
                     Err(writer_err)
@@ -810,48 +727,24 @@ impl ServeClient {
             Err(join_err) if !join_err.is_cancelled() => Err(BcmrError::InvalidInput(format!(
                 "writer task join failed: {join_err}"
             ))),
-            // Cancelled by our abort() — expected when reader_errored.
             Err(_) => Ok(()),
         }
     }
 
-    /// Stream-pipeline many small file PUTs over the same connection.
+    /// Pipelined batch PUT over one connection. Writer task emits Put +
+    /// Data* + Done for every file in send order while this task reads
+    /// Ok/Error in matching FIFO order. Backpressure comes for free from
+    /// the OS pipe + SSH send window.
     ///
-    /// The single-file `put()` is strict request-response: send Put +
-    /// Data\* + Done, await Ok, then start the next file. On a 10000-file
-    /// batch each file pays one full client→server→client round trip
-    /// regardless of how cheap the actual fdatasync is on the wire ---
-    /// SSH transport buffers don't help when the *client* is the one
-    /// blocking. SFTP closes the same gap for `scp -r` by keeping a
-    /// window of in-flight requests; our protocol's dispatch loop is
-    /// already FIFO and out-of-order-safe for replies, so we just need
-    /// to stop waiting on the client side.
+    /// Skips the dedup pre-flight (each HaveBlocks/MissingBlocks round
+    /// trip would re-serialize). Callers should keep large files on the
+    /// per-file `put()` path where dedup wins.
     ///
-    /// Implementation: spawn a writer task that owns `stdin` and emits
-    /// `Put / Data* / Done` for every file in send order. The reader
-    /// (this task) reads `Ok / Error` frames in matching FIFO order.
-    /// The OS pipe between client stdin and the SSH child plus SSH's
-    /// own send window provide natural backpressure when the server
-    /// hasn't drained yet — no explicit channel needed.
+    /// Bails on the first error — connection is left indeterminate, so
+    /// the caller should drop the client afterwards.
     ///
-    /// Skips the dedup pre-flight unconditionally (dedup needs a
-    /// HaveBlocks/MissingBlocks round trip per file, which would
-    /// re-introduce the very serialization we're trying to remove).
-    /// Caller should keep large files (where dedup wins) on the
-    /// per-file `put()` path.
-    ///
-    /// Bails on the first error (writer-side I/O failure, server `Error`
-    /// frame, or unexpected message). After a failure the connection is
-    /// left in an indeterminate state — the writer task may have
-    /// half-flushed a frame, the server may have queued unread replies —
-    /// so the caller should drop the client rather than try another op.
-    ///
-    /// `on_chunk(chunk_bytes)` fires once per Data frame the writer
-    /// emits, so a long-running upload can update a progress bar in
-    /// real time instead of jumping at file completion. `on_complete`
-    /// fires exactly once per file after its Ok is received. Both
-    /// callbacks must be `Send + Sync + 'static` because `on_chunk` is
-    /// moved into the writer task.
+    /// Callbacks are `Send + Sync + 'static` because `on_chunk` moves
+    /// into the writer task.
     pub async fn pipelined_put_files<FChunk, FComplete>(
         &mut self,
         files: Vec<FileTransfer>,
@@ -869,8 +762,7 @@ impl ServeClient {
 
         let (mut wire, mut tx) = self.take_writer()?;
         let algo = self.algo;
-        // Reader-side views of the input (just what on_complete needs).
-        // The writer task consumes `files` so we snapshot here.
+        // Snapshot what on_complete needs — the writer task consumes `files`.
         let progress: Vec<(std::path::PathBuf, u64)> =
             files.iter().map(|f| (f.local.clone(), f.size)).collect();
 
@@ -935,38 +827,17 @@ impl ServeClient {
         Ok(hashes)
     }
 
-    /// Stream-pipeline many GET requests over the same connection.
+    /// Pipelined batch GET. Mirror of `pipelined_put_files`: writer task
+    /// emits `Get { path }` in send order, this task reads Data*/Ok in
+    /// matching FIFO order and writes each file's bytes to its dst.
     ///
-    /// Mirror image of `pipelined_put_files`: spawn a writer task that
-    /// emits all `Get { path }` requests in send order while this task
-    /// (the reader) consumes the resulting `Data* / Ok` streams and
-    /// writes each file's bytes to its destination. Server's dispatch
-    /// loop is FIFO so reply ordering matches send ordering — no
-    /// per-message correlation id needed.
+    /// Validates `ft.size` against the received stream — protocol-level
+    /// catch for server overrun or premature `Ok`.
     ///
-    /// `on_file_start(idx, path, declared_size)` fires just before each
-    /// file's Data stream begins (after the dst is created). `on_chunk`
-    /// fires per Data frame with the decoded byte count — pair these to
-    /// drive a progress bar that doesn't stall on large files.
-    /// `sync_after_each` gates `sync_all()` on the dst before moving to
-    /// the next file; matches the per-PUT fsync behavior under
-    /// `CAP_SYNC`.
-    ///
-    /// **Validates `ft.size` against the received stream**: if the
-    /// server sends more bytes than declared, or `Ok` arrives before
-    /// enough bytes did, the call bails with an error rather than
-    /// silently truncating the dst. This catches server misbehavior and
-    /// inadvertent truncation at the protocol boundary.
-    ///
-    /// Bails on the first `Error` frame or I/O failure. Partial state
-    /// survives on disk: files completed before the bail are intact,
-    /// the file in progress is left half-written at its final path
-    /// (no `.tmp` + rename dance here — inherited behavior from the
-    /// pre-pipelining loop). The signal-handler-driven
-    /// `cleanup_partial_files` hook only knows about `TempFileGuard`
-    /// registrations, so Ctrl+C mid-batch leaves the current file
-    /// truncated until a retry overwrites it. Worth fixing when an
-    /// actual user reports it.
+    /// Bails on the first error. Files completed beforehand are intact;
+    /// the in-progress file is left half-written at its final path (no
+    /// `.tmp` + rename, inherited from the pre-pipelining loop). The
+    /// TempFileGuard-based SIGINT cleanup doesn't cover this path yet.
     pub async fn pipelined_get_files<FStart, FChunk>(
         &mut self,
         files: Vec<FileTransfer>,
@@ -987,11 +858,9 @@ impl ServeClient {
 
         let request_paths: Vec<String> = files.iter().map(|f| f.remote.clone()).collect();
 
-        // Writer task: send all N Get requests in order. Each request is
-        // ~30 bytes; even at N=10000 the cumulative ~300 KiB fits in the
-        // OS pipe + SSH socket buffer with room to spare. If the buffer
-        // *did* fill, write_message().await would naturally backpressure,
-        // so we don't bother with an explicit channel.
+        // ~30 B per Get; N=10000 cumulative ~300 KiB fits the OS pipe +
+        // SSH socket buffer. If it didn't, write_message() would
+        // backpressure on its own.
         let writer_task: tokio::task::JoinHandle<Result<(BoxedWriter, SendHalf), BcmrError>> =
             tokio::spawn(async move {
                 for path in request_paths {
@@ -1014,12 +883,9 @@ impl ServeClient {
                     }
                 }
             }
-            // Intentional: sync `std::fs::File` + sync `write_all` inside
-            // an async fn. `tokio::fs` would wrap every read/write in its
-            // own spawn_blocking — for 4 MiB chunks on NVMe that's thread
-            // bounces dominating the actual I/O (same anti-pattern as
-            // local-perf Exp 13). Keeping the writes sync in-task is
-            // measurably faster here.
+            // NOT tokio::fs — it would spawn_blocking per 4 MiB chunk on
+            // NVMe, thread bounces dominating actual I/O. Sync writes
+            // in-task are measurably faster.
             let mut dst = match std::fs::File::create(&ft.local) {
                 Ok(f) => f,
                 Err(e) => {
@@ -1100,7 +966,7 @@ impl ServeClient {
                             }
                         }
                         drop(dst);
-                        break; // next file
+                        break;
                     }
                     Ok(Message::Error { message }) => {
                         recv_err = Some(BcmrError::InvalidInput(message));
@@ -1143,7 +1009,7 @@ impl ServeClient {
         }
     }
 
-    #[allow(dead_code)] // used by integration tests
+    #[allow(dead_code)]
     pub async fn resume_check(&mut self, path: &str) -> Result<(u64, Option<[u8; 32]>), BcmrError> {
         self.send(&Message::Resume {
             path: path.to_owned(),
@@ -1165,17 +1031,15 @@ impl ServeClient {
     }
 
     pub async fn close(mut self) -> Result<(), BcmrError> {
-        // Drop stdin to send EOF → server exits cleanly.
-        // After wait(), the Drop impl's start_kill() is a harmless no-op
-        // on an already-exited child.
+        // Drop stdin → EOF → server exits cleanly. After wait() the Drop
+        // impl's start_kill() is a no-op on the exited child.
         self.writer.take();
         self.transport.wait().await;
         Ok(())
     }
 
-    /// Hook for the pool's `close`: drop writer + wait without consuming
-    /// self, so the pool can drive the same shutdown across N clients
-    /// via `&mut self` iteration instead of by-value consumption.
+    /// Hook for the pool: drop writer + wait through `&mut self` so
+    /// the pool can iterate instead of consuming by value.
     async fn close_in_place(&mut self) -> Result<(), BcmrError> {
         self.writer.take();
         self.transport.wait().await;
@@ -1210,43 +1074,17 @@ impl Transport {
     }
 }
 
-// Child is spawned with kill_on_drop(true) (see core::transport::ssh),
-// so drop alone suffices to terminate an orphaned ssh process.
-
-/// A pool of N parallel `ServeClient` connections to the same remote.
-///
-/// Rationale: SSH gives us one cipher stream per TCP connection. AES-NI
-/// tops out at ~500 MB/s/core; ChaCha20 at ~200-500. A single
-/// `ServeClient` is therefore wall-clocked by a single crypto thread on
-/// the server and another on the client. Opening N connections
-/// side-by-side gives us N independent cipher streams → up to N× the
-/// crypto ceiling, until the NIC, disk, or per-file syscall overhead
-/// takes over. This is the `mscp`-style "just open more ssh" trick, no
-/// protocol change required.
-///
-/// The pool exposes "striped" variants of the pipelined batch methods:
-/// the input file list is partitioned round-robin across the N clients
-/// and each client's work runs concurrently via `futures::try_join_all`
-/// on the caller's task (no `tokio::spawn` here — the individual
-/// clients' writer tasks already use spawn internally).
-///
-/// Callbacks given to the pool must be `Fn + Send + Sync + Clone +
-/// 'static` because they're cloned into each client's call and invoked
-/// from multiple tasks. The ordering guarantee from single-client
-/// pipelining (on_complete fires in input-index order) is **dropped**
-/// for the pool: completions now arrive in whatever order the N clients
-/// finish. PUT hashes are still returned in input order — the pool
-/// re-assembles them from each bucket's original indices.
+/// N parallel ServeClient connections. Each connection is its own TCP +
+/// cipher stream, so N clients lift the single-core AEAD ceiling by N×
+/// until NIC/disk/syscall overhead takes over (mscp-style "just open
+/// more ssh"). Striped variants partition files round-robin and run
+/// concurrently. Completion order is not preserved; PUT hashes are
+/// re-scattered to input order from each bucket's saved indices.
 pub struct ServeClientPool {
     clients: Vec<ServeClient>,
 }
 
 impl ServeClientPool {
-    /// Open N parallel SSH connections to the same target. All N
-    /// connections do their own SSH handshake in parallel; total
-    /// handshake latency ≈ single-connection (not N× because they
-    /// concurrent). `caps` is the same byte on every connection — no
-    /// per-connection capability splitting.
     pub async fn connect_with_caps(
         ssh_target: &str,
         caps: u8,
@@ -1266,11 +1104,8 @@ impl ServeClientPool {
         Ok(Self { clients })
     }
 
-    /// N parallel connections over direct-TCP with AEAD framing. Each
-    /// connection does its own SSH rendezvous (so N listeners are
-    /// opened briefly on the server during setup). Caller opts in
-    /// with `--direct`; server must advertise CAP_DIRECT_TCP or every
-    /// connection fails.
+    /// N parallel direct-TCP + AEAD connections. Each runs its own
+    /// rendezvous, so N listeners open briefly on the server during setup.
     pub async fn connect_direct_with_caps(
         ssh_target: &str,
         caps: u8,
@@ -1290,9 +1125,6 @@ impl ServeClientPool {
         Ok(Self { clients })
     }
 
-    /// Test helper: N parallel direct-TCP connections to local
-    /// `bcmr serve` subprocesses. Each element does its own SSH
-    /// handshake + rendezvous + TCP dial on loopback.
     #[allow(dead_code)]
     pub async fn connect_direct_local(n: usize) -> Result<Self, BcmrError> {
         if n == 0 {
@@ -1305,8 +1137,6 @@ impl ServeClientPool {
         Ok(Self { clients })
     }
 
-    /// Test helper: N parallel local `bcmr serve` subprocesses. Same
-    /// pattern as `ServeClient::connect_local` but for the pool.
     #[allow(dead_code)]
     pub async fn connect_local(n: usize) -> Result<Self, BcmrError> {
         if n == 0 {
@@ -1317,8 +1147,6 @@ impl ServeClientPool {
         Ok(Self { clients })
     }
 
-    /// Number of active connections. Effective pool size = min(N,
-    /// files.len()) on a given batch; see the `_striped` methods.
     #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.clients.len()
@@ -1329,28 +1157,19 @@ impl ServeClientPool {
         self.clients.is_empty()
     }
 
-    /// Access the first (always present) client. Useful for ops that
-    /// don't benefit from striping: single-file `put()` with dedup
-    /// pre-flight, `stat`, `list`, `mkdir` — all one-shot round trips
-    /// where running them on multiple connections just wastes
-    /// handshakes. The pool always has at least one client (we check
-    /// in `connect_with_caps`).
+    /// First client, for one-shot ops (stat/list/mkdir/single put) where
+    /// striping would just waste handshakes. Always present.
     pub fn first_mut(&mut self) -> &mut ServeClient {
         &mut self.clients[0]
     }
 
-    /// Directory creation stays on client[0] because ordering between
-    /// parent mkdir and child mkdir matters; round-tripping across N
-    /// connections would add complexity for work that's already cheap
-    /// (one mkdir round trip per dir, ~2 ms on LAN).
+    /// Stays on client[0]: parent→child ordering matters, and an mkdir
+    /// is ~2 ms on LAN — not worth fanning out.
     pub async fn mkdir(&mut self, path: &str) -> Result<(), BcmrError> {
         self.clients[0].mkdir(path).await
     }
 
-    /// Stripe `files` round-robin across the pool's clients and run
-    /// each client's `pipelined_put_files` concurrently. Returns PUT
-    /// hashes in *input* order (not completion order — we re-assemble
-    /// from each bucket's saved indices).
+    /// Returns PUT hashes in input order (re-scattered from bucket indices).
     pub async fn pipelined_put_files_striped<FChunk, FComplete>(
         &mut self,
         files: Vec<FileTransfer>,
@@ -1367,8 +1186,8 @@ impl ServeClientPool {
         }
         let n_clients = self.clients.len().min(n_files);
 
-        // Round-robin partition. Each bucket keeps the original indices
-        // so hashes can be re-scattered into input order at the end.
+        // Each bucket keeps original indices so hashes re-scatter to
+        // input order at the end.
         let mut buckets: Vec<(Vec<usize>, Vec<FileTransfer>)> =
             (0..n_clients).map(|_| (Vec::new(), Vec::new())).collect();
         for (i, ft) in files.into_iter().enumerate() {
@@ -1412,7 +1231,6 @@ impl ServeClientPool {
             .collect())
     }
 
-    /// Mirror of `pipelined_put_files_striped` for the download direction.
     pub async fn pipelined_get_files_striped<FStart, FChunk>(
         &mut self,
         files: Vec<FileTransfer>,
@@ -1462,12 +1280,9 @@ impl ServeClientPool {
         Ok(())
     }
 
-    /// Stripe a single file across all N pool clients. Each bucket
-    /// gets one non-overlapping range; the dst is pre-truncated to
-    /// `file_size` so stale tail bytes from prior runs can't survive
-    /// and the zero-byte case still creates the dst. Returns the
-    /// whole-file BLAKE3 computed client-side from the source —
-    /// integrity on the wire is the AEAD per-frame MAC.
+    /// Stripe one file across N clients; dst is pre-truncated to handle
+    /// stale tails and the zero-byte case. Returns the client-side
+    /// whole-file BLAKE3 — wire integrity is the AEAD per-frame MAC.
     pub async fn striped_put_file(
         &mut self,
         local: &Path,
@@ -1482,7 +1297,6 @@ impl ServeClientPool {
             return Ok(*blake3::hash(b"").as_bytes());
         }
 
-        // Hash in parallel with the transfer.
         let hash_task = spawn_blake3_file(local.to_path_buf());
 
         let local_owned = local.to_path_buf();
@@ -1506,8 +1320,7 @@ impl ServeClientPool {
             .map_err(|e| BcmrError::InvalidInput(format!("hash task join: {e}")))?
     }
 
-    /// Mirror of `striped_put_file`. Caller supplies `remote_size`
-    /// (from `client.stat` or an upper bound).
+    /// Caller supplies `remote_size` (from `client.stat` or an upper bound).
     pub async fn striped_get_file(
         &mut self,
         remote: &str,
@@ -1517,9 +1330,9 @@ impl ServeClientPool {
         if self.clients.is_empty() {
             return Err(BcmrError::InvalidInput("pool is empty".into()));
         }
-        // Pre-size so every chunk's seek+write finds the dst at its
-        // final length — avoids the race where one chunk's write grows
-        // past another's seek target.
+        // Pre-size so every chunk's seek+write lands at its final
+        // offset — otherwise one chunk's growth could race past
+        // another's seek target.
         let f = tokio::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -1570,7 +1383,6 @@ impl ServeClientPool {
         }
     }
 
-    /// Cleanly close all N connections.
     pub async fn close(mut self) -> Result<(), BcmrError> {
         let futs = self.clients.iter_mut().map(|c| c.close_in_place());
         let _ = futures::future::join_all(futs).await;
@@ -1579,10 +1391,8 @@ impl ServeClientPool {
     }
 }
 
-/// Divide `[0, total)` into `n` non-overlapping ranges with the last
-/// one absorbing the remainder so the union covers exactly [0, total).
-/// If `total == 0` every range has length 0; callers are expected to
-/// filter those.
+/// Last range absorbs the remainder so union = [0, total). Callers
+/// filter zero-length entries when total == 0.
 fn divide_ranges(total: u64, n: usize) -> Vec<(u64, u64)> {
     let mut ranges = Vec::with_capacity(n);
     let chunk = total.div_ceil(n as u64);
@@ -1595,8 +1405,6 @@ fn divide_ranges(total: u64, n: usize) -> Vec<(u64, u64)> {
     ranges
 }
 
-/// BLAKE3 of a file, computed on the blocking pool so the caller's
-/// async task isn't pinned to the read loop.
 fn spawn_blake3_file(
     path: std::path::PathBuf,
 ) -> tokio::task::JoinHandle<Result<[u8; 32], BcmrError>> {
@@ -1616,9 +1424,6 @@ fn spawn_blake3_file(
     })
 }
 
-/// Streams `data` to `writer` as Data frames, applying `algo` for
-/// compression. One encode loop shared by single-file put_streaming
-/// and the pipelined_put_files writer task.
 async fn write_file_data_frames<W>(
     writer: &mut W,
     tx: &mut SendHalf,

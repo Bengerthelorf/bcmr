@@ -1,7 +1,4 @@
 #![cfg(unix)]
-//! End-to-end tests for the pipelined transfer paths: single-client
-//! `pipelined_put_files` / `pipelined_get_files` and the N-way
-//! `ServeClientPool::*_striped` variants.
 
 mod common;
 
@@ -13,10 +10,6 @@ use std::sync::Arc;
 use bcmr::core::checksum;
 use bcmr::core::serve_client::{FileTransfer, ServeClient, ServeClientPool};
 
-/// Pipelined PUT of many small files: send Put/Data/Done streams for all
-/// files back-to-back via the writer task while the reader collects
-/// FIFO-ordered Ok hashes. Verifies every dst file lands with the
-/// correct contents and the connection is reusable afterwards.
 #[tokio::test]
 async fn serve_pipelined_put_many_files_succeeds() {
     let dir = tempfile::tempdir().unwrap();
@@ -88,9 +81,6 @@ async fn serve_pipelined_put_many_files_succeeds() {
     client.close().await.unwrap();
 }
 
-/// Pipelined GET of many small files: send all Get requests up-front,
-/// reader demuxes the resulting Data*/Ok stream into per-file dst
-/// handles. Verifies stream framing, demultiplexing, and stdin reclaim.
 #[tokio::test]
 async fn serve_pipelined_get_many_files_succeeds() {
     let dir = tempfile::tempdir().unwrap();
@@ -153,9 +143,6 @@ async fn serve_pipelined_get_many_files_succeeds() {
     client.close().await.unwrap();
 }
 
-/// Pipelined PUT where one local source file doesn't exist: writer task
-/// hits open() error mid-batch, returns Err. Reader sees the connection
-/// die and propagates the error.
 #[tokio::test]
 async fn serve_pipelined_put_writer_error_propagates() {
     let dir = tempfile::tempdir().unwrap();
@@ -193,8 +180,6 @@ async fn serve_pipelined_put_writer_error_propagates() {
     drop(client);
 }
 
-/// Pipelined GET where one server-side path doesn't exist: server emits
-/// Error mid-stream. Reader catches it and propagates.
 #[tokio::test]
 async fn serve_pipelined_get_server_error_propagates() {
     let dir = tempfile::tempdir().unwrap();
@@ -232,7 +217,6 @@ async fn serve_pipelined_get_server_error_propagates() {
     drop(client);
 }
 
-/// ServeClientPool with N=4: round-robin striping works end-to-end.
 #[tokio::test]
 async fn serve_pool_pipelined_put_n4_succeeds() {
     let dir = tempfile::tempdir().unwrap();
@@ -306,7 +290,6 @@ async fn serve_pool_pipelined_put_n4_succeeds() {
     pool.close().await.unwrap();
 }
 
-/// ServeClientPool GET with N=4: mirror of the PUT test.
 #[tokio::test]
 async fn serve_pool_pipelined_get_n4_succeeds() {
     let dir = tempfile::tempdir().unwrap();
@@ -369,7 +352,7 @@ async fn serve_pool_pipelined_get_n4_succeeds() {
     pool.close().await.unwrap();
 }
 
-/// Pool with N=1 must behave identically to a single ServeClient.
+/// N=1 degenerate pool must behave identically to a single ServeClient.
 #[tokio::test]
 async fn serve_pool_n1_degenerate_behaves_like_single_client() {
     let dir = tempfile::tempdir().unwrap();
@@ -403,8 +386,6 @@ async fn serve_pool_n1_degenerate_behaves_like_single_client() {
     pool.close().await.unwrap();
 }
 
-/// ServeClientPool error propagation: any bucket's writer task
-/// erroring mid-batch must cancel the siblings and surface Err.
 #[tokio::test]
 async fn serve_pool_one_bucket_error_cancels_siblings() {
     let dir = tempfile::tempdir().unwrap();

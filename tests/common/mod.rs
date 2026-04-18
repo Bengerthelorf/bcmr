@@ -1,6 +1,5 @@
-//! Each integration test is its own binary, so this module gets
-//! compiled per-file; `allow(dead_code)` silences "unused in this
-//! binary" warnings.
+// Each integration test is its own binary, so `dead_code` warnings would
+// fire for items used only by other test files.
 #![allow(dead_code)]
 
 use std::path::PathBuf;
@@ -12,10 +11,6 @@ pub fn bcmr_bin() -> PathBuf {
     exe.parent().unwrap().parent().unwrap().join(bin_name)
 }
 
-/// Spawn a `bcmr serve` subprocess for raw-protocol tests.
-/// Root defaults to `/` so tests can write under `/tmp`; override
-/// by passing a different path. `stderr_inherit=true` surfaces the
-/// child's stderr for debugging.
 pub struct ServeChild {
     pub child: tokio::process::Child,
     pub stdin: tokio::process::ChildStdin,
@@ -49,9 +44,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-/// Write deterministic pseudo-random bytes to `path`.
-/// Uses a simple LCG so the data is never all-zeros, making hash
-/// collisions detectable.
+/// Deterministic pseudo-random bytes (LCG) so hash collisions are detectable.
 pub fn create_file(path: &Path, size: usize) {
     let mut file = fs::File::create(path).unwrap();
     let mut state: u64 = 0xdeadbeef_cafebabe;
@@ -76,10 +69,8 @@ pub fn bytes_to_hex(hash: &[u8; 32]) -> String {
     hash.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-/// Serialise the CAS-eviction test against any concurrent PUTs on
-/// the shared `BCMR_CAS_CAP_MB` env var — unrelated tests running in
-/// the same process would otherwise see capped-or-uncapped behaviour
-/// inherited at spawn time.
+/// Serialises tests that mutate `BCMR_CAS_CAP_MB` so unrelated concurrent
+/// PUTs don't inherit a capped-vs-uncapped env at spawn time.
 pub fn cas_test_lock() -> std::sync::MutexGuard<'static, ()> {
     use std::sync::{Mutex, OnceLock};
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();

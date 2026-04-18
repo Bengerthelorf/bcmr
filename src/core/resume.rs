@@ -16,8 +16,6 @@ pub struct ResumeState {
     pub loaded_session: Option<Session>,
 }
 
-/// Determine whether to resume, skip, or overwrite based on session state,
-/// file metadata, and hashes.
 pub async fn resolve(
     src: &Path,
     dst: &Path,
