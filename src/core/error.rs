@@ -38,4 +38,7 @@ pub enum BcmrError {
 
     #[error("Operation cancelled")]
     Cancelled,
+
+    #[error("Cryptographic failure: {0}")]
+    CryptoFailure(String),
 }

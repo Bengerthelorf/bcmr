@@ -1064,12 +1064,10 @@ async fn serve_pool_one_bucket_error_cancels_siblings() {
     drop(pool);
 }
 
-/// Phase 2 of the direct-TCP path: `bcmr serve --listen 127.0.0.1:0`
-/// must bind, announce its port on stdout ("LISTENING <addr>\n"), accept
-/// a raw TCP connection, and run the same protocol dispatch loop we've
-/// always run over stdin/stdout. Drives the protocol by hand (no
-/// ServeClient yet — that refactor is phase 3) so any breakage in the
-/// run_session extraction surfaces here cleanly.
+/// `bcmr serve --listen` binds a TCP port, announces it on stdout,
+/// and runs the full protocol dispatch loop over the accepted socket.
+/// Drives the wire by hand so any regression in the run_session
+/// extraction surfaces directly.
 #[tokio::test]
 async fn serve_listen_tcp_handshake_and_put() {
     use bcmr::core::protocol::{read_message, write_message, Message, PROTOCOL_VERSION};
@@ -1172,17 +1170,8 @@ async fn serve_listen_tcp_handshake_and_put() {
     let _ = child.wait().await;
 }
 
-/// Phase 3b: server handles `OpenDirectChannel` by binding a loopback
-/// TCP listener, generating a fresh 32-byte session key, and replying
-/// with `DirectChannelReady`. Verifies:
-/// - reply shape (parseable addr + non-zero key)
-/// - addr is actually reachable (TCP dial succeeds)
-/// - two separate requests get two different session keys (freshness)
-///
-/// Auth + AEAD come in phase 3c; here we just confirm the rendezvous
-/// wire reply is well-formed so the client side can be built against a
-/// stable server surface. Drives the raw protocol by hand because
-/// ServeClient doesn't expose this flow yet (phase 3e will add it).
+/// OpenDirectChannel → DirectChannelReady: reply addr is reachable, key
+/// is random, two requests get two different keys.
 #[tokio::test]
 async fn serve_open_direct_channel_reply_is_well_formed() {
     use bcmr::core::protocol::{read_message, write_message, Message, PROTOCOL_VERSION};

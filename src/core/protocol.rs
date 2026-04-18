@@ -14,9 +14,6 @@ const TYPE_MKDIR: u8 = 0x07;
 const TYPE_RESUME: u8 = 0x08;
 const TYPE_DONE: u8 = 0x09;
 const TYPE_HAVE_BLOCKS: u8 = 0x0a;
-// Path B (direct-TCP rendezvous) requests. Only meaningful over the
-// SSH control channel — server ignores these if seen on a direct-TCP
-// data channel.
 const TYPE_OPEN_DIRECT: u8 = 0x0b;
 const TYPE_AUTH_HELLO: u8 = 0x0c;
 
@@ -30,8 +27,6 @@ const TYPE_LIST_RESPONSE: u8 = 0x87;
 const TYPE_RESUME_RESPONSE: u8 = 0x88;
 const TYPE_DATA_COMPRESSED: u8 = 0x89;
 const TYPE_MISSING_BLOCKS: u8 = 0x8a;
-// Path B reply: server tells the client where to reach the direct-TCP
-// data channel and what session key to auth with.
 const TYPE_DIRECT_READY: u8 = 0x8b;
 
 /// Capability bit advertised in Hello/Welcome to enable content-addressed
@@ -150,20 +145,7 @@ pub enum Message {
         path: String,
     },
     Done,
-    /// Path B (direct-TCP) escalation request. Sent by the client over
-    /// the SSH control channel after the regular `Hello` handshake. The
-    /// server responds with `DirectChannelReady` giving a TCP address
-    /// and an AES-256-GCM session key; the client then opens that TCP
-    /// socket and authenticates with `AuthHello`. The original SSH
-    /// channel stays alive as a watchdog / control channel.
     OpenDirectChannel,
-    /// First frame the client sends on the direct-TCP socket, proving
-    /// it knows the session key delivered over SSH. The MAC is
-    /// `blake3::keyed_hash(session_key, b"bcmr-direct-v1")`, truncated
-    /// to 32 bytes (full BLAKE3 output). Server verifies before
-    /// accepting any further frames on this socket; on mismatch it
-    /// drops the connection without a reply (don't leak information
-    /// to blind probers).
     AuthHello {
         mac: [u8; 32],
     },
@@ -222,13 +204,6 @@ pub enum Message {
         size: u64,
         block_hash: Option<String>,
     },
-    /// Path B rendezvous reply. `addr` is the server-side TCP address
-    /// the client should dial (typically `host:<kernel-assigned port>`).
-    /// `session_key` is an AES-256-GCM key (32 bytes of
-    /// OS-randomness) delivered over the already-authenticated SSH
-    /// channel — the client uses it both for the MAC in `AuthHello`
-    /// and as the AEAD key for every frame on the direct-TCP socket.
-    /// Single-use: a new rendezvous request gets a fresh key.
     DirectChannelReady {
         addr: String,
         session_key: [u8; 32],
@@ -477,9 +452,6 @@ impl<'a> Cursor<'a> {
         Some(bytes.to_vec())
     }
 
-    /// Read exactly N bytes into a fixed-size array. Used for the
-    /// 32-byte fields (session keys, HMAC tags) where the length is
-    /// part of the protocol, not prefixed on the wire.
     fn read_fixed<const N: usize>(&mut self) -> Option<[u8; N]> {
         let slice = self.data.get(self.pos..self.pos + N)?;
         self.pos += N;

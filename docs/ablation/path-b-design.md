@@ -1,254 +1,248 @@
-# Path B Design: SSH Rendezvous + Direct TCP
+# Direct-TCP Transport Design
 
-**Status**: design-only. Not yet implemented. Living on branch
-`path-b/direct-tcp`; merges to main only when the threat model is
-reviewed and an end-to-end path works.
+Branch: `path-b/direct-tcp`. Not on `main`. Will merge when the design
+is reviewed and an end-to-end benchmark justifies it.
 
-Path A ([Experiment 19](/ablation/wire-protocol#experiment-19-parallel-ssh-connections-break-the-single-stream-ceiling))
-scaled us past scp by opening N parallel SSH sessions. The hard
-ceiling that remains is per-connection: **one SSH session is one
-cipher stream, walled by one crypto core** (~500 MB/s AES-NI, less
-for ChaCha20). On a 10/25/100 GbE LAN that's the binding constraint.
+The SSH transport caps a single connection at one cipher stream, which
+is one crypto core. On modern x86 that's ~500 MB/s of OpenSSH chacha20
+regardless of how fat the pipe or how fast the disks are. Path A
+(parallel SSH) sidesteps this by opening N connections in parallel.
+This document covers the orthogonal approach: keep SSH for
+authentication and control, but move the bulk data over a separate TCP
+socket whose crypto we control.
 
-Path B takes the data path off SSH entirely. SSH remains the
-authenticated control channel; data moves over a separate TCP
-socket with either no encryption (LAN opt-in) or an AEAD that
-isn't constrained by OpenSSH's cipher negotiation and can use
-multiple CPU cores.
+## Scope
 
-## What we're trying to beat
+- **In scope**: single bulk transport that outperforms SSH on a single
+  connection, authenticated from the SSH session, with confidentiality
+  against a passive network attacker.
+- **Out of scope (v1)**: multi-core parallel AEAD (new wire format, v2);
+  kernel TLS offload; client-reachability tricks for NAT-ed servers
+  (bastion → fallback to Path A); splice(2) zero-copy on the TCP
+  socket (v2 optimisation for 25+ GbE links).
 
-Rough single-stream throughput ceilings on a modern server
-(Zen 4 / Sapphire Rapids, AES-NI, no page-cache misses):
+## Threat model
 
-| Transport | Crypto | Ceiling |
-|---|---|---|
-| `scp` / `rsync -e ssh` | AES-GCM, single core | ~500 MB/s |
-| `bcmr serve --parallel 1` | same | ~500 MB/s |
-| `bcmr serve --parallel 8` | 8× single-core | ~4 GB/s (then NIC) |
-| HPN-SSH (NONE cipher) | plaintext post-auth | ~NIC line rate |
-| **Path B (no-crypto LAN)** | plaintext | ~NIC line rate, 1 connection |
-| **Path B (AEAD, multi-core)** | AES-GCM chunked across cores | ~2-4 GB/s, 1 connection |
-| bbcp / GridFTP | configurable | ~NIC line rate |
+Path B targets three deployment shapes in bcmr's real usage:
 
-Goal: single-TCP-connection throughput approaching NIC line rate
-on a 10 GbE LAN (~1.25 GB/s practical). Composable with Path A —
-N direct-TCP streams in parallel → still scale with N.
+1. LAN (trusted network, e.g. lab workstation ↔ lab server in the
+   same VLAN).
+2. Mesh overlay (Tailscale / WireGuard / similar — link layer already
+   encrypted, source IPs in CGNAT-like ranges).
+3. Public-internet direct (SSH reaches a cloud VM on its public IP;
+   data channel would ride the same public path).
 
-## High-level protocol
+A v1 default that's safe for all three cases means **always encrypt
+the data plane**. Leaving confidentiality to the link layer works for
+(1) and (2) but fails hard on (3), which is a normal bcmr deployment.
+Users who know they're on (1) or (2) and want to skip AEAD for raw
+throughput can pass `--direct=plain` explicitly.
 
-```
-Client                                      Server
-  |                                           |
-  | ssh host 'bcmr serve'                     |
-  |------------------------------------------>|
-  | << normal bcmr serve over SSH (Path A) >> |
-  |                                           |
-  | (new message) OpenDirectChannel { port_hint?, nonce_c } |
-  |------------------------------------------>|
-  |                                           | server binds TCP listener
-  |                                           | derives session_key from
-  |                                           | (ssh_session_id, nonce_c, nonce_s)
-  | DirectChannelReady { port, nonce_s }      |
-  |<------------------------------------------|
-  |                                           |
-  | plain TCP connect to server:port          |
-  |------------------------------------------>|
-  |                                           | server accepts, expects first
-  |                                           | frame to contain HMAC(session_key, "hello")
-  | AuthHello { hmac }                        |
-  |------------------------------------------>|
-  |                                           | verify; if mismatch, close
-  | AuthOk                                    |
-  |<------------------------------------------|
-  |                                           |
-  | (normal bcmr serve protocol over direct TCP socket) |
-  |<==========================================|
-  |                                           |
-  | SSH control channel stays open as watchdog |
-  | if SSH dies mid-batch: server kills listener + tears down data socket |
-```
+Attacker capabilities we defend against:
 
-## Key derivation
+- **Passive eavesdropper** on the data path: AEAD confidentiality.
+- **Active tamper** of data frames: Poly1305 integrity + AES-GCM
+  authentication. Any bit flip aborts the session.
+- **Replay** of captured auth frames: the session key and listener
+  are one-shot — a single TCP accept burns both. See *One-shot
+  listener* below.
+- **Blind port scanner** hitting the loopback or exposed data port:
+  AuthHello is required as the first frame; wrong MAC → socket
+  closes silently without informing the prober.
 
-We need a session-bound key that neither side can forge, and that
-ties the data channel to *this* SSH session (prevents replay,
-cross-session hijacking).
+Explicitly out-of-scope threats:
 
-Option 1 — derive from SSH session-id via `BLAKE3(ssh_session_id || nonce_c || nonce_s)`.
-Requires both sides to extract the SSH session ID. **Not
-straightforwardly exposed by the OpenSSH client** — unclear if we
-can read it from a userspace tool without patching sshd/ssh. TBD.
+- **Active MITM rewriting auth frames**: the MAC binds to the
+  session key delivered over SSH, which the MITM can't see. Not a
+  concern under our assumption that SSH is intact.
+- **Downgrade via RST**: an attacker who can RST the data socket can
+  force fallback to Path A. That's an availability attack, not a
+  confidentiality one, and Path A's security is intact. Documented
+  limitation.
+- **Compromised server process**: an attacker with shell on the
+  server can already run bcmr directly. Nothing new.
 
-Option 2 — have the server GENERATE a random session_key, send it
-to the client over the (already-authenticated) SSH channel. Client
-uses that key to authenticate to the TCP listener. Simpler; the
-trust guarantee is "whoever reads the SSH channel can connect to
-the TCP listener", which reduces to SSH auth. This is what
-**mosh** and **tmate** do.
+## Rendezvous
 
-Lean toward Option 2. Simpler threat model and implementation.
-
-## Wire framing on the direct socket
-
-Same length-prefixed frames as the SSH path. The existing
-`protocol.rs` doesn't care about the underlying transport, so
-the framing reuses.
-
-AuthHello frame (new type, only valid as the *first* frame on a
-direct socket):
-
-```
-[4B payload_len][1B TYPE_AUTH_HELLO][32B HMAC-SHA256(session_key, "bcmr-direct-v1")]
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    C->>S: ssh host 'bcmr serve'
+    Note over C,S: Normal bcmr serve over SSH (Path A wire).
+    C->>S: OpenDirectChannel
+    S->>S: Bind TCP listener on SSH_CONNECTION's server_ip.<br/>Generate random 32-byte session_key.
+    S->>C: DirectChannelReady { addr, session_key }
+    Note over C,S: SSH channel stays open as watchdog.
+    C->>S: TCP connect(addr)
+    C->>S: AuthHello { mac = blake3_keyed(session_key, "bcmr-direct-v1") }
+    S->>S: Verify MAC. If bad: drop silently.
+    S->>C: Ok {}
+    Note over C,S: Data channel now carries bcmr serve protocol,<br/>wrapped in AES-256-GCM (see Wire format).
+    C->>S: Get / Put / Stat / ...
+    S->>C: Ok / Data / ...
 ```
 
-Server verifies the HMAC before accepting any other frame. Fails →
-socket close, no error message (don't give blind probers anything).
+### Addr selection
 
-Then normal Hello/Welcome handshake runs over the direct socket
-(same as SSH path), and Get/Put/etc. follow.
+Binding comes from `$SSH_CONNECTION` (set by sshd):
 
-## Data plane crypto: three modes
+```
+SSH_CONNECTION=<client_ip> <client_port> <server_ip> <server_port>
+```
 
-The direct socket carries what SSH used to. We get to pick the
-crypto. Three modes, user-selected:
+The `server_ip` is by definition an interface the client just
+connected to successfully — reachable from the client's network
+position regardless of NAT, Tailscale, or public routing. Server
+binds `server_ip:0`; kernel picks a free port; addr goes back in
+`DirectChannelReady`.
 
-1. **`direct=plain`** — no crypto on the data socket. For LAN only,
-   users explicitly opt in. Wire is a dedicated TCP socket
-   between trusted hosts; confidentiality is assumed from network
-   segmentation. **Not the default.** Useful when you really want
-   NIC line rate and you've read the threat model.
-2. **`direct=aead-singlecore`** — AES-GCM-128 with the derived
-   session_key, rekeyed every 16 GiB. One CPU core of crypto; same
-   ceiling as SSH in practice but without OpenSSH's single-thread
-   implementation. Tiny potential win, low complexity.
-3. **`direct=aead-multicore`** — AEAD with per-chunk IV so
-   different chunks can encrypt/decrypt on different CPU cores.
-   Requires a framing tweak (IV counter per Data frame) but scales
-   linearly with cores until the memcpy between user and kernel
-   bounds us. **The interesting mode.**
+Fallbacks:
 
-Start with `plain` (simplest), add `aead-multicore` once the
-rendezvous is proven out.
+- `$SSH_CONNECTION` not set → `bcmr serve` was invoked outside sshd
+  (e.g. `run_listen` standalone). Refuse direct-TCP; require
+  explicit `--listen-addr`.
+- Bind fails (server_ip isn't locally assigned, e.g. load-balancer
+  terminating SSH) → return Error to client; client falls back to
+  Path A with a stderr warning.
 
-## Threat model (sketch)
+Binding to `0.0.0.0` is deliberately not the default. Even with the
+one-shot listener, broadcasting the port to every NIC widens the
+blind-probe surface for no gain.
 
-- **Eavesdropper on the LAN wire**: can read everything if
-  `direct=plain`. This is the entire point; user opted in. Against
-  `direct=aead-*`, protected by AES-GCM confidentiality +
-  integrity.
-- **Active MITM on the LAN wire**: can inject packets. With
-  AuthHello HMAC, can't authenticate to our listener. With `plain`
-  mode post-auth, can hijack the session — documented limitation.
-- **Attacker with shell on the remote**: can read the session_key
-  from bcmr serve's memory, connect to our listener. Same as if
-  they'd just run bcmr commands directly; nothing new.
-- **Race to the listener**: attacker observes the SSH session,
-  sees `DirectChannelReady { port }` (but session_key is
-  encrypted inside SSH). Attacker races to `localhost:port` and
-  connects first. Server rejects because attacker can't produce
-  the HMAC. Legitimate client retries, wins.
-- **Port scanner / blind probe**: dials random TCP ports on the
-  server. Hits our listener. Sends garbage. We fail AuthHello,
-  close. No information leaked beyond "something is listening".
+### One-shot listener
 
-## Firewall considerations
+Each `OpenDirectChannel` creates its own listener and its own session
+key. The listener's spawned task accepts exactly one TCP connection,
+then drops the listener. AuthHello outcome doesn't matter for this
+lifecycle — the whole rendezvous is consumed on the first accept,
+success or failure. If AuthHello fails the client retries with a
+fresh `OpenDirectChannel`.
 
-An extra TCP port needs to be reachable. That's a hard "no" on
-many locked-down institutional networks that only allow SSH port
-22 outbound. For those, Path A is still the answer.
+Why strict "one accept": treating AuthHello-fail as "try again"
+would let a scanner spam connections against a stable listener, and
+once the scanner happens to win the accept race it's pinned the
+legitimate client out. With strict one-shot, a losing scanner burns
+the listener but the legitimate client notices the broken session,
+requests a new rendezvous with a new key, and retries. The attacker
+has to win every race in a row to deny service indefinitely.
 
-Implementation: `--direct` flag opts INTO path B. Default stays
-Path A over SSH. If opted-in and the server reports it can't bind
-the port (or client can't reach it), fall back to Path A with a
-stderr warning (reusing the fallback-warning machinery from
-v0.5.19).
+### Session lifetime
 
-## Port selection
+Listener join handles are held by the enclosing SSH session.
+Session end (SSH disconnect, bcmr serve exit, explicit close)
+aborts all live listeners. Prevents the "leak one listener per
+request" failure mode and gives the watchdog guarantee the design
+implies.
 
-Simple version: server binds `localhost:0` → kernel picks, reports
-back. Only works for LAN deployments where the client has direct
-TCP reachability. **On a typical SSH-only setup the client can't
-reach arbitrary ports on the server** — the server is behind a
-bastion / NAT. This is a real deployment gap.
+## Wire format
 
-Fancy version: tunnel the direct-TCP connection *through* the SSH
-control channel (SSH port forwarding), so the data socket is still
-carried over SSH but with our own cipher on top. But now we're
-back inside SSH's MTU / crypto path and the benefit is just
-"different cipher than OpenSSH picks". Probably not worth the
-complexity.
+On the TCP socket after AuthHello succeeds, every frame is
+AES-256-GCM wrapped:
 
-Decision: Path B is a **LAN-mode** feature. WAN users should stay
-on Path A (parallel SSH). Document clearly.
+```
+[4B LE total_len][ciphertext][16B Poly1305 tag]
+```
 
-## Code organization
+`total_len` covers ciphertext + tag. The nonce is not on the wire —
+both sides derive it from a per-direction u64 counter. Nonce
+layout (12 bytes for AES-GCM):
+
+```
+byte 0     : direction flag (0x01 = client→server, 0x02 = server→client)
+bytes 1..9 : u64 counter, little-endian
+bytes 9..12: zero padding (reserved)
+```
+
+The direction byte prevents nonce collision when both endpoints'
+counters start at 0 under the same session key. Each sender
+increments its own counter per frame; each receiver maintains a
+matching counter. A dropped, duplicated, or reordered frame desyncs
+the counters and the next tag check fails — session aborts. This is
+the intended failure mode: tamper or protocol bug fails loudly, not
+silently.
+
+Counter overflow at 2⁶⁴ frames is rejected explicitly. The session
+ends before reaching it in any realistic workload (4 MiB frames ×
+2⁶⁴ = 64 ZiB) but handling it cleanly documents the limit.
+
+## Modes
+
+```
+--direct=aead    (default when --direct is passed)
+--direct=plain   (opt-in, requires known-trusted link)
+```
+
+The default is AEAD because bcmr users include cloud-VM public-IP
+deployments where plain would leak everything. `--direct=plain`
+exists for the small subset of users who know their link is already
+encrypted (WireGuard mesh, dedicated LAN segment) and want raw
+throughput on 25+ GbE hardware where userspace AES starts to show
+up in microbenches.
+
+Measured throughput context (single core, `crypto_probe.rs`):
+
+| Hardware              | AES-256-GCM | 10 GbE NIC | 25 GbE NIC |
+|-----------------------|------------:|-----------:|-----------:|
+| Apple Silicon (idle)  | 5.1 GB/s    | 1.25 GB/s  | 3.1 GB/s   |
+| Xeon (load 67)        | 1.5 GB/s    | 1.25 GB/s  | 3.1 GB/s   |
+
+On 1/10 GbE, the NIC is the bottleneck, not crypto — AEAD matches
+splice in wall time. On 25/40/100 GbE the crypto starts to matter;
+that's where `--direct=plain` + (future) splice-to-TCP wins.
+
+## Capability negotiation
+
+Old clients don't know about Path B. Forward compat goes through a
+new cap bit in Hello/Welcome:
+
+```
+CAP_DIRECT_TCP = 0x20
+```
+
+Client advertises. Server advertises. Intersection governs: if
+either side lacks the bit, server rejects `OpenDirectChannel` with
+an Error. No silent fallback to "send plaintext over SSH" or similar
+unsafe combo.
+
+## Code organisation
 
 ```
 src/core/transport/
-  mod.rs          -- pub trait Transport
-  ssh.rs          -- SshTransport: current behavior (always compiled)
-  direct_tcp.rs   -- DirectTcpTransport (#[cfg(feature = "direct-transport")])
+    mod.rs           trait ProtocolChannel { read_message, write_message, flush }
+    ssh.rs           SshChannel  (stdin+stdout pair, current behaviour)
+    direct_tcp.rs    TcpChannel  (owned TCP socket split halves)
+
+src/core/protocol_aead.rs
+    AeadChannel<C: ProtocolChannel>  (decorator — wraps any channel
+                                      with AES-256-GCM framing)
 ```
 
-`trait Transport` shape:
+`ServeClient` holds `Box<dyn ProtocolChannel + Send>`. Handlers take
+`&mut dyn ProtocolChannel`. Splice fast path uses an escape hatch on
+the trait (`fn raw_stdout_fd(&self) -> Option<RawFd> { None }`) —
+`SshChannel` returns `Some(STDOUT_FILENO)` when it owns the real
+stdout, everyone else returns `None` and the handler takes the
+buffered path.
 
-```rust
-pub trait Transport: Send {
-    async fn connect(target: &str, caps: u8) -> Result<Self>;
-    async fn send(&mut self, msg: &Message) -> Result<()>;
-    async fn recv(&mut self) -> Result<Message>;
-    async fn close(self) -> Result<()>;
-}
-```
+AEAD as a decorator (rather than its own transport) means any
+channel can be wrapped: future experiments with SSH-over-AEAD or
+direct-TCP-plain are the same decorator stacked differently.
 
-`ServeClient` and `ServeClientPool` become generic over T: Transport.
-All existing pipelined methods work unchanged — they don't depend
-on *which* transport, only that it obeys the Message/Stream
-contract.
+## Open questions
 
-## Implementation phases
-
-1. **Trait extraction** — pull current `ServeClient` SSH logic
-   behind `SshTransport`. No behavior change. All existing tests
-   must still pass. **This is the refactor; belongs on a
-   `path-b/trait-extraction` sub-branch if it gets messy.**
-2. **Direct TCP skeleton** — new subcommand `bcmr serve --listen
-   <addr>` that binds, accepts one connection, runs the existing
-   dispatch loop on it. No rendezvous yet; user runs it manually.
-3. **Rendezvous over SSH** — add OpenDirectChannel /
-   DirectChannelReady / AuthHello to the protocol. Auto-binding,
-   auto-auth.
-4. **Crypto modes** — start with `plain`, add AEAD later if/when
-   there's evidence we need it.
-5. **Benchmark** — head-to-head on the same loaded-box regime as
-   Exp 19, plus an actual 10 GbE LAN if we can borrow one. Target:
-   single TCP stream ≥ 2 GB/s on the LAN.
-
-## Non-goals for v1
-
-- WAN support (punted; Path A is the WAN answer).
-- Key rotation during a session (16-GiB rekey threshold is a v2
-  feature).
-- Hardware crypto offload / DPU paths.
-- Resume-across-transport (a crash on direct TCP can fall back to
-  Path A for the retry — no need to make direct TCP crash-safe on
-  its own in v1).
-
-## Open questions that need a real answer before merging
-
-- **Can the client reach server:port?** Deployment reality check —
-  on real bcmr user setups (dev machine → workstation, workstation
-  → lab server), is the direct TCP port reachable at all?
-  Without this, Path B is a dead letter.
-- **sshd logging**: binding a TCP listener might generate
-  suspicious audit entries on hardened boxes. Check what it looks
-  like in syslog / auditd.
-- **Metrics**: is the crypto win actually there on modern CPUs,
-  or has AES-NI closed the gap enough that per-connection SSH is
-  already wire-speed on 10 GbE? **Measure before shipping.** If
-  SSH already saturates 10 GbE, Path B is solving a 2020 problem.
-
-**Next step on this branch**: start with phase 1 (trait
-extraction). No user-visible change, all existing tests pass,
-establishes the seam that the rest of Path B slots into.
+- **splice-to-TCP**: `splice(file → pipe) + splice(pipe → socket)`
+  is well-established (nginx, HAProxy). Not v1 scope, but the trait
+  design already accommodates it — the escape hatch returns a
+  writable fd when appropriate. Real users on 25+ GbE will motivate
+  this.
+- **Multi-core AEAD**: needs a new wire format with nonces on the
+  wire (current format has nonces implicit). Will be a new message
+  type (`DataChunked { nonce, ciphertext }`) that coexists with the
+  current single-core Data frame, not a replacement. v2.
+- **Key rotation within a session**: not v1. 2⁶⁴ nonces per session
+  key is unreachable; no practical need.
+- **`direct=plain` over public internet**: the user can shoot
+  themselves if they try. The CLI help and stderr at `--direct=plain`
+  will call this out explicitly but not refuse the combination —
+  forcing the user's hand is worse UX than warning them.

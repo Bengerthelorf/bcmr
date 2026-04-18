@@ -106,26 +106,34 @@ pub async fn run(root: Option<PathBuf>) -> Result<()> {
     let root = resolve_root(root)?;
     let mut stdin = io::stdin();
     let mut stdout = io::stdout();
-    // stdin/stdout mode: the Linux zero-copy splice path is valid
-    // because the writer end really is STDOUT_FILENO, which
+    // allow_splice=true: the writer is real STDOUT_FILENO, which
     // handle_get_splice_linux hardcodes.
     run_session(&mut stdin, &mut stdout, &root, true).await
 }
 
-/// Accept one TCP connection at a time on `addr` and run a session over
-/// each. Phase 2 of the direct-TCP work: proves the dispatch loop is
-/// transport-agnostic. No rendezvous yet — operator wires client and
-/// server manually. Future rendezvous work (phase 3) will drive this
-/// from the SSH control channel.
-#[allow(dead_code)]
 pub async fn run_listen(root: Option<PathBuf>, addr: std::net::SocketAddr) -> Result<()> {
+    // Non-loopback bind exposes the dispatch loop to anyone on the
+    // network with no peer auth. Until rendezvous lands, only allow it
+    // with an explicit env var so nobody accidentally opens their
+    // filesystem to the LAN by copy-pasting a dev command.
+    if !addr.ip().is_loopback() {
+        if std::env::var("BCMR_UNSAFE_LAN_LISTEN").is_ok_and(|v| v == "1") {
+            eprintln!(
+                "bcmr serve: WARNING — binding {addr} on a non-loopback address with no peer \
+                 authentication. Anyone who can reach this port can read and write files under \
+                 the --root jail."
+            );
+        } else {
+            bail!(
+                "bcmr serve --listen refuses non-loopback address {addr} without \
+                 BCMR_UNSAFE_LAN_LISTEN=1 (no peer auth on this transport yet)"
+            );
+        }
+    }
     let root = resolve_root(root)?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
-    // Announce the bound port on stdout so test harnesses and
-    // rendezvous helpers can pick it up without polling. The format is
-    // stable: single line, `LISTENING <addr>\n`, followed by normal
-    // stderr logging (if any).
+    // Test harnesses parse this line to pick up the kernel-assigned port.
     use tokio::io::AsyncWriteExt as _;
     let mut stdout = io::stdout();
     stdout
@@ -137,24 +145,13 @@ pub async fn run_listen(root: Option<PathBuf>, addr: std::net::SocketAddr) -> Re
         let (stream, _peer) = listener.accept().await?;
         let root = root.clone();
         tokio::spawn(async move {
-            let (reader, writer) = stream.into_split();
-            let mut reader = reader;
-            let mut writer = writer;
-            // allow_splice = false: the splice fast path assumes the
-            // writer is STDOUT_FILENO. A TCP socket fd isn't stdout,
-            // so we'd have to plumb the fd through — deferred to a
-            // follow-up; the buffered path is correct and fast enough.
+            let (mut reader, mut writer) = stream.into_split();
+            // allow_splice=false: TCP socket fd is not STDOUT_FILENO.
             let _ = run_session(&mut reader, &mut writer, &root, false).await;
         });
     }
 }
 
-/// The session loop, parameterized over the underlying byte streams.
-/// Extracted from `run()` so the same logic drives stdin/stdout (the
-/// SSH-invoked case) and a TCP socket (direct-TCP mode). Does the
-/// handshake, negotiates caps, dispatches each client request to its
-/// handler, and writes replies back on `writer`. Returns when the
-/// client closes the stream or a protocol error occurs.
 async fn run_session<R, W>(
     reader: &mut R,
     writer: &mut W,
@@ -165,7 +162,6 @@ where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    // --- Handshake ---
     let effective_caps = match protocol::read_message(reader).await? {
         Some(Message::Hello { version, caps }) => {
             if version != PROTOCOL_VERSION {
@@ -197,9 +193,8 @@ where
         None => return Ok(()), // clean EOF before handshake
     };
 
-    // Server and client both call negotiate(caps, caps) with this shared
-    // intersection so they land on the same algorithm without a second
-    // round trip.
+    // Both ends call negotiate with the same intersection so they agree
+    // on the algorithm without a second round trip.
     let algo = CompressionAlgo::negotiate(effective_caps, effective_caps);
     let fast = (effective_caps & CAP_FAST) != 0;
     let sync = (effective_caps & CAP_SYNC) != 0;
@@ -214,16 +209,15 @@ where
     .await?;
     writer.flush().await?;
 
-    // --- Dispatch loop ---
     loop {
         let msg = match protocol::read_message(reader).await? {
             Some(m) => m,
-            None => break, // clean EOF
+            None => break,
         };
 
-        // Get writes Data+Ok directly to `writer` (streaming), so it bypasses
-        // the normal dispatch-loop write. All other handlers return a message
-        // for the dispatch loop to write.
+        // Get streams Data+Ok directly to `writer`, bypassing the
+        // dispatch-loop write. All other handlers return a Message for
+        // the loop below to write.
         let response = match msg {
             Message::Get { path, offset } => {
                 match validate_path(&path, root) {
@@ -829,24 +823,9 @@ async fn handle_mkdir(path: &str) -> Result<Message> {
     Ok(Message::Ok { hash: None })
 }
 
-/// Path B rendezvous (phase 3b scaffolding): allocate a listener on a
-/// loopback port, generate a fresh 32-byte AES-256-GCM session key from
-/// OS randomness, and spawn an accept task that — for now — accepts and
-/// immediately drops incoming connections. Phase 3c replaces the
-/// accept-and-drop stub with the real AuthHello check and AEAD-wrapped
-/// dispatch loop; phase 3b is deliberately scoped to "proves the
-/// rendezvous reply is well-formed and the server binds a real port"
-/// so the client side can be built against a stable server surface.
-///
-/// Binds to 127.0.0.1 only — direct-TCP is LAN-mode in design, but
-/// even within LAN the addr should be handed out to the intended peer
-/// only, not advertised broadly. Client sees the addr via the
-/// already-authenticated SSH control channel.
-///
-/// Listener's lifetime is currently the lifetime of this server
-/// process: the spawned task holds the listener and is never joined.
-/// Phase 3c will bind this to the enclosing SSH session so a lost
-/// session cleans up its dangling rendezvous points.
+// TODO(direct-tcp): bind to $SSH_CONNECTION server_ip, one-shot listener
+// with lifetime tied to the enclosing session, AuthHello + AEAD dispatch.
+// Current body is a stub: accepts and drops, no auth.
 async fn handle_open_direct_channel() -> Result<Message> {
     use ring::rand::{SecureRandom, SystemRandom};
     use tokio::net::TcpListener;
@@ -859,9 +838,6 @@ async fn handle_open_direct_channel() -> Result<Message> {
     rng.fill(&mut session_key)
         .map_err(|_| anyhow::anyhow!("ring::rand failed to produce session key"))?;
 
-    // Accept-and-drop stub. Phase 3c: verify AuthHello with a
-    // BLAKE3-keyed MAC over the session_key, then run the dispatch
-    // loop wrapped in AES-256-GCM.
     tokio::spawn(async move {
         while let Ok((stream, _peer)) = listener.accept().await {
             drop(stream);

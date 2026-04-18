@@ -1,22 +1,6 @@
-//! Crypto throughput microbench: decides whether Path B (SSH
-//! rendezvous + direct TCP with AEAD) can meaningfully beat SSH's
-//! single-stream crypto ceiling.
-//!
-//! Measures the encrypt+decrypt throughput of two candidate AEADs
-//! against the 4 MiB chunk size bcmr serve uses for Data frames.
-//! Prints one row per cipher with:
-//!   - encrypt-only throughput (GB/s)
-//!   - decrypt-only throughput (GB/s)
-//!   - round-trip (encrypt then decrypt) throughput (GB/s) — the
-//!     realistic upper bound for Path B's data plane
-//!
-//! Compare against the measured SSH-over-loopback throughput (`dd if=
-//! big.bin | ssh localhost cat > /dev/null` or equivalent) to decide
-//! if Path B is worth shipping. Rule: AEAD round-trip must be
-//! ≥ 1.5× SSH loopback to justify the Path B protocol + code
-//! complexity. Less than that and we stay on Path A + call it done.
-//!
-//! Run with: `cargo run --release --example crypto_probe`
+//! Single-core AEAD throughput at 4 MiB chunks (the Data-frame size).
+//! Run: `cargo run --release --example crypto_probe`
+//! Compare against SSH loopback throughput to size the Path B ceiling.
 
 use ring::aead::{self, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, CHACHA20_POLY1305};
 use ring::rand::{SecureRandom, SystemRandom};
@@ -51,7 +35,6 @@ fn bench(algo_name: &'static str, algo: &'static aead::Algorithm) -> Result {
     let mut ct_buf = Vec::with_capacity(CHUNK_SIZE + aead::MAX_TAG_LEN);
     let mut nonce_counter = 0u64;
 
-    // ---- encrypt-only pass ----
     let t0 = Instant::now();
     for _ in 0..N_CHUNKS {
         ct_buf.clear();
@@ -64,10 +47,8 @@ fn bench(algo_name: &'static str, algo: &'static aead::Algorithm) -> Result {
     let enc_elapsed = t0.elapsed().as_secs_f64();
     let enc_gbps = (TOTAL_BYTES as f64) / enc_elapsed / 1e9;
 
-    // Save the last ciphertext (with tag) for the decrypt pass.
     let ct_sample = ct_buf.clone();
 
-    // ---- decrypt-only pass ----
     let mut work_buf = Vec::with_capacity(CHUNK_SIZE + aead::MAX_TAG_LEN);
     // Decrypt N times using the SAME valid ciphertext/nonce pair —
     // otherwise we'd have to re-encrypt in the loop, which measures
@@ -86,7 +67,6 @@ fn bench(algo_name: &'static str, algo: &'static aead::Algorithm) -> Result {
     let dec_elapsed = t0.elapsed().as_secs_f64();
     let dec_gbps = (TOTAL_BYTES as f64) / dec_elapsed / 1e9;
 
-    // ---- round-trip pass (realistic: Path B's two endpoints do one each) ----
     nonce_counter = 0;
     let t0 = Instant::now();
     for _ in 0..N_CHUNKS {
