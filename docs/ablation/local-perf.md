@@ -136,19 +136,9 @@ the gap to `cp` is the per-block hash itself, the per-checkpoint
 `posix_fadvise`, and tokio I/O scheduling overhead, which a future
 revision can pick at separately.
 
-**Why the obvious fix didn't work**: the first attempt was the
-textbook one --- move the source hash to a `tokio::task::spawn_blocking`
-and feed it 4 MiB chunks via an `mpsc::channel`. The expected win
-was the source hash overlapping with the next read+write+block-hash.
-Measured result: *slower* than the synchronous double-hash. The
-per-chunk `Vec<u8>` clone for the channel send and the channel sync
-overhead together cost more than the parallelism saved. Skipping
-the hash entirely when nothing reads it was the better lever.
-
-A useful pipelined version would need a buffer pool (e.g. `Bytes`
-with refcount) plus probably `update_rayon` to parallelise the hash
-itself across cores. That's deferred; see the
-[Open Questions](/ablation/open-questions) page.
+A pipelined version that overlaps the source hash with the next
+read+write+block-hash would need a refcounted buffer pool and
+`update_rayon`; deferred to [Open Questions](/ablation/open-questions).
 
 ## Experiment 13: One spawn_blocking for the Whole Loop
 
@@ -184,34 +174,15 @@ Linux NVMe and ~1.7x on macOS APFS for the streaming path, with no
 test regressions across the existing 14 e2e copy cases.
 
 **Why not just use `io_uring`?** `tokio-uring` requires its own
-runtime (`tokio_uring::start()`) that can't drive standard tokio
-futures; mixing it into bcmr's existing tokio runtime would
-require a major restructuring. The win this experiment captured
-(2.3x) is most of what `io_uring` would have offered on top of
-`tokio::fs`. `io_uring` remains a larger-scope follow-up; see the
-[Open Questions](/ablation/open-questions) page.
+runtime that can't drive standard tokio futures, which would mean
+a major restructuring of bcmr. This experiment's 2.3× captures
+most of what `io_uring` would have added on top of `tokio::fs`;
+the rest is tracked on the [Open Questions](/ablation/open-questions)
+page.
 
-**Remaining gap to `cp`**: ~2.5x (5.4s vs 2.2s on Linux). This is
-now the cost of:
-- The double BLAKE3 (source + per-block) since files >= 64 MiB
-  always create a session.
-- Periodic `fdatasync` at every 64 MiB checkpoint (~32 syscalls
-  for 2 GiB, each ~50 ms on this NVMe).
-- `posix_fadvise(FADV_DONTNEED)` calls for cache eviction.
-
-These are correctness features, not bugs. **cp computes no
-hashes at all, runs no fsync mid-copy, and never writes a
-session file.** The comparison is "bcmr with always-on
-BLAKE3 and crash-safe session" vs "cp's unverified fastest-
-possible path". Experiment 13's follow-up below removes this
-overhead when the user hasn't asked for it.
-
-**Update, v0.5.10 (see Experiment 16 below):** this 2.5x gap was
-almost entirely that self-imposed "auto-session for files over
-64 MiB" rule. Gating it on the user's explicit intent
-(`-C`/`-s`/`-a`) closes the gap to ~1.65x on mac. The
-correctness features are intact for anyone who actually asks
-for them.
+The v0.5.8 → v0.5.10 progression of the remaining cp-gap —
+driven by gating the session + checkpoint fsync on the user's
+explicit intent — is covered in Experiment 16 below.
 
 ---
 
@@ -262,23 +233,11 @@ releases** (2 GiB file):
 | v0.5.9 (spawn_blocking refactor, [Exp 13](#experiment-13-one-spawn-blocking-for-the-whole-loop)) | 5.38 s | 2.48x |
 | v0.5.10 (this experiment) | est. ~2.5 s | ~1.15x |
 
-**What I got wrong before**: the v0.5.4 Summary and early Local
-Perf framing treated "session for every big file" as harmless
-background bookkeeping because the bench files were 1 GiB or less
-and the session fsync was amortised. Real usage includes one-shot
-multi-GiB tarball copies where the session cost was the single
-biggest gap to cp. Credit: this was flagged in an external code
-audit.
-
 ---
 
 ## Summary
 
-Every benefit below is tied to a specific workload. If you're
-looking for an apples-to-apples comparison against a different
-workload (huge single file / cold cache / HDD / very many files
-on a slow filesystem), the [Open Questions](/ablation/open-questions)
-page lists the measurement gaps honestly.
+Each row ties the benefit to the workload it was measured on.
 
 | Decision | Measured Cost | Measured Benefit (workload) |
 |----------|-------------|-----------------|

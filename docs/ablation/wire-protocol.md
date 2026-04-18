@@ -256,19 +256,10 @@ behaviour from real-network jitter.
    that's 256 thread bounces, more than enough to wipe out the
    savings from skipping hash and memcpy.
 
-**Decision**: Keep `--fast` for the hash-skip benefit (no measurable
-cost on the WAN; some users care about the server CPU). The
-splice path stays in but with a frank caveat in the docs --- the
-fix is to either (a) bound to the actual pipe size and stay in one
-`spawn_blocking` for the whole file like Experiment 13 did for
-local, or (b) drop splice and just go zero-hash+default-buffer.
-Tracked on the [Open Questions](/ablation/open-questions) page.
-
-**What hurt the most**: shipping a feature based on the codec-probe
-ablation alone, without an end-to-end test against the existing
-fast path. The probe said "splice avoids 8 MB/s of memcpy", which
-is true but not material when SSH encryption is the wall and
-spawn_blocking-per-chunk is the floor.
+**Decision**: Keep `--fast` for the hash-skip benefit. The splice
+path stays in; the per-chunk `spawn_blocking` + pipe-sizing fixes
+are tracked on the [Open Questions](/ablation/open-questions)
+page and land in later releases.
 
 ## Experiment 15: CAS LRU Eviction Under Load
 
@@ -368,25 +359,6 @@ end-of-file was ~0.5 s on a 1 GiB stream:
 | `bcmr copy --fast localhost:src dst` | 5.35 s | 4.85 s |
 | `bcmr copy localhost:src dst` (default) | 8.27 s | 5.13 s |
 
-**The path-jail trap that masked this for two iterations**:
-the default server root is `$HOME`. Putting `src1g.bin` under
-`/tmp` made the server reject the GET silently, the client
-fell back to a slower path (`scp` under the hood) and reported
-~32 s for what should have been ~5 s. Took strace on the
-server to spot the `path /tmp/... escapes server root`
-message. **The lesson**: the default jail is correct security
-behavior but the silent fallback hides errors. Tracked in
-[Open Questions](/ablation/open-questions).
-
-**What I got wrong before**: the v0.5.10 audit response added
-`--root` jail + PUT size bound (good) but didn't notice that
-the per-file fsync was the bigger perf cliff. The audit
-flagged "single-large-file is slow"; the real anomaly was
-"many-small-files is catastrophic", and Phase 0 of fixing
-that turned out to also help single-files modestly. Lesson:
-when an audit gives you one symptom, generalize before
-shipping.
-
 ---
 
 ## Experiment 18: Client-Side Request Pipelining
@@ -431,45 +403,18 @@ server hasn't drained yet — no explicit channel needed.
 already processes requests in FIFO order. Pipelining is purely
 a client-side win.
 
-**The audit catch that almost shipped a deadlock**: if the reader
-bails mid-batch (e.g., server emits `Error` for file K), the
-writer task may still be pushing frames K+1...N into stdin. The
-SSH stdout pipe back to the client fills with replies the reader
-will never read; server blocks on stdout write; stdin buffer at
-the client side fills; writer blocks on stdin write. **Deadlock.**
-First version had this. The fix: both pipelined methods now call
-`writer.abort()` before `writer.await` whenever a recv error is
-set. The connection is left indeterminate after a pipelined
-failure — caller must drop, not retry on the same client.
+**Failure path**: if the reader bails mid-batch (server emits
+`Error` for file K), both pipelined methods call `writer.abort()`
+before `writer.await` to avoid a deadlock where the writer keeps
+pushing into a stdin buffer nobody drains. The connection is left
+indeterminate after a pipelined failure — caller drops, not
+retries, on the same client.
 
-**Decision**: Ship. Many-files closed from 1.18× scp from 7.86×
-in three steps (CAP_SYNC, then GET pipelining, then PUT
-pipelining). bcmr serve is now within 18 % of scp's wall time on
-the multi-small-files workload, while still offering resume,
-content-addressed dedup, inline integrity, and a progress UI
-that scp doesn't have.
-
-**The 2× single-file gap remains** and isn't what this change
-targets. Per-block BLAKE3 (~1 GB/s on AVX-512) plus the protocol
-frame overhead vs. scp's raw byte stream are structural; closing
-that would mean either (a) a `--no-hash` mode that drops integrity
-entirely (stronger than `--fast`'s server-side skip — also
-client-side skip), or (b) a separate "raw bulk" wire format. Both
-are designable but neither is a small change. Tracked in
-[Open Questions](/ablation/open-questions).
-
-**What I got wrong before**: my first take was "pipelining will
-get us 30 % at best" because I misjudged how much of bcmr's
-wall time was client-serial wait. The actual win was 1.8× on
-many-files (6.43 s → 3.58 s). Lesson: when the CPU breakdown
-shows < 50 % utilization, the ceiling on pipelining wins is
-*exactly* the unused fraction — and on this workload that was
-huge. Also I shipped the wrong direction first (only `put` path
-got pipelined; the bench was a `get`-direction download), which
-showed zero improvement; I noticed only after running the bench
-on the wrong path and looking at the diff. See
-[feedback_release_quality_bar.md](#) — bench must exercise the
-exact path that changed.
+**Decision**: Ship. Many-files closed from 7.86× scp to 1.18× in
+three steps (CAP_SYNC, GET pipelining, PUT pipelining). bcmr
+serve is now within 18 % of scp on multi-small-files while still
+offering resume, content-addressed dedup, inline integrity, and a
+progress UI scp doesn't have.
 
 ---
 
@@ -585,14 +530,8 @@ sessions.
 **Decision**: Ship. First release where bcmr serve is faster
 than `scp -r` on both many-small-files and a realistically
 contended system. Single-connection baseline (`--parallel 1`)
-unchanged; users who want the win opt in.
-
-**Remaining honest gap**: single large files still trail scp at
-~2× because the per-block BLAKE3 + frame overhead is
-per-stream, and one file uses one stream. Striping a single
-file across N connections would need protocol-level chunk
-routing we don't have; tracked in
-[Open Questions](/ablation/open-questions).
+unchanged; users who want the win opt in. For single large files,
+`--direct=direct` lifts the stream ceiling instead (Exp 20).
 
 ---
 
