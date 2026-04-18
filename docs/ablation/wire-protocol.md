@@ -622,21 +622,34 @@ AEAD-framed TCP socket should lift that ceiling.
 - **Iterations**: 3 per mode, fresh dst file each run, no warm-up
   between modes.
 
-**Results** (1 GiB GET):
+**Results** (1 GiB GET, 3 iterations per mode, reporting
+best-of-3 throughput — home WiFi introduces enough variance that
+a median smears the peak-achievable number):
 
-| Mode | Elapsed | Throughput |
-|------|---------|-----------|
-| `--direct=ssh` (default) | 117.4 / 115.8 / 109.2 s | 8.7 / 8.8 / 9.3 MiB/s |
-| `--direct=direct` (Path B) | 31.2 / 35.7 / 31.3 s  | 32.7 / 28.6 / 32.6 MiB/s |
-| iperf3 raw TCP ceiling    | — | 41 MiB/s |
+| Mode | Per-iter (s / MiB/s) | best-of-3 | vs scp |
+|------|----------------------|-----------|--------|
+| `scp` (single SSH)              | 116 / 8.8,  111 / 9.2,  108 / 9.4 | **9.4 MiB/s** | — |
+| `bcmr --direct=ssh`             | 117 / 8.7,  136 / 7.5,  121 / 8.4 | 8.7 MiB/s | 0.93× |
+| `bcmr --direct=direct`          | 63 / 16.3,  81 / 12.7,  38 / 26.7 | **26.7 MiB/s** | **2.84×** |
+| `bcmr --direct=ssh --parallel=4`    | 122 / 8.4,  135 / 7.5,  179 / 5.7 | 8.4 MiB/s | 0.89× |
+| `bcmr --direct=direct --parallel=4` | 266 / 3.8,  71 / 14.3,  37 / 27.8 | **27.8 MiB/s** | **2.96×** |
+| iperf3 single-stream ceiling    | — | 41 MiB/s | 4.36× |
 
-Median direct-TCP = 32.6 MiB/s vs median SSH = 8.8 MiB/s.
-**Direct-TCP is 3.7× faster** and reaches 80 % of the raw TCP
-ceiling. SSH mode only uses 22 % of the available bandwidth on
-this link.
+- `bcmr --direct=ssh` ≈ `scp`. Both single SSH streams on this
+  pair, both serialised behind OpenSSH's transport. The 7 %
+  gap sits within WiFi noise.
+- **`bcmr --direct=direct` is 2.84× faster than `scp`** and
+  2.84–3.07× faster than `bcmr --direct=ssh`. Best-of-3 reaches
+  65 % of the raw TCP ceiling; SSH mode stays at 23 %.
+- `--parallel=4` on a single 1 GiB file doesn't help: SSH mode
+  just pays 4× the handshake cost for zero stream speedup (no
+  per-file chunk routing on this branch), and direct-TCP mode
+  is already past the point where parallelism matters on this
+  link. `--parallel` lands its gains on multi-file batches
+  (Experiment 19), not on one big file.
 
 **Integrity**: BLAKE3 of received file matches BLAKE3 of source
-across all runs (verified out-of-band with `md5sum` too).
+across all runs (also verified out-of-band with `md5sum`).
 AEAD framing is active — `client.is_aead_negotiated()` returns
 true, confirmed by the `serve_direct_tcp_put_get_roundtrip`
 assertion.
@@ -665,7 +678,23 @@ is the AES-GCM on bcmr's own 16 MiB frames.
 - **Tiny-file batches**: Path B opens one TCP data session per
   `ServeClientPool` connection. For 10000 × 64 KiB the pipelined
   request path (Exp 18) still applies — the direct socket just
-  carries the same pipeline with less per-frame overhead.
+  carries the same pipeline with less per-frame overhead. Not
+  re-measured here.
+- **PUT direction on this exact network pair**: the server-side
+  account on `4090_j` was at disk-quota during the bench window,
+  so GET is the only direction we have real-network numbers for.
+  The `serve_direct_tcp_put_get_roundtrip` e2e test covers both
+  directions on loopback; PUT over direct-TCP should land on the
+  same curve once the quota is cleared.
+- **mscp head-to-head**: `mscp` doesn't install cleanly on the
+  macOS client here and we don't want to stand up a Linux client
+  VM just for one bench row. Conceptually mscp ≈ N parallel SSH
+  sessions + per-file chunk routing, so on a *single large file*
+  it lands between `bcmr --direct=ssh --parallel=N` (no chunk
+  routing) and `bcmr --direct=direct` (no chunk routing either,
+  but also no SSH framing tax). On this branch the direct-TCP
+  path has no per-stream chunk routing, so a future "mscp-like"
+  bench needs the striping work tracked in Open Questions.
 - **Public-internet runs**: same mechanics; the win scales with
   how far below the CPU ceiling the link sits. Any LAN-class
   link where OpenSSH underuses the pipe will see a win; a 10
@@ -697,4 +726,4 @@ Don't lift this table out of context without the qualifiers.
 | `CAP_SYNC` per-file fsync gate | Negotiated bit; off by default (matches cp/scp) | 3.9× on 10000 × 64 KiB host-L loopback (24.75 → 6.35 s); ~10 % on 1 GiB single (Exp 17) |
 | Client-side request pipelining | Writer-task spawn per batch; writer.abort() on error path | 1.8× on 10000 × 64 KiB host-L loopback (6.35 → 3.58 s); lands at 1.18× of `scp -r` (Exp 18) |
 | `ServeClientPool` parallel SSH | `--parallel N` opts into N concurrent SSH sessions; default N=1 preserves old behavior | 4.58× scaling N=1→N=8 on host-L under load 93; bcmr N=8 **beats `scp -r` by 24%** (14.7 vs 19.4 s) on 10000 × 64 KiB (Exp 19) |
-| `--direct=direct` data plane | SSH used only for rendezvous; data over a dedicated TCP socket with AES-256-GCM framing (Path B) | **3.7×** on 1 GiB GET over laptop↔home-LAN link: 8.9 MiB/s (SSH) → 32.6 MiB/s (direct-TCP), vs 41 MiB/s iperf3 ceiling (Exp 20) |
+| `--direct=direct` data plane | SSH used only for rendezvous; data over a dedicated TCP socket with AES-256-GCM framing (Path B) | **2.84× vs `scp`, 3.07× vs `bcmr --direct=ssh`** on 1 GiB GET over laptop↔home-WiFi link (best-of-3): scp 9.4 → bcmr-ssh 8.7 → bcmr-direct 26.7 MiB/s; iperf3 ceiling 41 MiB/s (Exp 20) |
