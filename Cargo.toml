@@ -52,6 +52,10 @@ xattr = "1.5"
 
 [dev-dependencies]
 tempfile = "3"
+# Research dep for bench/crypto_probe.rs — used to decide whether Path B
+# is worth shipping. Keep out of the main build until there's a code
+# path that actually ships encrypted direct-TCP.
+ring = "0.17"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
 xattr = "1.5"
@@ -69,3 +73,7 @@ path = "bench/compress_probe.rs"
 [[example]]
 name = "dedup_breakdown"
 path = "bench/dedup_breakdown.rs"
+
+[[example]]
+name = "crypto_probe"
+path = "bench/crypto_probe.rs"
