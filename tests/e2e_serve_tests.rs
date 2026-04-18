@@ -1063,3 +1063,111 @@ async fn serve_pool_one_bucket_error_cancels_siblings() {
     // doc comment); caller is expected to drop.
     drop(pool);
 }
+
+/// Phase 2 of the direct-TCP path: `bcmr serve --listen 127.0.0.1:0`
+/// must bind, announce its port on stdout ("LISTENING <addr>\n"), accept
+/// a raw TCP connection, and run the same protocol dispatch loop we've
+/// always run over stdin/stdout. Drives the protocol by hand (no
+/// ServeClient yet — that refactor is phase 3) so any breakage in the
+/// run_session extraction surfaces here cleanly.
+#[tokio::test]
+async fn serve_listen_tcp_handshake_and_put() {
+    use bcmr::core::protocol::{read_message, write_message, Message, PROTOCOL_VERSION};
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::net::TcpStream;
+    use tokio::process::Command;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dst = dir.path().join("tcp_roundtrip.bin");
+
+    // Spawn `bcmr serve --listen 127.0.0.1:0 --root /`. Port 0 asks the
+    // kernel for any free port; the server announces the resolved port
+    // on its stdout.
+    let exe = std::env::current_exe().unwrap();
+    let bin_name = if cfg!(windows) { "bcmr.exe" } else { "bcmr" };
+    let bin = exe.parent().unwrap().parent().unwrap().join(bin_name);
+    let mut child = Command::new(&bin)
+        .args(["serve", "--listen", "127.0.0.1:0", "--root", "/"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // First line of server stdout carries the bound address.
+    let stdout = child.stdout.take().unwrap();
+    let mut stdout = BufReader::new(stdout);
+    let mut line = String::new();
+    stdout.read_line(&mut line).await.unwrap();
+    assert!(
+        line.starts_with("LISTENING "),
+        "expected 'LISTENING <addr>' announcement, got {line:?}"
+    );
+    let addr: std::net::SocketAddr = line
+        .trim_start_matches("LISTENING ")
+        .trim()
+        .parse()
+        .expect("parseable SocketAddr in announce line");
+
+    // Open a raw TCP client and drive a minimal Hello → Welcome handshake
+    // followed by a tiny PUT to confirm the full dispatch path works.
+    let sock = TcpStream::connect(addr).await.unwrap();
+    let (reader, writer) = sock.into_split();
+    let mut reader = reader;
+    let mut writer = writer;
+
+    write_message(
+        &mut writer,
+        &Message::Hello {
+            version: PROTOCOL_VERSION,
+            caps: 0,
+        },
+    )
+    .await
+    .unwrap();
+    match read_message(&mut reader).await.unwrap().unwrap() {
+        Message::Welcome { version, .. } => {
+            assert_eq!(version, PROTOCOL_VERSION);
+        }
+        other => panic!("expected Welcome, got {other:?}"),
+    }
+
+    // Minimal PUT: 5-byte payload, one Data frame, Done, expect Ok.
+    let payload = b"hello";
+    write_message(
+        &mut writer,
+        &Message::Put {
+            path: dst.to_string_lossy().into_owned(),
+            size: payload.len() as u64,
+        },
+    )
+    .await
+    .unwrap();
+    write_message(
+        &mut writer,
+        &Message::Data {
+            payload: payload.to_vec(),
+        },
+    )
+    .await
+    .unwrap();
+    write_message(&mut writer, &Message::Done).await.unwrap();
+
+    match read_message(&mut reader).await.unwrap().unwrap() {
+        Message::Ok { hash } => {
+            assert!(hash.is_some(), "PUT reply should carry a hash");
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    // Server wrote the file; confirm contents on disk.
+    let got = std::fs::read(&dst).unwrap();
+    assert_eq!(got, payload);
+
+    // Close the client side; server's accept loop stays alive for more
+    // connections, so we kill the child explicitly.
+    drop(writer);
+    drop(reader);
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}

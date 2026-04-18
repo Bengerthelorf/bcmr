@@ -106,13 +106,71 @@ pub async fn run(root: Option<PathBuf>) -> Result<()> {
     let root = resolve_root(root)?;
     let mut stdin = io::stdin();
     let mut stdout = io::stdout();
+    // stdin/stdout mode: the Linux zero-copy splice path is valid
+    // because the writer end really is STDOUT_FILENO, which
+    // handle_get_splice_linux hardcodes.
+    run_session(&mut stdin, &mut stdout, &root, true).await
+}
 
+/// Accept one TCP connection at a time on `addr` and run a session over
+/// each. Phase 2 of the direct-TCP work: proves the dispatch loop is
+/// transport-agnostic. No rendezvous yet — operator wires client and
+/// server manually. Future rendezvous work (phase 3) will drive this
+/// from the SSH control channel.
+#[allow(dead_code)]
+pub async fn run_listen(root: Option<PathBuf>, addr: std::net::SocketAddr) -> Result<()> {
+    let root = resolve_root(root)?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let bound = listener.local_addr()?;
+    // Announce the bound port on stdout so test harnesses and
+    // rendezvous helpers can pick it up without polling. The format is
+    // stable: single line, `LISTENING <addr>\n`, followed by normal
+    // stderr logging (if any).
+    use tokio::io::AsyncWriteExt as _;
+    let mut stdout = io::stdout();
+    stdout
+        .write_all(format!("LISTENING {bound}\n").as_bytes())
+        .await?;
+    stdout.flush().await?;
+
+    loop {
+        let (stream, _peer) = listener.accept().await?;
+        let root = root.clone();
+        tokio::spawn(async move {
+            let (reader, writer) = stream.into_split();
+            let mut reader = reader;
+            let mut writer = writer;
+            // allow_splice = false: the splice fast path assumes the
+            // writer is STDOUT_FILENO. A TCP socket fd isn't stdout,
+            // so we'd have to plumb the fd through — deferred to a
+            // follow-up; the buffered path is correct and fast enough.
+            let _ = run_session(&mut reader, &mut writer, &root, false).await;
+        });
+    }
+}
+
+/// The session loop, parameterized over the underlying byte streams.
+/// Extracted from `run()` so the same logic drives stdin/stdout (the
+/// SSH-invoked case) and a TCP socket (direct-TCP mode). Does the
+/// handshake, negotiates caps, dispatches each client request to its
+/// handler, and writes replies back on `writer`. Returns when the
+/// client closes the stream or a protocol error occurs.
+async fn run_session<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    root: &Path,
+    allow_splice: bool,
+) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
     // --- Handshake ---
-    let effective_caps = match protocol::read_message(&mut stdin).await? {
+    let effective_caps = match protocol::read_message(reader).await? {
         Some(Message::Hello { version, caps }) => {
             if version != PROTOCOL_VERSION {
                 protocol::write_message(
-                    &mut stdout,
+                    writer,
                     &Message::Error {
                         message: format!(
                             "protocol version mismatch: client={version} server={PROTOCOL_VERSION}"
@@ -120,20 +178,20 @@ pub async fn run(root: Option<PathBuf>) -> Result<()> {
                     },
                 )
                 .await?;
-                stdout.flush().await?;
+                writer.flush().await?;
                 return Ok(());
             }
             SERVER_CAPS & caps
         }
         Some(other) => {
             protocol::write_message(
-                &mut stdout,
+                writer,
                 &Message::Error {
                     message: format!("expected Hello, got {other:?}"),
                 },
             )
             .await?;
-            stdout.flush().await?;
+            writer.flush().await?;
             return Ok(());
         }
         None => return Ok(()), // clean EOF before handshake
@@ -147,36 +205,42 @@ pub async fn run(root: Option<PathBuf>) -> Result<()> {
     let sync = (effective_caps & CAP_SYNC) != 0;
 
     protocol::write_message(
-        &mut stdout,
+        writer,
         &Message::Welcome {
             version: PROTOCOL_VERSION,
             caps: effective_caps,
         },
     )
     .await?;
-    stdout.flush().await?;
+    writer.flush().await?;
 
     // --- Dispatch loop ---
     loop {
-        let msg = match protocol::read_message(&mut stdin).await? {
+        let msg = match protocol::read_message(reader).await? {
             Some(m) => m,
             None => break, // clean EOF
         };
 
-        // Get writes Data+Ok directly to stdout (streaming), so it bypasses
+        // Get writes Data+Ok directly to `writer` (streaming), so it bypasses
         // the normal dispatch-loop write. All other handlers return a message
         // for the dispatch loop to write.
         let response = match msg {
             Message::Get { path, offset } => {
-                match validate_path(&path, &root) {
+                match validate_path(&path, root) {
                     Ok(p) => {
-                        if let Err(e) =
-                            handle_get(p.to_str().unwrap_or(&path), offset, algo, fast, &mut stdout)
-                                .await
+                        if let Err(e) = handle_get(
+                            p.to_str().unwrap_or(&path),
+                            offset,
+                            algo,
+                            fast,
+                            allow_splice,
+                            writer,
+                        )
+                        .await
                         {
                             eprintln!("serve: handler error: {e}");
                             protocol::write_message(
-                                &mut stdout,
+                                writer,
                                 &Message::Error {
                                     message: e.to_string(),
                                 },
@@ -186,7 +250,7 @@ pub async fn run(root: Option<PathBuf>) -> Result<()> {
                     }
                     Err(e) => {
                         protocol::write_message(
-                            &mut stdout,
+                            writer,
                             &Message::Error {
                                 message: e.to_string(),
                             },
@@ -194,14 +258,14 @@ pub async fn run(root: Option<PathBuf>) -> Result<()> {
                         .await?;
                     }
                 }
-                stdout.flush().await?;
+                writer.flush().await?;
                 continue;
             }
-            Message::Stat { path } => match validate_path(&path, &root) {
+            Message::Stat { path } => match validate_path(&path, root) {
                 Ok(p) => handle_stat(p.to_str().unwrap_or(&path)).await,
                 Err(e) => Err(e),
             },
-            Message::List { path } => match validate_path(&path, &root) {
+            Message::List { path } => match validate_path(&path, root) {
                 Ok(p) => handle_list(p.to_str().unwrap_or(&path)).await,
                 Err(e) => Err(e),
             },
@@ -209,28 +273,19 @@ pub async fn run(root: Option<PathBuf>) -> Result<()> {
                 path,
                 offset,
                 limit,
-            } => match validate_path(&path, &root) {
+            } => match validate_path(&path, root) {
                 Ok(p) => handle_hash(p.to_str().unwrap_or(&path), offset, limit).await,
                 Err(e) => Err(e),
             },
-            Message::Put { path, size } => match validate_path(&path, &root) {
-                Ok(p) => {
-                    handle_put(
-                        p.to_str().unwrap_or(&path),
-                        size,
-                        sync,
-                        &mut stdout,
-                        &mut stdin,
-                    )
-                    .await
-                }
+            Message::Put { path, size } => match validate_path(&path, root) {
+                Ok(p) => handle_put(p.to_str().unwrap_or(&path), size, sync, writer, reader).await,
                 Err(e) => Err(e),
             },
-            Message::Mkdir { path } => match validate_path(&path, &root) {
+            Message::Mkdir { path } => match validate_path(&path, root) {
                 Ok(p) => handle_mkdir(p.to_str().unwrap_or(&path)).await,
                 Err(e) => Err(e),
             },
-            Message::Resume { path } => match validate_path(&path, &root) {
+            Message::Resume { path } => match validate_path(&path, root) {
                 Ok(p) => handle_resume(p.to_str().unwrap_or(&path)).await,
                 Err(e) => Err(e),
             },
@@ -247,8 +302,8 @@ pub async fn run(root: Option<PathBuf>) -> Result<()> {
             }
         };
 
-        protocol::write_message(&mut stdout, &reply).await?;
-        stdout.flush().await?;
+        protocol::write_message(writer, &reply).await?;
+        writer.flush().await?;
     }
 
     Ok(())
@@ -342,6 +397,7 @@ async fn handle_get<W>(
     offset: u64,
     algo: CompressionAlgo,
     fast: bool,
+    allow_splice: bool,
     out: &mut W,
 ) -> Result<()>
 where
@@ -351,12 +407,18 @@ where
     // we don't have userspace bytes to feed the encoder. fall back to
     // the buffered path whenever compression is active or we're not on
     // Linux. CAP_FAST without splice still wins from skipping the hash.
+    // `allow_splice` is false when the writer isn't STDOUT_FILENO
+    // (e.g., running over a TCP socket): the splice path hardcodes
+    // the target fd.
     #[cfg(target_os = "linux")]
     {
-        if fast && algo == CompressionAlgo::None {
+        if fast && algo == CompressionAlgo::None && allow_splice {
             return handle_get_splice_linux(path, offset, out).await;
         }
     }
+    // Argument is consumed on Linux only; silence the unused warning
+    // on other platforms where the cfg block never executes.
+    let _ = allow_splice;
 
     use tokio::io::AsyncReadExt;
 

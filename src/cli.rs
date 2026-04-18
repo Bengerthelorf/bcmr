@@ -219,6 +219,15 @@ pub enum Commands {
         /// (only safe for throwaway/root accounts).
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Listen on a TCP address instead of stdin/stdout. Phase 2
+        /// of the direct-TCP work — proves the dispatch loop is
+        /// transport-agnostic. Still intended for test / dev use
+        /// only until rendezvous + auth land (see
+        /// `docs/ablation/path-b-design.md`). Format: `127.0.0.1:0`
+        /// (bind any port) or `host:port`. On bind, prints
+        /// `LISTENING <addr>\n` to stdout.
+        #[arg(long, value_name = "ADDR")]
+        listen: Option<String>,
     },
 
     /// Deploy bcmr to a remote host for serve protocol support

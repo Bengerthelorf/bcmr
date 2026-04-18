@@ -867,8 +867,15 @@ async fn main() -> Result<()> {
         }
         Commands::Init { .. } => handle_init_command(&cli.command)?,
         Commands::Update => commands::update::run()?,
-        Commands::Serve { root } => {
-            commands::serve::run(root.clone()).await?;
+        Commands::Serve { root, listen } => {
+            if let Some(addr) = listen {
+                let parsed: std::net::SocketAddr = addr.parse().map_err(|e| {
+                    anyhow::anyhow!("bcmr serve --listen: invalid address '{addr}': {e}")
+                })?;
+                commands::serve::run_listen(root.clone(), parsed).await?;
+            } else {
+                commands::serve::run(root.clone()).await?;
+            }
         }
         Commands::Deploy { target, path } => {
             let remote_path = path.as_deref().unwrap_or("~/.local/bin/bcmr");
