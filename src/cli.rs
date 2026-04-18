@@ -128,6 +128,15 @@ pub struct CopyMoveArgs {
     /// the dst client-side).
     #[arg(long, default_value_t = false)]
     pub fast: bool,
+
+    /// Data-plane transport. `ssh` (default) carries data over the SSH
+    /// channel alongside auth. `direct` uses SSH only for rendezvous,
+    /// then opens a dedicated TCP socket for data with AES-256-GCM
+    /// framing — bypasses SSH's single-stream cipher ceiling on fast
+    /// networks. Fails hard if the server doesn't advertise
+    /// CAP_DIRECT_TCP (v0.5.20+).
+    #[arg(long, default_value = "ssh")]
+    pub direct: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -438,6 +447,19 @@ impl Commands {
         caps
     }
 
+    /// Parsed value of `--direct`. "ssh" (default) runs data over the
+    /// SSH channel; "direct" triggers rendezvous + AEAD-wrapped TCP.
+    /// Unrecognised strings fall through to ssh so a typo doesn't
+    /// silently flip to the encrypted-TCP path.
+    pub fn use_direct_tcp(&self) -> bool {
+        matches!(
+            self.copy_move_args()
+                .map(|a| a.direct.as_str())
+                .unwrap_or("ssh"),
+            "direct" | "tcp" | "on"
+        )
+    }
+
     pub fn get_reflink_mode(&self) -> Option<String> {
         match self {
             Commands::Copy { reflink, .. } => reflink.clone(),
@@ -585,6 +607,7 @@ mod tests {
             jobs: None,
             compress: "auto".to_string(),
             fast: false,
+            direct: "ssh".to_string(),
         }
     }
 

@@ -650,9 +650,12 @@ async fn handle_serve_upload(
     excludes: &[regex::Regex],
     parallel: usize,
 ) -> Result<()> {
-    let mut pool = ServeClientPool::connect_with_caps(ssh_target, args.protocol_caps(), parallel)
-        .await
-        .map_err(|e| anyhow::anyhow!("serve unavailable: {}", e))?;
+    let mut pool = if args.use_direct_tcp() {
+        ServeClientPool::connect_direct_with_caps(ssh_target, args.protocol_caps(), parallel).await
+    } else {
+        ServeClientPool::connect_with_caps(ssh_target, args.protocol_caps(), parallel).await
+    }
+    .map_err(|e| anyhow::anyhow!("serve unavailable: {}", e))?;
 
     if args.is_dry_run() {
         pool.close().await?;
@@ -804,9 +807,12 @@ async fn handle_serve_download(
     excludes: &[regex::Regex],
     parallel: usize,
 ) -> Result<()> {
-    let mut pool = ServeClientPool::connect_with_caps(ssh_target, args.protocol_caps(), parallel)
-        .await
-        .map_err(|e| anyhow::anyhow!("serve unavailable: {}", e))?;
+    let mut pool = if args.use_direct_tcp() {
+        ServeClientPool::connect_direct_with_caps(ssh_target, args.protocol_caps(), parallel).await
+    } else {
+        ServeClientPool::connect_with_caps(ssh_target, args.protocol_caps(), parallel).await
+    }
+    .map_err(|e| anyhow::anyhow!("serve unavailable: {}", e))?;
 
     if args.is_dry_run() {
         pool.close().await?;

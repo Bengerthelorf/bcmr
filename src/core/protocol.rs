@@ -60,6 +60,13 @@ pub const CAP_SYNC: u8 = 0x10;
 /// old servers never expose it.
 pub const CAP_DIRECT_TCP: u8 = 0x20;
 
+/// Wrap every post-Welcome message in AES-256-GCM on the direct-TCP
+/// data plane. Server masks this off on transports that don't carry
+/// a session key (SSH control, raw listen). The Hello/Welcome handshake
+/// itself is always plain — the caps bit is what flips subsequent
+/// framing to encrypted.
+pub const CAP_AEAD: u8 = 0x40;
+
 /// Capability bits advertised in Hello/Welcome.
 ///
 /// Caps are an optional trailing byte appended after the version. A peer

@@ -193,29 +193,55 @@ that's where `--direct=plain` + (future) splice-to-TCP wins.
 
 ## Capability negotiation
 
-Old clients don't know about Path B. Forward compat goes through a
-new cap bit in Hello/Welcome:
+Two new cap bits drive Path B:
 
 ```
-CAP_DIRECT_TCP = 0x20
+CAP_DIRECT_TCP = 0x20      // client/server support rendezvous
+CAP_AEAD       = 0x40      // post-Welcome framing wraps each frame
+                           //   in AES-256-GCM (direct-TCP only)
 ```
 
-Client advertises. Server advertises. Intersection governs: if
-either side lacks the bit, server rejects `OpenDirectChannel` with
-an Error. No silent fallback to "send plaintext over SSH" or similar
-unsafe combo.
+`CAP_DIRECT_TCP` gates `OpenDirectChannel`: if either side lacks the
+bit, server rejects with an Error. `CAP_AEAD` only makes sense when a
+session key is available; the server masks it off on SSH and raw
+`--listen` transports so an unwitting client can't negotiate an
+encrypted frame format the server can't honor.
+
+Both caps take effect at the same handshake boundary: the Hello /
+Welcome exchange on the data plane happens in plain framing; every
+byte after Welcome is AEAD if `effective_caps & CAP_AEAD != 0` and
+both sides flip their state machines in lockstep.
+
+No silent fallback: if the caller asks for `--direct` and the server
+can't negotiate it, the transfer fails with a clear error rather
+than quietly downgrading to SSH.
 
 ## Code organisation
 
 ```
-src/core/transport/
-    mod.rs           trait ProtocolChannel { read_message, write_message, flush }
-    ssh.rs           SshChannel  (stdin+stdout pair, current behaviour)
-    direct_tcp.rs    TcpChannel  (owned TCP socket split halves)
+src/core/framing.rs
+    enum Framing { Plain, Aead(AeadState) }       // server-side: one per session
+    struct SendHalf, RecvHalf                     // client-side: split so a
+                                                  //   pipelined writer task can
+                                                  //   own the send counter while
+                                                  //   the reader task keeps the
+                                                  //   recv counter
 
 src/core/protocol_aead.rs
-    AeadChannel<C: ProtocolChannel>  (decorator — wraps any channel
-                                      with AES-256-GCM framing)
+    key_from_bytes, encrypt_message, decrypt_message,
+    read_encrypted_message, write_encrypted_message   // low-level primitives
+
+src/core/transport/ssh.rs
+    SshSpawn   (child + stdin + stdout, current behaviour)
+
+src/commands/serve.rs
+    handle_open_direct_channel → run_rendezvous → run_direct_session
+    run_session (plain + AEAD via &mut Framing)
+
+src/core/serve_client.rs
+    ServeClient { transport, reader, writer, tx, rx, ... }
+    promote_to_direct_tcp (SSH handshake → OpenDirectChannel →
+                           TcpStream → AuthHello → AEAD handshake)
 ```
 
 `ServeClient` holds `Box<dyn ProtocolChannel + Send>`. Handlers take

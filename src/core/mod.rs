@@ -2,6 +2,7 @@ pub mod cas;
 pub mod checksum;
 pub mod compress;
 pub mod error;
+pub mod framing;
 pub mod io;
 pub mod protocol;
 pub mod protocol_aead;

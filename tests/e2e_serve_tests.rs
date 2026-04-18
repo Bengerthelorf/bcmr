@@ -1370,6 +1370,10 @@ async fn serve_direct_tcp_put_get_roundtrip() {
     let src_hash = checksum::calculate_hash(&src).unwrap();
 
     let mut client = ServeClient::connect_direct_local().await.unwrap();
+    assert!(
+        client.is_aead_negotiated(),
+        "default direct-TCP connect must flip to AEAD framing",
+    );
     let put_hash = client
         .put(remote_dst.to_str().unwrap(), &src)
         .await
@@ -1391,4 +1395,48 @@ async fn serve_direct_tcp_put_get_roundtrip() {
     fs::write(&got_path, &got).unwrap();
     assert_eq!(checksum::calculate_hash(&got_path).unwrap(), src_hash);
     assert_eq!(checksum::calculate_hash(&remote_dst).unwrap(), src_hash);
+}
+
+/// CAP_AEAD must be masked off on the SSH transport: the server has no
+/// session key to derive the AEAD key from, so advertising the cap
+/// would be a lie that the data plane can't honor. Regression guard.
+#[tokio::test]
+async fn serve_ssh_transport_does_not_offer_cap_aead() {
+    use bcmr::core::protocol::{read_message, write_message, CAP_AEAD, PROTOCOL_VERSION};
+    use std::process::Stdio;
+
+    let exe = std::env::current_exe().unwrap();
+    let bin_name = if cfg!(windows) { "bcmr.exe" } else { "bcmr" };
+    let bin = exe.parent().unwrap().parent().unwrap().join(bin_name);
+    let mut child = tokio::process::Command::new(&bin)
+        .args(["serve", "--root", "/"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+
+    write_message(
+        &mut stdin,
+        &bcmr::core::protocol::Message::Hello {
+            version: PROTOCOL_VERSION,
+            caps: CAP_AEAD,
+        },
+    )
+    .await
+    .unwrap();
+    match read_message(&mut stdout).await.unwrap().unwrap() {
+        bcmr::core::protocol::Message::Welcome { caps, .. } => {
+            assert_eq!(
+                caps & CAP_AEAD,
+                0,
+                "SSH transport must not negotiate CAP_AEAD, got caps={caps:#x}",
+            );
+        }
+        other => panic!("expected Welcome, got {other:?}"),
+    }
+    drop(stdin);
+    let _ = child.wait().await;
 }

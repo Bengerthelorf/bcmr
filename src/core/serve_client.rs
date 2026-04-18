@@ -6,10 +6,12 @@ use tokio::process::Child;
 
 use crate::core::compress;
 use crate::core::error::BcmrError;
+use crate::core::framing::{self, RecvHalf, SendHalf};
 use crate::core::protocol::{
-    self, CompressionAlgo, ListEntry, Message, CAP_DEDUP, CAP_DIRECT_TCP, CAP_LZ4, CAP_ZSTD,
-    PROTOCOL_VERSION,
+    self, CompressionAlgo, ListEntry, Message, CAP_AEAD, CAP_DEDUP, CAP_DIRECT_TCP, CAP_LZ4,
+    CAP_ZSTD, PROTOCOL_VERSION,
 };
+use crate::core::protocol_aead::Direction;
 use crate::core::transport::ssh as ssh_transport;
 
 /// Must match `AUTH_HELLO_TAG` on the server. Domain-separates the
@@ -60,6 +62,15 @@ pub struct ServeClient {
     transport: Transport,
     reader: BoxedReader,
     writer: Option<BoxedWriter>,
+    /// Send-side framing. Plain during Hello/Welcome; may flip to
+    /// Aead after Welcome iff both peers negotiated CAP_AEAD. Held
+    /// as a separate half from `rx` so pipelined code can move the
+    /// send half into a writer task while the main task keeps
+    /// reading through `rx`. `Option` for the same reason as
+    /// `writer`: pipelined paths move it out for the duration of
+    /// the batch and restore it through `reap_writer_task`.
+    tx: Option<SendHalf>,
+    rx: RecvHalf,
     algo: CompressionAlgo,
     dedup_enabled: bool,
 }
@@ -264,6 +275,7 @@ impl ServeClient {
             }
         });
 
+        let (tx, rx) = framing::plain_halves();
         let mut client = Self {
             transport: Transport::DirectTcp {
                 ssh_control: spawn.child,
@@ -271,30 +283,50 @@ impl ServeClient {
             },
             reader: Box::new(tcp_reader),
             writer: Some(Box::new(tcp_writer)),
+            tx: Some(tx),
+            rx,
             algo: CompressionAlgo::None,
             dedup_enabled: false,
         };
 
         // Prove to the server that we learned the session key over the
         // authenticated SSH channel, then do the normal protocol
-        // handshake on the data plane.
+        // handshake on the data plane — advertising CAP_AEAD so the
+        // server upgrades framing to AES-256-GCM post-Welcome.
         let mac = *blake3::keyed_hash(&session_key, AUTH_HELLO_TAG).as_bytes();
         client.send(&Message::AuthHello { mac }).await?;
-        client.handshake(caps).await?;
+        client
+            .handshake_with_key(caps | CAP_AEAD, Some(&session_key))
+            .await?;
         Ok(client)
     }
 
     fn from_ssh_spawn(spawn: ssh_transport::SshSpawn) -> Self {
+        let (tx, rx) = framing::plain_halves();
         Self {
             transport: Transport::Ssh { child: spawn.child },
             reader: Box::new(spawn.stdout),
             writer: Some(Box::new(spawn.stdin)),
+            tx: Some(tx),
+            rx,
             algo: CompressionAlgo::None,
             dedup_enabled: false,
         }
     }
 
     async fn handshake(&mut self, caps: u8) -> Result<(), BcmrError> {
+        self.handshake_with_key(caps, None).await
+    }
+
+    /// Hello/Welcome handshake that additionally knows about a
+    /// direct-TCP session key. If CAP_AEAD ends up in the negotiated
+    /// caps AND a key was provided, framing is flipped to AEAD
+    /// immediately after Welcome — matching the server-side flip point.
+    async fn handshake_with_key(
+        &mut self,
+        caps: u8,
+        session_key: Option<&[u8; 32]>,
+    ) -> Result<(), BcmrError> {
         self.send(&Message::Hello {
             version: PROTOCOL_VERSION,
             caps,
@@ -304,8 +336,23 @@ impl ServeClient {
             Message::Welcome {
                 caps: server_caps, ..
             } => {
+                let effective = caps & server_caps;
                 self.algo = CompressionAlgo::negotiate(caps, server_caps);
-                self.dedup_enabled = (caps & server_caps & CAP_DEDUP) != 0;
+                self.dedup_enabled = (effective & CAP_DEDUP) != 0;
+                if (effective & CAP_AEAD) != 0 {
+                    let key = session_key.ok_or_else(|| {
+                        BcmrError::CryptoFailure(
+                            "server negotiated CAP_AEAD but client has no session key".into(),
+                        )
+                    })?;
+                    let (tx, rx) = framing::aead_halves(
+                        key,
+                        Direction::ClientToServer,
+                        Direction::ServerToClient,
+                    )?;
+                    self.tx = Some(tx);
+                    self.rx = rx;
+                }
                 Ok(())
             }
             Message::Error { message } => Err(BcmrError::InvalidInput(message)),
@@ -321,6 +368,15 @@ impl ServeClient {
     #[allow(dead_code)]
     pub fn negotiated_algo(&self) -> CompressionAlgo {
         self.algo
+    }
+
+    /// Tests only: did the post-Welcome framing flip to AEAD?
+    #[allow(dead_code)]
+    pub fn is_aead_negotiated(&self) -> bool {
+        matches!(
+            self.tx.as_ref(),
+            Some(framing::SendHalf::Aead { .. })
+        )
     }
 
     pub async fn stat(&mut self, path: &str) -> Result<(u64, u64, bool), BcmrError> {
@@ -455,10 +511,14 @@ impl ServeClient {
             .writer
             .as_mut()
             .ok_or_else(|| BcmrError::InvalidInput("writer already taken".into()))?;
+        let tx = self
+            .tx
+            .as_mut()
+            .ok_or_else(|| BcmrError::InvalidInput("send framing taken".into()))?;
         // Single-file put() has no batch-level progress channel; skip
         // reporting here and let the caller drive progress via their own
         // means (the single-file CLI path already owns a per-byte meter).
-        write_file_data_frames(w, data, algo, &|_| {}).await
+        write_file_data_frames(w, tx, data, algo, &|_| {}).await
     }
 
     async fn put_with_dedup(&mut self, data: &Path, size: u64) -> Result<(), BcmrError> {
@@ -509,42 +569,36 @@ impl ServeClient {
     }
 
     /// Take ownership of the write half for a pipelined operation.
-    /// Pairs with `reap_writer_task`, which puts it back (or surfaces
-    /// the writer's failure).
-    fn take_writer(&mut self) -> Result<BoxedWriter, BcmrError> {
-        self.writer
-            .take()
-            .ok_or_else(|| BcmrError::InvalidInput("writer already taken (concurrent op?)".into()))
+    /// Pairs with `reap_writer_task`, which puts both back (or surfaces
+    /// the writer's failure). The `SendHalf` goes along with the
+    /// `BoxedWriter` because AEAD framing carries a per-direction
+    /// counter that only the writer task mutates.
+    fn take_writer(&mut self) -> Result<(BoxedWriter, SendHalf), BcmrError> {
+        let writer = self.writer.take().ok_or_else(|| {
+            BcmrError::InvalidInput("writer already taken (concurrent op?)".into())
+        })?;
+        let tx = self.tx.take().ok_or_else(|| {
+            BcmrError::InvalidInput("send framing already taken (concurrent op?)".into())
+        })?;
+        Ok((writer, tx))
     }
 
-    /// Common tail for the two pipelined methods. The reader task is the
-    /// caller; the writer task was spawned by the caller right after
-    /// `take_stdin`. This helper handles the three-way join:
-    ///
-    /// - if the reader bailed mid-batch (`reader_errored`), the writer
-    ///   may still be pushing frames into a connection whose reply side
-    ///   is full — abort it before awaiting to avoid a deadlock where
-    ///   the writer blocks on stdin (because SSH socket buffers are full
-    ///   because the server is blocked on stdout because nobody is
-    ///   reading the replies anymore).
-    /// - on clean success both sides finish, we reclaim stdin, caller
-    ///   can reuse the client.
-    /// - on writer-only failure (reader clean), propagate the writer
-    ///   error — the reader saw the EOF but didn't flag it because the
-    ///   happy-path recv got the EOF *after* collecting all expected
-    ///   replies, so recv_err is `None` even though something went
-    ///   wrong upstream.
+    /// Common tail for the two pipelined methods. See the comment on
+    /// `take_writer` for the ownership contract. On clean success we
+    /// reclaim both the writer and the SendHalf so the client can be
+    /// reused for further (non-pipelined) ops.
     async fn reap_writer_task(
         &mut self,
-        writer: tokio::task::JoinHandle<Result<BoxedWriter, BcmrError>>,
+        writer: tokio::task::JoinHandle<Result<(BoxedWriter, SendHalf), BcmrError>>,
         reader_errored: bool,
     ) -> Result<(), BcmrError> {
         if reader_errored {
             writer.abort();
         }
         match writer.await {
-            Ok(Ok(writer_back)) => {
+            Ok(Ok((writer_back, tx_back))) => {
                 self.writer = Some(writer_back);
+                self.tx = Some(tx_back);
                 Ok(())
             }
             Ok(Err(writer_err)) => {
@@ -618,17 +672,17 @@ impl ServeClient {
             return Ok(Vec::new());
         }
 
-        let mut wire = self.take_writer()?;
+        let (mut wire, mut tx) = self.take_writer()?;
         let algo = self.algo;
         // Reader-side views of the input (just what on_complete needs).
         // The writer task consumes `files` so we snapshot here.
         let progress: Vec<(std::path::PathBuf, u64)> =
             files.iter().map(|f| (f.local.clone(), f.size)).collect();
 
-        let writer_task: tokio::task::JoinHandle<Result<BoxedWriter, BcmrError>> =
+        let writer_task: tokio::task::JoinHandle<Result<(BoxedWriter, SendHalf), BcmrError>> =
             tokio::spawn(async move {
                 for ft in files {
-                    protocol::write_message(
+                    tx.write_message(
                         &mut wire,
                         &Message::Put {
                             path: ft.remote,
@@ -636,10 +690,10 @@ impl ServeClient {
                         },
                     )
                     .await?;
-                    write_file_data_frames(&mut wire, &ft.local, algo, &on_chunk).await?;
-                    protocol::write_message(&mut wire, &Message::Done).await?;
+                    write_file_data_frames(&mut wire, &mut tx, &ft.local, algo, &on_chunk).await?;
+                    tx.write_message(&mut wire, &Message::Done).await?;
                 }
-                Ok(wire)
+                Ok((wire, tx))
             });
 
         let mut hashes: Vec<[u8; 32]> = Vec::with_capacity(n);
@@ -734,7 +788,7 @@ impl ServeClient {
             return Ok(());
         }
 
-        let mut wire = self.take_writer()?;
+        let (mut wire, mut tx) = self.take_writer()?;
 
         let request_paths: Vec<String> = files.iter().map(|f| f.remote.clone()).collect();
 
@@ -743,12 +797,13 @@ impl ServeClient {
         // OS pipe + SSH socket buffer with room to spare. If the buffer
         // *did* fill, write_message().await would naturally backpressure,
         // so we don't bother with an explicit channel.
-        let writer_task: tokio::task::JoinHandle<Result<BoxedWriter, BcmrError>> =
+        let writer_task: tokio::task::JoinHandle<Result<(BoxedWriter, SendHalf), BcmrError>> =
             tokio::spawn(async move {
                 for path in request_paths {
-                    protocol::write_message(&mut wire, &Message::Get { path, offset: 0 }).await?;
+                    tx.write_message(&mut wire, &Message::Get { path, offset: 0 })
+                        .await?;
                 }
-                Ok(wire)
+                Ok((wire, tx))
             });
 
         let mut recv_err: Option<BcmrError> = None;
@@ -937,13 +992,18 @@ impl ServeClient {
             .writer
             .as_mut()
             .ok_or_else(|| BcmrError::InvalidInput("connection closed".into()))?;
-        protocol::write_message(w, msg).await?;
+        let tx = self
+            .tx
+            .as_mut()
+            .ok_or_else(|| BcmrError::InvalidInput("send framing taken".into()))?;
+        tx.write_message(w, msg).await?;
         w.flush().await?;
         Ok(())
     }
 
     async fn recv(&mut self) -> Result<Message, BcmrError> {
-        protocol::read_message(&mut self.reader)
+        self.rx
+            .read_message(&mut self.reader)
             .await?
             .ok_or_else(|| BcmrError::InvalidInput("server closed connection unexpectedly".into()))
     }
@@ -1029,6 +1089,30 @@ impl ServeClientPool {
             .map(|_| {
                 let t = target.clone();
                 async move { ServeClient::connect_with_caps(&t, caps).await }
+            })
+            .collect();
+        let clients = futures::future::try_join_all(futures).await?;
+        Ok(Self { clients })
+    }
+
+    /// N parallel connections over direct-TCP with AEAD framing. Each
+    /// connection does its own SSH rendezvous (so N listeners are
+    /// opened briefly on the server during setup). Caller opts in
+    /// with `--direct`; server must advertise CAP_DIRECT_TCP or every
+    /// connection fails.
+    pub async fn connect_direct_with_caps(
+        ssh_target: &str,
+        caps: u8,
+        n: usize,
+    ) -> Result<Self, BcmrError> {
+        if n == 0 {
+            return Err(BcmrError::InvalidInput("pool size must be >= 1".into()));
+        }
+        let target = ssh_target.to_owned();
+        let futures: Vec<_> = (0..n)
+            .map(|_| {
+                let t = target.clone();
+                async move { ServeClient::connect_direct_with_caps(&t, caps).await }
             })
             .collect();
         let clients = futures::future::try_join_all(futures).await?;
@@ -1211,6 +1295,7 @@ impl ServeClientPool {
 /// can drive a progress bar. Passing a `|_| {}` no-op skips reporting.
 async fn write_file_data_frames<W>(
     writer: &mut W,
+    tx: &mut SendHalf,
     data: &Path,
     algo: CompressionAlgo,
     on_chunk: &(impl Fn(u64) + ?Sized),
@@ -1226,7 +1311,7 @@ where
             break;
         }
         let frame = compress::encode_block(algo, buf[..n].to_vec());
-        protocol::write_message(writer, &frame).await?;
+        tx.write_message(writer, &frame).await?;
         on_chunk(n as u64);
     }
     Ok(())

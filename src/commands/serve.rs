@@ -1,9 +1,11 @@
 use crate::core::cas;
 use crate::core::compress;
+use crate::core::framing::Framing;
 use crate::core::protocol::{
-    self, CompressionAlgo, ListEntry, Message, CAP_DEDUP, CAP_DIRECT_TCP, CAP_FAST, CAP_LZ4,
-    CAP_SYNC, CAP_ZSTD, PROTOCOL_VERSION,
+    self, CompressionAlgo, ListEntry, Message, CAP_AEAD, CAP_DEDUP, CAP_DIRECT_TCP, CAP_FAST,
+    CAP_LZ4, CAP_SYNC, CAP_ZSTD, PROTOCOL_VERSION,
 };
+use crate::core::protocol_aead::Direction;
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -15,7 +17,8 @@ const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
 /// with its own. CAP_FAST is always offered — the actual implementation
 /// either skips inline hashing (any platform) or also uses splice(2) on
 /// Linux. Either way the client opts in via --fast.
-const SERVER_CAPS: u8 = CAP_LZ4 | CAP_ZSTD | CAP_DEDUP | CAP_FAST | CAP_SYNC | CAP_DIRECT_TCP;
+const SERVER_CAPS: u8 =
+    CAP_LZ4 | CAP_ZSTD | CAP_DEDUP | CAP_FAST | CAP_SYNC | CAP_DIRECT_TCP | CAP_AEAD;
 
 /// Resolve the configured root jail. Explicit `--root <path>` wins;
 /// otherwise the invoking user's `$HOME` is used. A user that really
@@ -110,7 +113,9 @@ pub async fn run(root: Option<PathBuf>) -> Result<()> {
     // handle_get_splice_linux hardcodes.
     // allow_direct_tcp=true: only the stdin/stdout path (invoked by
     // sshd) is authenticated enough to escalate.
-    run_session(&mut stdin, &mut stdout, &root, true, true).await
+    // direct_tcp_key=None: SSH has no session key — CAP_AEAD is
+    // masked off on this transport.
+    run_session(&mut stdin, &mut stdout, &root, true, true, None).await
 }
 
 pub async fn run_listen(root: Option<PathBuf>, addr: std::net::SocketAddr) -> Result<()> {
@@ -153,7 +158,7 @@ pub async fn run_listen(root: Option<PathBuf>, addr: std::net::SocketAddr) -> Re
             // reason to escalate to another direct-TCP channel, and
             // allowing it would let any reachable TCP client open new
             // listeners recursively (amplification / port exhaustion).
-            let _ = run_session(&mut reader, &mut writer, &root, false, false).await;
+            let _ = run_session(&mut reader, &mut writer, &root, false, false, None).await;
         });
     }
 }
@@ -164,6 +169,7 @@ async fn run_session<R, W>(
     root: &Path,
     allow_splice: bool,
     allow_direct_tcp: bool,
+    direct_tcp_key: Option<&[u8; 32]>,
 ) -> Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -171,41 +177,50 @@ where
 {
     // Transport-dependent cap mask. Direct-TCP peers see a server that
     // doesn't advertise the escalation bit, closing the recursive-
-    // rendezvous amplification vector.
-    let offered_caps = if allow_direct_tcp {
-        SERVER_CAPS
-    } else {
-        SERVER_CAPS & !CAP_DIRECT_TCP
-    };
+    // rendezvous amplification vector. CAP_AEAD is only meaningful
+    // when a session key is available (i.e., we're on direct-TCP with
+    // a rendezvous-delivered key).
+    let mut offered_caps = SERVER_CAPS;
+    if !allow_direct_tcp {
+        offered_caps &= !CAP_DIRECT_TCP;
+    }
+    if direct_tcp_key.is_none() {
+        offered_caps &= !CAP_AEAD;
+    }
     // Rendezvous listener handles; awaited before return so a dropped
     // session cleans up anything it spun up.
     let mut rendezvous_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
-    let effective_caps = match protocol::read_message(reader).await? {
+    // Start in plain framing; flip to AEAD after Welcome if negotiated.
+    let mut framing = Framing::plain();
+
+    let effective_caps = match framing.read_message(reader).await? {
         Some(Message::Hello { version, caps }) => {
             if version != PROTOCOL_VERSION {
-                protocol::write_message(
-                    writer,
-                    &Message::Error {
-                        message: format!(
-                            "protocol version mismatch: client={version} server={PROTOCOL_VERSION}"
-                        ),
-                    },
-                )
-                .await?;
+                framing
+                    .write_message(
+                        writer,
+                        &Message::Error {
+                            message: format!(
+                                "protocol version mismatch: client={version} server={PROTOCOL_VERSION}"
+                            ),
+                        },
+                    )
+                    .await?;
                 writer.flush().await?;
                 return Ok(());
             }
             offered_caps & caps
         }
         Some(other) => {
-            protocol::write_message(
-                writer,
-                &Message::Error {
-                    message: format!("expected Hello, got {other:?}"),
-                },
-            )
-            .await?;
+            framing
+                .write_message(
+                    writer,
+                    &Message::Error {
+                        message: format!("expected Hello, got {other:?}"),
+                    },
+                )
+                .await?;
             writer.flush().await?;
             return Ok(());
         }
@@ -218,19 +233,35 @@ where
     let fast = (effective_caps & CAP_FAST) != 0;
     let sync = (effective_caps & CAP_SYNC) != 0;
     let direct_tcp = (effective_caps & CAP_DIRECT_TCP) != 0;
+    let aead = (effective_caps & CAP_AEAD) != 0;
 
-    protocol::write_message(
-        writer,
-        &Message::Welcome {
-            version: PROTOCOL_VERSION,
-            caps: effective_caps,
-        },
-    )
-    .await?;
+    framing
+        .write_message(
+            writer,
+            &Message::Welcome {
+                version: PROTOCOL_VERSION,
+                caps: effective_caps,
+            },
+        )
+        .await?;
     writer.flush().await?;
 
+    // Flip to AEAD strictly after Welcome is on the wire. Both peers
+    // derive the switchover from the same boundary: every byte after
+    // the Welcome frame is encrypted, starting with counter=0 in each
+    // direction.
+    if aead {
+        let key = direct_tcp_key
+            .expect("cap mask guarantees direct_tcp_key is Some when CAP_AEAD negotiated");
+        framing = Framing::aead_from_key(
+            key,
+            Direction::ServerToClient,
+            Direction::ClientToServer,
+        )?;
+    }
+
     loop {
-        let msg = match protocol::read_message(reader).await? {
+        let msg = match framing.read_message(reader).await? {
             Some(m) => m,
             None => break,
         };
@@ -249,27 +280,30 @@ where
                             fast,
                             allow_splice,
                             writer,
+                            &mut framing,
                         )
                         .await
                         {
                             eprintln!("serve: handler error: {e}");
-                            protocol::write_message(
+                            framing
+                                .write_message(
+                                    writer,
+                                    &Message::Error {
+                                        message: e.to_string(),
+                                    },
+                                )
+                                .await?;
+                        }
+                    }
+                    Err(e) => {
+                        framing
+                            .write_message(
                                 writer,
                                 &Message::Error {
                                     message: e.to_string(),
                                 },
                             )
                             .await?;
-                        }
-                    }
-                    Err(e) => {
-                        protocol::write_message(
-                            writer,
-                            &Message::Error {
-                                message: e.to_string(),
-                            },
-                        )
-                        .await?;
                     }
                 }
                 writer.flush().await?;
@@ -292,7 +326,17 @@ where
                 Err(e) => Err(e),
             },
             Message::Put { path, size } => match validate_path(&path, root) {
-                Ok(p) => handle_put(p.to_str().unwrap_or(&path), size, sync, writer, reader).await,
+                Ok(p) => {
+                    handle_put(
+                        p.to_str().unwrap_or(&path),
+                        size,
+                        sync,
+                        writer,
+                        reader,
+                        &mut framing,
+                    )
+                    .await
+                }
                 Err(e) => Err(e),
             },
             Message::Mkdir { path } => match validate_path(&path, root) {
@@ -331,7 +375,7 @@ where
             }
         };
 
-        protocol::write_message(writer, &reply).await?;
+        framing.write_message(writer, &reply).await?;
         writer.flush().await?;
     }
 
@@ -437,6 +481,7 @@ async fn handle_get<W>(
     fast: bool,
     allow_splice: bool,
     out: &mut W,
+    framing: &mut Framing,
 ) -> Result<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -447,15 +492,16 @@ where
     // Linux. CAP_FAST without splice still wins from skipping the hash.
     // `allow_splice` is false when the writer isn't STDOUT_FILENO
     // (e.g., running over a TCP socket): the splice path hardcodes
-    // the target fd.
+    // the target fd. AEAD also forces the buffered path — splice moves
+    // raw file bytes that skip the encrypt step.
     #[cfg(target_os = "linux")]
     {
-        if fast && algo == CompressionAlgo::None && allow_splice {
+        if fast && algo == CompressionAlgo::None && allow_splice && !framing.is_aead() {
             return handle_get_splice_linux(path, offset, out).await;
         }
     }
-    // Argument is consumed on Linux only; silence the unused warning
-    // on other platforms where the cfg block never executes.
+    // Arguments consumed on Linux only; silence unused warnings on
+    // other platforms where the cfg block never executes.
     let _ = allow_splice;
 
     use tokio::io::AsyncReadExt;
@@ -477,11 +523,11 @@ where
             h.update(&buf[..n]);
         }
         let frame = compress::encode_block(algo, buf[..n].to_vec());
-        protocol::write_message(out, &frame).await?;
+        framing.write_message(out, &frame).await?;
     }
 
     let hash = hasher.map(|h| h.finalize().to_hex().to_string());
-    protocol::write_message(out, &Message::Ok { hash }).await?;
+    framing.write_message(out, &Message::Ok { hash }).await?;
     Ok(())
 }
 
@@ -682,6 +728,7 @@ async fn handle_put<W, R>(
     sync: bool,
     out: &mut W,
     reader: &mut R,
+    framing: &mut Framing,
 ) -> Result<Message>
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -700,7 +747,7 @@ where
 
     // Peek at the first message: the client might open with HaveBlocks
     // (dedup mode) or jump straight to Data (legacy / dedup-disabled).
-    let first = protocol::read_message(reader).await?;
+    let first = framing.read_message(reader).await?;
     let mut dedup_state: Option<DedupState> = None;
     let mut next: Option<Message> = first;
 
@@ -718,7 +765,9 @@ where
                 bits[i / 8] |= 1 << (i % 8);
             }
         }
-        protocol::write_message(out, &Message::MissingBlocks { bits: bits.clone() }).await?;
+        framing
+            .write_message(out, &Message::MissingBlocks { bits: bits.clone() })
+            .await?;
         out.flush().await?;
         dedup_state = Some(DedupState {
             hashes,
@@ -732,7 +781,7 @@ where
     loop {
         let m = match msg.take() {
             Some(m) => m,
-            None => match protocol::read_message(reader).await? {
+            None => match framing.read_message(reader).await? {
                 Some(m) => m,
                 None => break,
             },
@@ -956,9 +1005,19 @@ async fn run_direct_session(
     //   allow_splice=false: TCP fd is not STDOUT_FILENO.
     //   allow_direct_tcp=false: already on direct-TCP; nesting would
     //   let the same peer open more listeners recursively.
+    //   direct_tcp_key=Some: advertise CAP_AEAD so the client may
+    //   upgrade framing post-Welcome.
     // Box::pin breaks the type-level async recursion between
     // run_session ↔ run_direct_session.
-    Box::pin(run_session(&mut reader, &mut writer, root, false, false)).await
+    Box::pin(run_session(
+        &mut reader,
+        &mut writer,
+        root,
+        false,
+        false,
+        Some(session_key),
+    ))
+    .await
 }
 
 async fn handle_resume(path: &str) -> Result<Message> {
