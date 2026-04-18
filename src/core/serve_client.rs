@@ -19,6 +19,28 @@ use crate::core::transport::ssh as ssh_transport;
 /// might compute over the same session key.
 const AUTH_HELLO_TAG: &[u8] = b"bcmr-direct-v1";
 
+/// Ask `ssh -G <target>` whether the config resolves to a ProxyJump
+/// hop. Used only for error diagnostics on direct-TCP dial failures:
+/// ProxyJump'd targets reach the server through a hop that plain TCP
+/// can't follow, so we point the user at `--direct=ssh` rather than
+/// at a generic timeout message.
+fn ssh_target_uses_proxyjump(target: &str) -> bool {
+    let Ok(out) = std::process::Command::new("ssh")
+        .args(["-G", target])
+        .output()
+    else {
+        return false;
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    stdout.lines().any(|line| {
+        let mut it = line.split_whitespace();
+        matches!(
+            (it.next(), it.next()),
+            (Some("proxyjump"), Some(v)) if v != "none"
+        )
+    })
+}
+
 type BoxedReader = Box<dyn AsyncRead + Send + Unpin>;
 type BoxedWriter = Box<dyn AsyncWrite + Send + Unpin>;
 
@@ -136,7 +158,7 @@ impl ServeClient {
         caps: u8,
     ) -> Result<Self, BcmrError> {
         let spawn = ssh_transport::spawn_remote(ssh_target).await?;
-        Self::promote_to_direct_tcp(spawn, caps).await
+        Self::promote_to_direct_tcp(spawn, caps, Some(ssh_target)).await
     }
 
     /// Test helper: local `bcmr serve` subprocess → rendezvous → TCP.
@@ -144,7 +166,7 @@ impl ServeClient {
     pub async fn connect_direct_local_with_caps(caps: u8) -> Result<Self, BcmrError> {
         let bcmr_path = Self::locate_bcmr_binary()?;
         let spawn = ssh_transport::spawn_local(&bcmr_path).await?;
-        Self::promote_to_direct_tcp(spawn, caps).await
+        Self::promote_to_direct_tcp(spawn, caps, None).await
     }
 
     #[allow(dead_code)]
@@ -193,6 +215,7 @@ impl ServeClient {
     async fn promote_to_direct_tcp(
         mut spawn: ssh_transport::SshSpawn,
         caps: u8,
+        ssh_target: Option<&str>,
     ) -> Result<Self, BcmrError> {
         use tokio::io::{AsyncWriteExt as _, AsyncReadExt as _};
 
@@ -252,7 +275,26 @@ impl ServeClient {
         // Open the data channel before releasing SSH stdin, so the
         // server's rendezvous listener still has the connection in its
         // backlog if EOF on SSH triggers any cascade timing.
-        let stream = tokio::net::TcpStream::connect(&addr).await?;
+        let stream = match tokio::net::TcpStream::connect(&addr).await {
+            Ok(s) => s,
+            Err(e) => {
+                let mut msg = format!(
+                    "direct-TCP dial to {addr} failed: {e}. The server bound its \
+                     rendezvous listener on the interface where SSH arrived, but \
+                     this client can't reach that address."
+                );
+                if let Some(target) = ssh_target {
+                    if ssh_target_uses_proxyjump(target) {
+                        msg.push_str(
+                            " This SSH target uses ProxyJump — when the jump host is on \
+                             a different subnet from the client, direct-TCP rendezvous is \
+                             not reachable. Use --direct=ssh for this target.",
+                        );
+                    }
+                }
+                return Err(BcmrError::InvalidInput(msg));
+            }
+        };
         let (tcp_reader, tcp_writer) = stream.into_split();
 
         // Drop SSH stdin to EOF the control session; remote exits its
@@ -1124,6 +1166,21 @@ impl ServeClientPool {
                 let t = target.clone();
                 async move { ServeClient::connect_direct_with_caps(&t, caps).await }
             })
+            .collect();
+        let clients = futures::future::try_join_all(futures).await?;
+        Ok(Self { clients })
+    }
+
+    /// Test helper: N parallel direct-TCP connections to local
+    /// `bcmr serve` subprocesses. Each element does its own SSH
+    /// handshake + rendezvous + TCP dial on loopback.
+    #[allow(dead_code)]
+    pub async fn connect_direct_local(n: usize) -> Result<Self, BcmrError> {
+        if n == 0 {
+            return Err(BcmrError::InvalidInput("pool size must be >= 1".into()));
+        }
+        let futures: Vec<_> = (0..n)
+            .map(|_| ServeClient::connect_direct_local())
             .collect();
         let clients = futures::future::try_join_all(futures).await?;
         Ok(Self { clients })

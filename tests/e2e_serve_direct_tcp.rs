@@ -9,10 +9,11 @@ mod common;
 
 use common::{bytes_to_hex, create_file};
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use bcmr::core::checksum;
-use bcmr::core::serve_client::ServeClient;
+use bcmr::core::serve_client::{FileTransfer, ServeClient, ServeClientPool};
 
 /// OpenDirectChannel → DirectChannelReady: reply addr is reachable, key
 /// is random, two requests get two different keys.
@@ -367,4 +368,172 @@ async fn serve_ssh_transport_does_not_offer_cap_aead() {
     }
     drop(stdin);
     let _ = child.wait().await;
+}
+
+/// Pipelined PUT of many small files over direct-TCP. Exercises the
+/// split SendHalf / RecvHalf framing: the writer task owns the send
+/// counter + TCP write half, the reader task owns the recv counter +
+/// TCP read half. Must produce byte-identical dst files with correct
+/// hashes returned in input order.
+#[tokio::test]
+async fn serve_direct_tcp_pipelined_put_many_files_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::create_dir_all(&dst_dir).unwrap();
+
+    let n = 20usize;
+    let mut srcs: Vec<PathBuf> = Vec::with_capacity(n);
+    let mut expected: Vec<String> = Vec::with_capacity(n);
+    for i in 0..n {
+        let p = src_dir.join(format!("p_{i}.bin"));
+        create_file(&p, 4096 + i * 64);
+        expected.push(checksum::calculate_hash(&p).unwrap());
+        srcs.push(p);
+    }
+
+    let files: Vec<FileTransfer> = srcs
+        .iter()
+        .enumerate()
+        .map(|(i, p)| FileTransfer {
+            remote: dst_dir
+                .join(format!("p_{i}.bin"))
+                .to_string_lossy()
+                .to_string(),
+            local: p.clone(),
+            size: p.metadata().unwrap().len(),
+        })
+        .collect();
+
+    let mut client = ServeClient::connect_direct_local().await.unwrap();
+    assert!(
+        client.is_aead_negotiated(),
+        "direct-TCP must flip to AEAD; pipelining must carry the split send/recv halves through it",
+    );
+    let hashes = client
+        .pipelined_put_files(files, |_n| {}, |_idx, _path: &Path, _size| {})
+        .await
+        .unwrap();
+
+    assert_eq!(hashes.len(), n);
+    for (i, h) in hashes.iter().enumerate() {
+        assert_eq!(bytes_to_hex(h), expected[i]);
+        let dst = dst_dir.join(format!("p_{i}.bin"));
+        assert_eq!(checksum::calculate_hash(&dst).unwrap(), expected[i]);
+    }
+    client.close().await.unwrap();
+}
+
+/// Pipelined GET of many small files over direct-TCP. Mirror of the
+/// PUT test above. Proves the AEAD recv counter advances correctly
+/// across the demultiplexed Data*/Ok stream.
+#[tokio::test]
+async fn serve_direct_tcp_pipelined_get_many_files_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::create_dir_all(&dst_dir).unwrap();
+
+    let n = 20usize;
+    let mut srcs: Vec<PathBuf> = Vec::with_capacity(n);
+    let mut expected: Vec<String> = Vec::with_capacity(n);
+    for i in 0..n {
+        let p = src_dir.join(format!("g_{i}.bin"));
+        create_file(&p, 4096 + i * 64);
+        expected.push(checksum::calculate_hash(&p).unwrap());
+        srcs.push(p);
+    }
+
+    let files: Vec<FileTransfer> = srcs
+        .iter()
+        .enumerate()
+        .map(|(i, p)| FileTransfer {
+            remote: p.to_string_lossy().to_string(),
+            local: dst_dir.join(format!("g_{i}.bin")),
+            size: p.metadata().unwrap().len(),
+        })
+        .collect();
+
+    let mut client = ServeClient::connect_direct_local().await.unwrap();
+    assert!(client.is_aead_negotiated());
+    client
+        .pipelined_get_files(
+            files,
+            false,
+            |_idx, _path: &Path, _size| {},
+            |_n| {},
+        )
+        .await
+        .unwrap();
+    client.close().await.unwrap();
+
+    for (i, expected_hash) in expected.iter().enumerate() {
+        let dst = dst_dir.join(format!("g_{i}.bin"));
+        assert_eq!(&checksum::calculate_hash(&dst).unwrap(), expected_hash);
+    }
+}
+
+/// ServeClientPool with N=4 direct-TCP connections: four independent
+/// rendezvous + TCP + AEAD sessions running concurrently, files
+/// round-robin'd across them. Proves the pool layer is transport-
+/// agnostic — every bucket flips to its own AEAD state and the
+/// striped scatter/gather still works.
+#[tokio::test]
+async fn serve_direct_tcp_pool_striped_put_n4_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::create_dir_all(&dst_dir).unwrap();
+
+    let n = 40usize;
+    let mut srcs: Vec<PathBuf> = Vec::with_capacity(n);
+    let mut expected: Vec<String> = Vec::with_capacity(n);
+    for i in 0..n {
+        let p = src_dir.join(format!("s_{i}.bin"));
+        create_file(&p, 512 + i * 16);
+        expected.push(checksum::calculate_hash(&p).unwrap());
+        srcs.push(p);
+    }
+
+    let files: Vec<FileTransfer> = srcs
+        .iter()
+        .enumerate()
+        .map(|(i, p)| FileTransfer {
+            remote: dst_dir
+                .join(format!("s_{i}.bin"))
+                .to_string_lossy()
+                .to_string(),
+            local: p.clone(),
+            size: p.metadata().unwrap().len(),
+        })
+        .collect();
+
+    let mut pool = ServeClientPool::connect_direct_local(4).await.unwrap();
+    assert_eq!(pool.len(), 4);
+
+    let received = Arc::new(Mutex::new(0u64));
+    let recv_c = Arc::clone(&received);
+    let hashes = pool
+        .pipelined_put_files_striped(
+            files,
+            move |n| {
+                *recv_c.lock().unwrap() += n;
+            },
+            |_idx, _path: &Path, _size| {},
+        )
+        .await
+        .unwrap();
+    pool.close().await.unwrap();
+
+    assert_eq!(hashes.len(), n);
+    for (i, h) in hashes.iter().enumerate() {
+        assert_eq!(bytes_to_hex(h), expected[i]);
+        let dst = dst_dir.join(format!("s_{i}.bin"));
+        assert_eq!(checksum::calculate_hash(&dst).unwrap(), expected[i]);
+    }
+    let total_expected: u64 = (0..n).map(|i| (512 + i * 16) as u64).sum();
+    assert_eq!(*received.lock().unwrap(), total_expected);
 }

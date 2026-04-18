@@ -619,8 +619,18 @@ pub async fn write_message<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     msg: &Message,
 ) -> io::Result<()> {
-    let frame = encode_message(msg);
-    writer.write_all(&frame).await
+    // DirectChannelReady carries the rendezvous session key. Allocate
+    // its encoded frame inside Zeroizing so the plaintext key doesn't
+    // linger in heap memory after the write completes. Zeroize is only
+    // a defense-in-depth measure here — the session key already travels
+    // under the authenticated, encrypted SSH channel.
+    if matches!(msg, Message::DirectChannelReady { .. }) {
+        let frame = zeroize::Zeroizing::new(encode_message(msg));
+        writer.write_all(&frame).await
+    } else {
+        let frame = encode_message(msg);
+        writer.write_all(&frame).await
+    }
 }
 
 /// Read a framed message from an async reader.
