@@ -174,7 +174,13 @@ pub enum Commands {
         #[arg(long, num_args = 0..=1, default_missing_value = "auto")]
         sparse: Option<String>,
 
-        /// Number of parallel SCP transfers
+        /// Number of parallel connections. On the bcmr serve fast path,
+        /// opens N SSH sessions and stripes files round-robin across
+        /// them — each session has its own cipher stream so this scales
+        /// near-linearly until NIC/disk saturate. On the legacy SCP
+        /// fallback path, the same flag controls parallel per-file SCP
+        /// workers. Default: 1 for serve, `scp.parallel_transfers` (4)
+        /// for SCP fallback.
         #[arg(short = 'P', long)]
         parallel: Option<usize>,
     },

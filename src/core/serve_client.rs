@@ -791,6 +791,15 @@ impl ServeClient {
         Ok(())
     }
 
+    /// Hook for the pool's `close`: drop stdin + wait without consuming
+    /// self, so the pool can drive the same shutdown across N clients
+    /// via `&mut self` iteration instead of by-value consumption.
+    async fn close_in_place(&mut self) -> Result<(), BcmrError> {
+        self.stdin.take();
+        let _ = self.child.wait().await;
+        Ok(())
+    }
+
     async fn send(&mut self, msg: &Message) -> Result<(), BcmrError> {
         let stdin = self
             .stdin
@@ -812,6 +821,225 @@ impl ServeClient {
 impl Drop for ServeClient {
     fn drop(&mut self) {
         let _ = self.child.start_kill();
+    }
+}
+
+/// A pool of N parallel `ServeClient` connections to the same remote.
+///
+/// Rationale: SSH gives us one cipher stream per TCP connection. AES-NI
+/// tops out at ~500 MB/s/core; ChaCha20 at ~200-500. A single
+/// `ServeClient` is therefore wall-clocked by a single crypto thread on
+/// the server and another on the client. Opening N connections
+/// side-by-side gives us N independent cipher streams → up to N× the
+/// crypto ceiling, until the NIC, disk, or per-file syscall overhead
+/// takes over. This is the `mscp`-style "just open more ssh" trick, no
+/// protocol change required.
+///
+/// The pool exposes "striped" variants of the pipelined batch methods:
+/// the input file list is partitioned round-robin across the N clients
+/// and each client's work runs concurrently via `futures::try_join_all`
+/// on the caller's task (no `tokio::spawn` here — the individual
+/// clients' writer tasks already use spawn internally).
+///
+/// Callbacks given to the pool must be `Fn + Send + Sync + Clone +
+/// 'static` because they're cloned into each client's call and invoked
+/// from multiple tasks. The ordering guarantee from single-client
+/// pipelining (on_complete fires in input-index order) is **dropped**
+/// for the pool: completions now arrive in whatever order the N clients
+/// finish. PUT hashes are still returned in input order — the pool
+/// re-assembles them from each bucket's original indices.
+pub struct ServeClientPool {
+    clients: Vec<ServeClient>,
+}
+
+impl ServeClientPool {
+    /// Open N parallel SSH connections to the same target. All N
+    /// connections do their own SSH handshake in parallel; total
+    /// handshake latency ≈ single-connection (not N× because they
+    /// concurrent). `caps` is the same byte on every connection — no
+    /// per-connection capability splitting.
+    pub async fn connect_with_caps(
+        ssh_target: &str,
+        caps: u8,
+        n: usize,
+    ) -> Result<Self, BcmrError> {
+        if n == 0 {
+            return Err(BcmrError::InvalidInput("pool size must be >= 1".into()));
+        }
+        let target = ssh_target.to_owned();
+        let futures: Vec<_> = (0..n)
+            .map(|_| {
+                let t = target.clone();
+                async move { ServeClient::connect_with_caps(&t, caps).await }
+            })
+            .collect();
+        let clients = futures::future::try_join_all(futures).await?;
+        Ok(Self { clients })
+    }
+
+    /// Test helper: N parallel local `bcmr serve` subprocesses. Same
+    /// pattern as `ServeClient::connect_local` but for the pool.
+    #[allow(dead_code)]
+    pub async fn connect_local(n: usize) -> Result<Self, BcmrError> {
+        if n == 0 {
+            return Err(BcmrError::InvalidInput("pool size must be >= 1".into()));
+        }
+        let futures: Vec<_> = (0..n).map(|_| ServeClient::connect_local()).collect();
+        let clients = futures::future::try_join_all(futures).await?;
+        Ok(Self { clients })
+    }
+
+    /// Number of active connections. Effective pool size = min(N,
+    /// files.len()) on a given batch; see the `_striped` methods.
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.clients.len()
+    }
+
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.clients.is_empty()
+    }
+
+    /// Access the first (always present) client. Useful for ops that
+    /// don't benefit from striping: single-file `put()` with dedup
+    /// pre-flight, `stat`, `list`, `mkdir` — all one-shot round trips
+    /// where running them on multiple connections just wastes
+    /// handshakes. The pool always has at least one client (we check
+    /// in `connect_with_caps`).
+    pub fn first_mut(&mut self) -> &mut ServeClient {
+        &mut self.clients[0]
+    }
+
+    /// Directory creation stays on client[0] because ordering between
+    /// parent mkdir and child mkdir matters; round-tripping across N
+    /// connections would add complexity for work that's already cheap
+    /// (one mkdir round trip per dir, ~2 ms on LAN).
+    pub async fn mkdir(&mut self, path: &str) -> Result<(), BcmrError> {
+        self.clients[0].mkdir(path).await
+    }
+
+    /// Stripe `files` round-robin across the pool's clients and run
+    /// each client's `pipelined_put_files` concurrently. Returns PUT
+    /// hashes in *input* order (not completion order — we re-assemble
+    /// from each bucket's saved indices).
+    pub async fn pipelined_put_files_striped<FChunk, FComplete>(
+        &mut self,
+        files: Vec<FileTransfer>,
+        on_chunk: FChunk,
+        on_complete: FComplete,
+    ) -> Result<Vec<[u8; 32]>, BcmrError>
+    where
+        FChunk: Fn(u64) + Send + Sync + Clone + 'static,
+        FComplete: Fn(usize, &Path, u64) + Send + Sync + Clone + 'static,
+    {
+        let n_files = files.len();
+        if n_files == 0 {
+            return Ok(Vec::new());
+        }
+        let n_clients = self.clients.len().min(n_files);
+
+        // Round-robin partition. Each bucket keeps the original indices
+        // so hashes can be re-scattered into input order at the end.
+        let mut buckets: Vec<(Vec<usize>, Vec<FileTransfer>)> =
+            (0..n_clients).map(|_| (Vec::new(), Vec::new())).collect();
+        for (i, ft) in files.into_iter().enumerate() {
+            let b = &mut buckets[i % n_clients];
+            b.0.push(i);
+            b.1.push(ft);
+        }
+
+        let futs = self.clients.iter_mut().take(n_clients).zip(buckets).map(
+            |(client, (indices, bucket_files))| {
+                let on_chunk_c = on_chunk.clone();
+                let on_complete_c = on_complete.clone();
+                let indices_for_cb = indices.clone();
+                async move {
+                    let hashes = client
+                        .pipelined_put_files(
+                            bucket_files,
+                            on_chunk_c,
+                            move |local_idx, path, size| {
+                                let orig_idx = indices_for_cb[local_idx];
+                                on_complete_c(orig_idx, path, size);
+                            },
+                        )
+                        .await?;
+                    Ok::<(Vec<usize>, Vec<[u8; 32]>), BcmrError>((indices, hashes))
+                }
+            },
+        );
+
+        let results = futures::future::try_join_all(futs).await?;
+
+        let mut out: Vec<Option<[u8; 32]>> = (0..n_files).map(|_| None).collect();
+        for (indices, hashes) in results {
+            for (idx, hash) in indices.into_iter().zip(hashes.into_iter()) {
+                out[idx] = Some(hash);
+            }
+        }
+        Ok(out
+            .into_iter()
+            .map(|h| h.expect("every slot filled"))
+            .collect())
+    }
+
+    /// Mirror of `pipelined_put_files_striped` for the download direction.
+    pub async fn pipelined_get_files_striped<FStart, FChunk>(
+        &mut self,
+        files: Vec<FileTransfer>,
+        sync_after_each: bool,
+        on_file_start: FStart,
+        on_chunk: FChunk,
+    ) -> Result<(), BcmrError>
+    where
+        FStart: Fn(usize, &Path, u64) + Send + Sync + Clone + 'static,
+        FChunk: Fn(u64) + Send + Sync + Clone + 'static,
+    {
+        let n_files = files.len();
+        if n_files == 0 {
+            return Ok(());
+        }
+        let n_clients = self.clients.len().min(n_files);
+
+        let mut buckets: Vec<(Vec<usize>, Vec<FileTransfer>)> =
+            (0..n_clients).map(|_| (Vec::new(), Vec::new())).collect();
+        for (i, ft) in files.into_iter().enumerate() {
+            let b = &mut buckets[i % n_clients];
+            b.0.push(i);
+            b.1.push(ft);
+        }
+
+        let futs = self.clients.iter_mut().take(n_clients).zip(buckets).map(
+            |(client, (indices, bucket_files))| {
+                let on_start_c = on_file_start.clone();
+                let on_chunk_c = on_chunk.clone();
+                async move {
+                    client
+                        .pipelined_get_files(
+                            bucket_files,
+                            sync_after_each,
+                            move |local_idx, path, size| {
+                                let orig_idx = indices[local_idx];
+                                on_start_c(orig_idx, path, size);
+                            },
+                            on_chunk_c,
+                        )
+                        .await
+                }
+            },
+        );
+
+        futures::future::try_join_all(futs).await?;
+        Ok(())
+    }
+
+    /// Cleanly close all N connections.
+    pub async fn close(mut self) -> Result<(), BcmrError> {
+        let futs = self.clients.iter_mut().map(|c| c.close_in_place());
+        let _ = futures::future::join_all(futs).await;
+        self.clients.clear();
+        Ok(())
     }
 }
 

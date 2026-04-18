@@ -2,7 +2,7 @@ use crate::cli::Commands;
 use crate::config::CONFIG;
 use crate::core::error::BcmrError;
 use crate::core::remote::{self, parse_remote_path, RemotePath};
-use crate::core::serve_client::{FileTransfer, ServeClient};
+use crate::core::serve_client::{FileTransfer, ServeClientPool};
 use crate::ui::progress::ProgressRenderer;
 use crate::ui::runner::ProgressRunner;
 use crate::ui::utils::format_bytes;
@@ -273,14 +273,18 @@ pub async fn handle_remote_copy(
     remote::validate_ssh_connection(&check_target).await?;
 
     let parallel = args.get_parallel().unwrap_or(CONFIG.scp.parallel_transfers);
+    // Serve-transport pool size: only opens multiple SSH connections when
+    // the user explicitly asked for it via --parallel. Defaulting to 1
+    // keeps small batches from paying N× handshake latency for no reason.
+    let serve_parallel = args.get_parallel().unwrap_or(1).max(1);
 
     // Try bcmr serve protocol first — much faster than per-file SSH.
     // Falls back silently to legacy SSH if remote doesn't have bcmr.
     let ssh_target = check_target.ssh_target();
     let serve_result = if let Some(ref rdest) = remote_dest {
-        handle_serve_upload(args, sources, rdest, &ssh_target, excludes).await
+        handle_serve_upload(args, sources, rdest, &ssh_target, excludes, serve_parallel).await
     } else {
-        handle_serve_download(args, sources, dest, &ssh_target, excludes).await
+        handle_serve_download(args, sources, dest, &ssh_target, excludes, serve_parallel).await
     };
 
     match serve_result {
@@ -604,19 +608,25 @@ async fn handle_remote_download(
 // ===== Serve-based transfers =====
 
 /// Upload files via bcmr serve protocol. Returns Err if serve is unavailable.
+///
+/// `parallel` controls how many SSH connections the pool opens. Each
+/// connection has its own cipher stream, so on multi-core hardware
+/// this scales near-linearly until the NIC or disk saturates. N=1 is
+/// the default and identical in behavior to pre-v0.5.17.
 async fn handle_serve_upload(
     args: &Commands,
     sources: &[PathBuf],
     rdest: &RemotePath,
     ssh_target: &str,
     excludes: &[regex::Regex],
+    parallel: usize,
 ) -> Result<()> {
-    let mut client = ServeClient::connect_with_caps(ssh_target, args.protocol_caps())
+    let mut pool = ServeClientPool::connect_with_caps(ssh_target, args.protocol_caps(), parallel)
         .await
         .map_err(|e| anyhow::anyhow!("serve unavailable: {}", e))?;
 
     if args.is_dry_run() {
-        client.close().await?;
+        pool.close().await?;
         return Err(anyhow::anyhow!("serve: dry-run fallback to legacy"));
     }
 
@@ -648,6 +658,10 @@ async fn handle_serve_upload(
             continue;
         }
         if src.is_file() {
+            // Single-file uploads stay on the first connection so the
+            // dedup pre-flight (HaveBlocks/MissingBlocks round trip) can
+            // fire. Striping a single file across N connections would
+            // need protocol-level chunk routing we don't have.
             let remote_path = if multi_source || rdest.path.ends_with('/') {
                 format!(
                     "{}/{}",
@@ -659,7 +673,7 @@ async fn handle_serve_upload(
             };
             let size = src.metadata()?.len();
             (runner.file_callback())(&src.file_name().unwrap_or_default().to_string_lossy(), size);
-            let server_hash = client.put(&remote_path, src).await?;
+            let server_hash = pool.first_mut().put(&remote_path, src).await?;
             if args.is_verify() {
                 let p = src.to_path_buf();
                 let local_hash =
@@ -667,22 +681,22 @@ async fn handle_serve_upload(
                         .await??;
                 let server_hex: String = server_hash.iter().map(|b| format!("{:02x}", b)).collect();
                 if server_hex != local_hash {
-                    client.close().await?;
+                    pool.close().await?;
                     return runner.finish_err(format!("hash mismatch for {}", src.display()));
                 }
             }
             (runner.inc_callback())(size);
         } else if src.is_dir() && args.is_recursive() {
-            serve_upload_dir(&mut client, src, rdest, &runner, excludes, args.is_verify()).await?;
+            serve_upload_dir(&mut pool, src, rdest, &runner, excludes, args.is_verify()).await?;
         }
     }
 
-    client.close().await?;
+    pool.close().await?;
     runner.finish_ok()
 }
 
 async fn serve_upload_dir(
-    client: &mut ServeClient,
+    pool: &mut ServeClientPool,
     local_dir: &std::path::Path,
     remote_base: &RemotePath,
     runner: &ProgressRunner,
@@ -691,13 +705,14 @@ async fn serve_upload_dir(
 ) -> Result<()> {
     let dir_name = local_dir.file_name().unwrap_or_default().to_string_lossy();
     let remote_dir = format!("{}/{}", remote_base.path, dir_name);
-    client.mkdir(&remote_dir).await?;
+    pool.mkdir(&remote_dir).await?;
 
     // Two-pass: mkdir all subdirectories first (cheap, must be sequential
     // so parents exist before children), then batch-pipeline all file
-    // PUTs through pipelined_put_files. The single-file `client.put()`
-    // path is one full RTT per file; for many small files the cumulative
-    // RTT dominates and pipelining hides it.
+    // PUTs through the pool's striped method. With pool size > 1 the
+    // files are round-robin partitioned across the N connections and
+    // each connection runs its own pipeline concurrently, giving us up
+    // to N× the crypto throughput ceiling.
     let mut files_to_put: Vec<FileTransfer> = Vec::new();
     for entry in crate::core::traversal::walk(local_dir, true, false, 1, excludes) {
         let entry = entry?;
@@ -705,7 +720,7 @@ async fn serve_upload_dir(
         let rel = path.strip_prefix(local_dir)?;
         let remote_path = format!("{}/{}", remote_dir, rel.to_string_lossy());
         if path.is_dir() {
-            client.mkdir(&remote_path).await?;
+            pool.mkdir(&remote_path).await?;
         } else if path.is_file() {
             files_to_put.push(FileTransfer {
                 remote: remote_path,
@@ -716,15 +731,15 @@ async fn serve_upload_dir(
     }
 
     // Snapshot local paths up-front only when we actually need them
-    // (--verify is off by default). pipelined_put_files moves the input
-    // vec into its writer task so the snapshot has to happen here.
+    // (--verify is off by default). The pool's striped PUT moves files
+    // into per-bucket writer tasks, so we snapshot before handing over.
     let verify_inputs: Option<Vec<PathBuf>> =
         verify.then(|| files_to_put.iter().map(|f| f.local.clone()).collect());
 
     let file_cb = runner.file_callback();
     let inc_for_chunks = runner.inc_callback();
-    let server_hashes = client
-        .pipelined_put_files(files_to_put, inc_for_chunks, |_idx, path, size| {
+    let server_hashes = pool
+        .pipelined_put_files_striped(files_to_put, inc_for_chunks, move |_idx, path, size| {
             file_cb(
                 &path.file_name().unwrap_or_default().to_string_lossy(),
                 size,
@@ -748,19 +763,24 @@ async fn serve_upload_dir(
 }
 
 /// Download files via bcmr serve protocol. Returns Err if serve is unavailable.
+///
+/// `parallel` controls how many SSH connections the pool opens. N=1
+/// preserves pre-v0.5.17 behavior; N>1 stripes files round-robin
+/// across connections for N× crypto throughput until NIC/disk saturates.
 async fn handle_serve_download(
     args: &Commands,
     sources: &[PathBuf],
     dest: &std::path::Path,
     ssh_target: &str,
     excludes: &[regex::Regex],
+    parallel: usize,
 ) -> Result<()> {
-    let mut client = ServeClient::connect_with_caps(ssh_target, args.protocol_caps())
+    let mut pool = ServeClientPool::connect_with_caps(ssh_target, args.protocol_caps(), parallel)
         .await
         .map_err(|e| anyhow::anyhow!("serve unavailable: {}", e))?;
 
     if args.is_dry_run() {
-        client.close().await?;
+        pool.close().await?;
         return Err(anyhow::anyhow!("serve: dry-run fallback to legacy"));
     }
 
@@ -780,9 +800,11 @@ async fn handle_serve_download(
         }
         let src_str = src.to_string_lossy();
         if let Some(rp) = parse_remote_path(&src_str) {
-            let (size, _mtime, is_dir) = client.stat(&rp.path).await?;
+            // Stat/list run on a single connection (no parallelism win for
+            // one-shot protocol round trips). Use pool.first_mut().
+            let (size, _mtime, is_dir) = pool.first_mut().stat(&rp.path).await?;
             if is_dir && args.is_recursive() {
-                let entries = client.list(&rp.path).await?;
+                let entries = pool.first_mut().list(&rp.path).await?;
                 let dir_name = rp.path.rsplit('/').next().unwrap_or(&rp.path);
                 let local_base = dest.join(dir_name);
                 items.push(DownloadItem {
@@ -859,20 +881,19 @@ async fn handle_serve_download(
     let file_cb = runner.file_callback();
     let inc = runner.inc_callback();
     let sync = args.is_sync();
-    client
-        .pipelined_get_files(
-            files_to_get,
-            sync,
-            |_idx, path, size| {
-                file_cb(
-                    &path.file_name().unwrap_or_default().to_string_lossy(),
-                    size,
-                );
-            },
-            inc,
-        )
-        .await?;
+    pool.pipelined_get_files_striped(
+        files_to_get,
+        sync,
+        move |_idx, path, size| {
+            file_cb(
+                &path.file_name().unwrap_or_default().to_string_lossy(),
+                size,
+            );
+        },
+        inc,
+    )
+    .await?;
 
-    client.close().await?;
+    pool.close().await?;
     runner.finish_ok()
 }

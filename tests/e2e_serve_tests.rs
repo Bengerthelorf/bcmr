@@ -19,7 +19,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use bcmr::core::checksum;
-use bcmr::core::serve_client::{FileTransfer, ServeClient};
+use bcmr::core::serve_client::{FileTransfer, ServeClient, ServeClientPool};
 
 /// Write deterministic pseudo-random bytes to `path`.
 /// Uses a simple LCG so the data is never all-zeros, making hash collisions detectable.
@@ -826,4 +826,187 @@ async fn serve_pipelined_get_server_error_propagates() {
         "expected pipelined_get_files to fail when a remote source is missing"
     );
     drop(client);
+}
+
+/// ServeClientPool with N=4: verify round-robin striping works end-to-end.
+/// 100 files distributed across 4 concurrent connections should all land
+/// at their dst paths with the right bytes, and server hashes returned
+/// in input index order (not completion order — the pool re-scatters).
+#[tokio::test]
+async fn serve_pool_pipelined_put_n4_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::create_dir_all(&dst_dir).unwrap();
+
+    let n = 100usize;
+    let mut srcs: Vec<std::path::PathBuf> = Vec::with_capacity(n);
+    let mut expected_hashes: Vec<String> = Vec::with_capacity(n);
+    for i in 0..n {
+        let p = src_dir.join(format!("p_{i}.bin"));
+        // Variable sizes so different files have distinct hashes AND so
+        // the round-robin distribution doesn't silently swap files.
+        create_file(&p, 512 + i * 8);
+        expected_hashes.push(checksum::calculate_hash(&p).unwrap());
+        srcs.push(p);
+    }
+
+    let files: Vec<FileTransfer> = srcs
+        .iter()
+        .enumerate()
+        .map(|(i, p)| FileTransfer {
+            remote: dst_dir
+                .join(format!("p_{i}.bin"))
+                .to_string_lossy()
+                .to_string(),
+            local: p.clone(),
+            size: p.metadata().unwrap().len(),
+        })
+        .collect();
+
+    let mut pool = ServeClientPool::connect_local(4).await.unwrap();
+    assert_eq!(pool.len(), 4);
+
+    let bytes_via_chunks = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let chunks = Arc::clone(&bytes_via_chunks);
+    let completes = Arc::clone(&completions);
+    let hashes = pool
+        .pipelined_put_files_striped(
+            files,
+            move |n| {
+                chunks.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+            },
+            move |_idx, _path, _size| {
+                completes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            },
+        )
+        .await
+        .unwrap();
+
+    // Return order must match input order (pool re-scatters per-bucket
+    // hashes into the original index slots).
+    assert_eq!(hashes.len(), n);
+    for (i, h) in hashes.iter().enumerate() {
+        assert_eq!(
+            bytes_to_hex(h),
+            expected_hashes[i],
+            "hash at index {i} must match input-order source file"
+        );
+        let dst = dst_dir.join(format!("p_{i}.bin"));
+        assert_eq!(checksum::calculate_hash(&dst).unwrap(), expected_hashes[i]);
+    }
+    assert_eq!(completions.load(std::sync::atomic::Ordering::Relaxed), n);
+    let total_size: u64 = (0..n).map(|i| (512 + i * 8) as u64).sum();
+    assert_eq!(
+        bytes_via_chunks.load(std::sync::atomic::Ordering::Relaxed),
+        total_size,
+        "chunk callback must fire for every byte across the 4 writer tasks"
+    );
+
+    pool.close().await.unwrap();
+}
+
+/// ServeClientPool GET with N=4: mirror of the PUT test. Round-robin GET
+/// requests spread across 4 connections must reassemble the batch with
+/// each file's bytes landing at its correct dst.
+#[tokio::test]
+async fn serve_pool_pipelined_get_n4_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::create_dir_all(&dst_dir).unwrap();
+
+    let n = 100usize;
+    let mut srcs: Vec<std::path::PathBuf> = Vec::with_capacity(n);
+    let mut expected_hashes: Vec<String> = Vec::with_capacity(n);
+    for i in 0..n {
+        let p = src_dir.join(format!("g_{i}.bin"));
+        create_file(&p, 1024 + i * 16);
+        expected_hashes.push(checksum::calculate_hash(&p).unwrap());
+        srcs.push(p);
+    }
+
+    let files: Vec<FileTransfer> = srcs
+        .iter()
+        .enumerate()
+        .map(|(i, p)| FileTransfer {
+            remote: p.to_string_lossy().to_string(),
+            local: dst_dir.join(format!("g_{i}.bin")),
+            size: p.metadata().unwrap().len(),
+        })
+        .collect();
+
+    let mut pool = ServeClientPool::connect_local(4).await.unwrap();
+
+    let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let chunks = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let starts_c = Arc::clone(&starts);
+    let chunks_c = Arc::clone(&chunks);
+
+    pool.pipelined_get_files_striped(
+        files,
+        false,
+        move |_idx, _path, _size| {
+            starts_c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        },
+        move |n| {
+            chunks_c.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(starts.load(std::sync::atomic::Ordering::Relaxed), n);
+    let total_expected: u64 = (0..n).map(|i| (1024 + i * 16) as u64).sum();
+    assert_eq!(
+        chunks.load(std::sync::atomic::Ordering::Relaxed),
+        total_expected
+    );
+    for (i, expected) in expected_hashes.iter().enumerate() {
+        let dst = dst_dir.join(format!("g_{i}.bin"));
+        assert_eq!(&checksum::calculate_hash(&dst).unwrap(), expected);
+    }
+
+    pool.close().await.unwrap();
+}
+
+/// Pool with N=1 must behave identically to a single ServeClient: no
+/// striping overhead, single-bucket path exercises the same logic as
+/// the non-pool single-client call. Guards against a future refactor
+/// accidentally regressing the N=1 fast path.
+#[tokio::test]
+async fn serve_pool_n1_degenerate_behaves_like_single_client() {
+    let dir = tempfile::tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::create_dir_all(&dst_dir).unwrap();
+
+    let src = src_dir.join("one.bin");
+    create_file(&src, 8192);
+    let expected = checksum::calculate_hash(&src).unwrap();
+
+    let files = vec![FileTransfer {
+        remote: dst_dir.join("one.bin").to_string_lossy().to_string(),
+        local: src.clone(),
+        size: src.metadata().unwrap().len(),
+    }];
+
+    let mut pool = ServeClientPool::connect_local(1).await.unwrap();
+    assert_eq!(pool.len(), 1);
+    let hashes = pool
+        .pipelined_put_files_striped(files, |_| {}, |_, _, _| {})
+        .await
+        .unwrap();
+    assert_eq!(hashes.len(), 1);
+    assert_eq!(bytes_to_hex(&hashes[0]), expected);
+    assert_eq!(
+        checksum::calculate_hash(&dst_dir.join("one.bin")).unwrap(),
+        expected
+    );
+    pool.close().await.unwrap();
 }
