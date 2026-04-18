@@ -1191,19 +1191,18 @@ async fn serve_open_direct_channel_reply_is_well_formed() {
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = child.stdout.take().unwrap();
 
-    // Hello/Welcome handshake first.
+    use bcmr::core::protocol::CAP_DIRECT_TCP;
     write_message(
         &mut stdin,
         &Message::Hello {
             version: PROTOCOL_VERSION,
-            caps: 0,
+            caps: CAP_DIRECT_TCP,
         },
     )
     .await
     .unwrap();
     let _welcome = read_message(&mut stdout).await.unwrap();
 
-    // Rendezvous request 1.
     write_message(&mut stdin, &Message::OpenDirectChannel)
         .await
         .unwrap();
@@ -1240,6 +1239,55 @@ async fn serve_open_direct_channel_reply_is_well_formed() {
         key1, key2,
         "two rendezvous requests must produce different session keys"
     );
+
+    drop(stdin);
+    let _ = child.wait().await;
+}
+
+/// Without CAP_DIRECT_TCP in the negotiated caps, the server must refuse
+/// OpenDirectChannel with an Error. Guards forward compat for old
+/// clients that don't know about Path B.
+#[tokio::test]
+async fn serve_open_direct_channel_requires_cap() {
+    use bcmr::core::protocol::{read_message, write_message, Message, PROTOCOL_VERSION};
+    use std::process::Stdio;
+
+    let exe = std::env::current_exe().unwrap();
+    let bin_name = if cfg!(windows) { "bcmr.exe" } else { "bcmr" };
+    let bin = exe.parent().unwrap().parent().unwrap().join(bin_name);
+    let mut child = tokio::process::Command::new(&bin)
+        .args(["serve", "--root", "/"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+
+    write_message(
+        &mut stdin,
+        &Message::Hello {
+            version: PROTOCOL_VERSION,
+            caps: 0, // deliberately no CAP_DIRECT_TCP
+        },
+    )
+    .await
+    .unwrap();
+    let _welcome = read_message(&mut stdout).await.unwrap();
+
+    write_message(&mut stdin, &Message::OpenDirectChannel)
+        .await
+        .unwrap();
+    match read_message(&mut stdout).await.unwrap().unwrap() {
+        Message::Error { message } => {
+            assert!(
+                message.contains("CAP_DIRECT_TCP"),
+                "error should mention the missing cap, got: {message}"
+            );
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
 
     drop(stdin);
     let _ = child.wait().await;

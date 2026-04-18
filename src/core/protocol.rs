@@ -54,6 +54,12 @@ pub const CAP_FAST: u8 = 0x08;
 /// silently take a 5x perf hit.
 pub const CAP_SYNC: u8 = 0x10;
 
+/// Client opts in to the direct-TCP transport. Server advertises when
+/// it supports the rendezvous handler. Without this bit set on both
+/// ends `OpenDirectChannel` is rejected — old clients never see it,
+/// old servers never expose it.
+pub const CAP_DIRECT_TCP: u8 = 0x20;
+
 /// Capability bits advertised in Hello/Welcome.
 ///
 /// Caps are an optional trailing byte appended after the version. A peer

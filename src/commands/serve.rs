@@ -1,8 +1,8 @@
 use crate::core::cas;
 use crate::core::compress;
 use crate::core::protocol::{
-    self, CompressionAlgo, ListEntry, Message, CAP_DEDUP, CAP_FAST, CAP_LZ4, CAP_SYNC, CAP_ZSTD,
-    PROTOCOL_VERSION,
+    self, CompressionAlgo, ListEntry, Message, CAP_DEDUP, CAP_DIRECT_TCP, CAP_FAST, CAP_LZ4,
+    CAP_SYNC, CAP_ZSTD, PROTOCOL_VERSION,
 };
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
 /// with its own. CAP_FAST is always offered — the actual implementation
 /// either skips inline hashing (any platform) or also uses splice(2) on
 /// Linux. Either way the client opts in via --fast.
-const SERVER_CAPS: u8 = CAP_LZ4 | CAP_ZSTD | CAP_DEDUP | CAP_FAST | CAP_SYNC;
+const SERVER_CAPS: u8 = CAP_LZ4 | CAP_ZSTD | CAP_DEDUP | CAP_FAST | CAP_SYNC | CAP_DIRECT_TCP;
 
 /// Resolve the configured root jail. Explicit `--root <path>` wins;
 /// otherwise the invoking user's `$HOME` is used. A user that really
@@ -198,6 +198,7 @@ where
     let algo = CompressionAlgo::negotiate(effective_caps, effective_caps);
     let fast = (effective_caps & CAP_FAST) != 0;
     let sync = (effective_caps & CAP_SYNC) != 0;
+    let direct_tcp = (effective_caps & CAP_DIRECT_TCP) != 0;
 
     protocol::write_message(
         writer,
@@ -283,7 +284,15 @@ where
                 Ok(p) => handle_resume(p.to_str().unwrap_or(&path)).await,
                 Err(e) => Err(e),
             },
-            Message::OpenDirectChannel => handle_open_direct_channel().await,
+            Message::OpenDirectChannel => {
+                if direct_tcp {
+                    handle_open_direct_channel().await
+                } else {
+                    Err(anyhow::anyhow!(
+                        "CAP_DIRECT_TCP not negotiated on this session"
+                    ))
+                }
+            }
             other => Err(anyhow::anyhow!("unexpected message: {other:?}")),
         };
 
@@ -829,13 +838,14 @@ async fn handle_mkdir(path: &str) -> Result<Message> {
 async fn handle_open_direct_channel() -> Result<Message> {
     use ring::rand::{SecureRandom, SystemRandom};
     use tokio::net::TcpListener;
+    use zeroize::Zeroizing;
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
 
     let rng = SystemRandom::new();
-    let mut session_key = [0u8; 32];
-    rng.fill(&mut session_key)
+    let mut session_key: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
+    rng.fill(session_key.as_mut())
         .map_err(|_| anyhow::anyhow!("ring::rand failed to produce session key"))?;
 
     tokio::spawn(async move {
@@ -844,9 +854,13 @@ async fn handle_open_direct_channel() -> Result<Message> {
         }
     });
 
+    // The key is copied into the outgoing Message and from there into
+    // the framing buffer. Best-effort zeroize leaves no trace in this
+    // stack frame; downstream copies survive until the buffers drop.
+    let key_out = *session_key;
     Ok(Message::DirectChannelReady {
         addr: addr.to_string(),
-        session_key,
+        session_key: key_out,
     })
 }
 

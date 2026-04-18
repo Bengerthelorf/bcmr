@@ -52,6 +52,7 @@ zstd = { version = "0.13", default-features = false }
 # measured ~5 GB/s on M-series, ~1.5 GB/s on contended Xeon —
 # materially past SSH's ~500 MB/s single-stream ceiling.
 ring = "0.17"
+zeroize = { version = "1.8", features = ["derive"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 xattr = "1.5"
