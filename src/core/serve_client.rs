@@ -2,13 +2,14 @@ use std::path::Path;
 
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStdin, ChildStdout};
 
 use crate::core::compress;
 use crate::core::error::BcmrError;
 use crate::core::protocol::{
     self, CompressionAlgo, ListEntry, Message, CAP_DEDUP, CAP_LZ4, CAP_ZSTD, PROTOCOL_VERSION,
 };
+use crate::core::transport::ssh as ssh_transport;
 
 /// Default client caps: LZ4 + Zstd + dedup. CAP_FAST is opt-in via
 /// `--fast` because the trade-off (no server-side hash) only makes
@@ -56,31 +57,8 @@ impl ServeClient {
     }
 
     pub async fn connect_with_caps(ssh_target: &str, caps: u8) -> Result<Self, BcmrError> {
-        let mut child = Command::new("ssh")
-            .args([
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=10",
-                ssh_target,
-                "bcmr",
-                "serve",
-            ])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
-
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| BcmrError::InvalidInput("failed to open child stdin".into()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| BcmrError::InvalidInput("failed to open child stdout".into()))?;
-
-        let mut client = Self::from_child(child, stdin, stdout);
+        let spawn = ssh_transport::spawn_remote(ssh_target).await?;
+        let mut client = Self::from_child(spawn.child, spawn.stdin, spawn.stdout);
         client.handshake(caps).await?;
         Ok(client)
     }
@@ -131,25 +109,8 @@ impl ServeClient {
             })?
             .clone();
 
-        // Test helper: skip the default $HOME root jail so tests can
-        // put/get under tempdirs like /var/folders or /tmp.
-        let mut child = Command::new(&bcmr_path)
-            .args(["serve", "--root", "/"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
-
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| BcmrError::InvalidInput("failed to open child stdin".into()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| BcmrError::InvalidInput("failed to open child stdout".into()))?;
-
-        Ok(Self::from_child(child, stdin, stdout))
+        let spawn = ssh_transport::spawn_local(&bcmr_path).await?;
+        Ok(Self::from_child(spawn.child, spawn.stdin, spawn.stdout))
     }
 
     fn from_child(child: Child, stdin: ChildStdin, stdout: ChildStdout) -> Self {

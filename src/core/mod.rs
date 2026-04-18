@@ -8,4 +8,5 @@ pub mod remote;
 pub mod resume;
 pub mod serve_client;
 pub mod session;
+pub mod transport;
 pub mod traversal;
