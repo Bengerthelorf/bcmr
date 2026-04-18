@@ -19,7 +19,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use bcmr::core::checksum;
-use bcmr::core::serve_client::ServeClient;
+use bcmr::core::serve_client::{FileTransfer, ServeClient};
 
 /// Write deterministic pseudo-random bytes to `path`.
 /// Uses a simple LCG so the data is never all-zeros, making hash collisions detectable.
@@ -624,32 +624,44 @@ async fn serve_pipelined_put_many_files_succeeds() {
         srcs.push(p);
     }
 
-    let files: Vec<(String, std::path::PathBuf, u64)> = srcs
+    let files: Vec<FileTransfer> = srcs
         .iter()
         .enumerate()
-        .map(|(i, p)| {
-            (
-                dst_dir
-                    .join(format!("f_{i}.bin"))
-                    .to_string_lossy()
-                    .to_string(),
-                p.clone(),
-                p.metadata().unwrap().len(),
-            )
+        .map(|(i, p)| FileTransfer {
+            remote: dst_dir
+                .join(format!("f_{i}.bin"))
+                .to_string_lossy()
+                .to_string(),
+            local: p.clone(),
+            size: p.metadata().unwrap().len(),
         })
         .collect();
+    let total_expected: u64 = files.iter().map(|f| f.size).sum();
 
     let mut client = ServeClient::connect_local().await.unwrap();
     let completed = std::cell::Cell::new(0usize);
+    let chunk_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let chunk_bytes_w = Arc::clone(&chunk_bytes);
     let hashes = client
-        .pipelined_put_files(files, |_idx, _path, _size| {
-            completed.set(completed.get() + 1);
-        })
+        .pipelined_put_files(
+            files,
+            move |n| {
+                chunk_bytes_w.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+            },
+            |_idx, _path, _size| {
+                completed.set(completed.get() + 1);
+            },
+        )
         .await
         .unwrap();
 
     assert_eq!(hashes.len(), n);
     assert_eq!(completed.get(), n);
+    assert_eq!(
+        chunk_bytes.load(std::sync::atomic::Ordering::Relaxed),
+        total_expected,
+        "chunk callback must report every byte the writer sent"
+    );
     for (i, h) in hashes.iter().enumerate() {
         assert_eq!(bytes_to_hex(h), expected_hashes[i]);
         let dst_file = dst_dir.join(format!("f_{i}.bin"));
@@ -687,28 +699,40 @@ async fn serve_pipelined_get_many_files_succeeds() {
         srcs.push(p);
     }
 
-    let files: Vec<(String, std::path::PathBuf, u64)> = srcs
+    let files: Vec<FileTransfer> = srcs
         .iter()
         .enumerate()
-        .map(|(i, p)| {
-            (
-                p.to_string_lossy().to_string(),
-                dst_dir.join(format!("g_{i}.bin")),
-                p.metadata().unwrap().len(),
-            )
+        .map(|(i, p)| FileTransfer {
+            remote: p.to_string_lossy().to_string(),
+            local: dst_dir.join(format!("g_{i}.bin")),
+            size: p.metadata().unwrap().len(),
         })
         .collect();
+    let total_expected: u64 = files.iter().map(|f| f.size).sum();
 
     let mut client = ServeClient::connect_local().await.unwrap();
-    let completed = std::cell::Cell::new(0usize);
+    let started = std::cell::Cell::new(0usize);
+    let received = std::cell::Cell::new(0u64);
     client
-        .pipelined_get_files(files, false, |_idx, _path, _bytes| {
-            completed.set(completed.get() + 1);
-        })
+        .pipelined_get_files(
+            files,
+            false,
+            |_idx, _path, _size| {
+                started.set(started.get() + 1);
+            },
+            |n| {
+                received.set(received.get() + n);
+            },
+        )
         .await
         .unwrap();
 
-    assert_eq!(completed.get(), n);
+    assert_eq!(started.get(), n, "on_file_start must fire once per file");
+    assert_eq!(
+        received.get(),
+        total_expected,
+        "on_chunk must report every byte received across the batch"
+    );
     for (i, expected) in expected_hashes.iter().enumerate() {
         let dst_file = dst_dir.join(format!("g_{i}.bin"));
         assert_eq!(&checksum::calculate_hash(&dst_file).unwrap(), expected);
@@ -737,22 +761,22 @@ async fn serve_pipelined_put_writer_error_propagates() {
 
     let missing = src_dir.join("does_not_exist.bin");
 
-    let files: Vec<(String, std::path::PathBuf, u64)> = vec![
-        (
-            dst_dir.join("g.bin").to_string_lossy().to_string(),
-            good.clone(),
-            good.metadata().unwrap().len(),
-        ),
-        (
-            dst_dir.join("m.bin").to_string_lossy().to_string(),
-            missing,
-            4096, // size we'd advertise
-        ),
+    let files: Vec<FileTransfer> = vec![
+        FileTransfer {
+            remote: dst_dir.join("g.bin").to_string_lossy().to_string(),
+            local: good.clone(),
+            size: good.metadata().unwrap().len(),
+        },
+        FileTransfer {
+            remote: dst_dir.join("m.bin").to_string_lossy().to_string(),
+            local: missing,
+            size: 4096, // size we'd advertise
+        },
     ];
 
     let mut client = ServeClient::connect_local().await.unwrap();
     let result = client
-        .pipelined_put_files(files, |_idx, _path, _size| {})
+        .pipelined_put_files(files, |_| {}, |_idx, _path, _size| {})
         .await;
     assert!(
         result.is_err(),
@@ -780,22 +804,22 @@ async fn serve_pipelined_get_server_error_propagates() {
     // Second entry references a file that doesn't exist on the server.
     let bogus_remote = src_dir.join("does_not_exist.bin");
 
-    let files: Vec<(String, std::path::PathBuf, u64)> = vec![
-        (
-            good.to_string_lossy().to_string(),
-            dst_dir.join("g.bin"),
-            good.metadata().unwrap().len(),
-        ),
-        (
-            bogus_remote.to_string_lossy().to_string(),
-            dst_dir.join("b.bin"),
-            4096,
-        ),
+    let files: Vec<FileTransfer> = vec![
+        FileTransfer {
+            remote: good.to_string_lossy().to_string(),
+            local: dst_dir.join("g.bin"),
+            size: good.metadata().unwrap().len(),
+        },
+        FileTransfer {
+            remote: bogus_remote.to_string_lossy().to_string(),
+            local: dst_dir.join("b.bin"),
+            size: 4096,
+        },
     ];
 
     let mut client = ServeClient::connect_local().await.unwrap();
     let result = client
-        .pipelined_get_files(files, false, |_idx, _path, _bytes| {})
+        .pipelined_get_files(files, false, |_idx, _path, _size| {}, |_n| {})
         .await;
     assert!(
         result.is_err(),

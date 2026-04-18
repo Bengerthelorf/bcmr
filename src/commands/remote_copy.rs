@@ -2,7 +2,7 @@ use crate::cli::Commands;
 use crate::config::CONFIG;
 use crate::core::error::BcmrError;
 use crate::core::remote::{self, parse_remote_path, RemotePath};
-use crate::core::serve_client::ServeClient;
+use crate::core::serve_client::{FileTransfer, ServeClient};
 use crate::ui::progress::ProgressRenderer;
 use crate::ui::runner::ProgressRunner;
 use crate::ui::utils::format_bytes;
@@ -698,7 +698,7 @@ async fn serve_upload_dir(
     // PUTs through pipelined_put_files. The single-file `client.put()`
     // path is one full RTT per file; for many small files the cumulative
     // RTT dominates and pipelining hides it.
-    let mut files_to_put: Vec<(String, PathBuf, u64)> = Vec::new();
+    let mut files_to_put: Vec<FileTransfer> = Vec::new();
     for entry in crate::core::traversal::walk(local_dir, true, false, 1, excludes) {
         let entry = entry?;
         let path = entry.path();
@@ -707,26 +707,28 @@ async fn serve_upload_dir(
         if path.is_dir() {
             client.mkdir(&remote_path).await?;
         } else if path.is_file() {
-            let size = entry.metadata()?.len();
-            files_to_put.push((remote_path, path.to_path_buf(), size));
+            files_to_put.push(FileTransfer {
+                remote: remote_path,
+                local: path.to_path_buf(),
+                size: entry.metadata()?.len(),
+            });
         }
     }
 
-    // Keep the local paths around for an optional post-batch verify pass.
-    // pipelined_put_files consumes the input so we snapshot what we need
-    // before handing it over.
+    // Snapshot local paths up-front only when we actually need them
+    // (--verify is off by default). pipelined_put_files moves the input
+    // vec into its writer task so the snapshot has to happen here.
     let verify_inputs: Option<Vec<PathBuf>> =
-        verify.then(|| files_to_put.iter().map(|(_, p, _)| p.clone()).collect());
+        verify.then(|| files_to_put.iter().map(|f| f.local.clone()).collect());
 
     let file_cb = runner.file_callback();
-    let inc = runner.inc_callback();
+    let inc_for_chunks = runner.inc_callback();
     let server_hashes = client
-        .pipelined_put_files(files_to_put, |_idx, path, size| {
+        .pipelined_put_files(files_to_put, inc_for_chunks, |_idx, path, size| {
             file_cb(
                 &path.file_name().unwrap_or_default().to_string_lossy(),
                 size,
             );
-            inc(size);
         })
         .await?;
 
@@ -841,12 +843,16 @@ async fn handle_serve_download(
     // Two-pass: directories serially first (parents before children), then
     // files via pipelined_get_files so request and reply streams overlap
     // through SSH instead of paying one full RTT per file.
-    let mut files_to_get: Vec<(String, PathBuf, u64)> = Vec::new();
+    let mut files_to_get: Vec<FileTransfer> = Vec::new();
     for item in &items {
         if item.is_dir {
             tokio::fs::create_dir_all(&item.local_path).await?;
         } else {
-            files_to_get.push((item.remote_path.clone(), item.local_path.clone(), item.size));
+            files_to_get.push(FileTransfer {
+                remote: item.remote_path.clone(),
+                local: item.local_path.clone(),
+                size: item.size,
+            });
         }
     }
 
@@ -854,13 +860,17 @@ async fn handle_serve_download(
     let inc = runner.inc_callback();
     let sync = args.is_sync();
     client
-        .pipelined_get_files(files_to_get, sync, |_idx, path, received| {
-            file_cb(
-                &path.file_name().unwrap_or_default().to_string_lossy(),
-                received,
-            );
-            inc(received);
-        })
+        .pipelined_get_files(
+            files_to_get,
+            sync,
+            |_idx, path, size| {
+                file_cb(
+                    &path.file_name().unwrap_or_default().to_string_lossy(),
+                    size,
+                );
+            },
+            inc,
+        )
         .await?;
 
     client.close().await?;

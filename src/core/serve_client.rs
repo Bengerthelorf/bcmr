@@ -28,6 +28,25 @@ pub struct ServeClient {
     dedup_enabled: bool,
 }
 
+/// One file's worth of transfer metadata. Used as the batch input to
+/// `pipelined_put_files` / `pipelined_get_files` so callers get
+/// self-documenting field names instead of the `(.0, .1, .2)` mystery
+/// that an ad-hoc tuple would force.
+#[derive(Debug, Clone)]
+pub struct FileTransfer {
+    /// Path on the server side. For PUT this is where the server
+    /// writes to; for GET it's where the server reads from.
+    pub remote: String,
+    /// Path on the client side. For PUT this is the source file to
+    /// read; for GET it's the destination file to create.
+    pub local: std::path::PathBuf,
+    /// Size of the file as the client understands it. For PUT this
+    /// goes into the `Put { size }` declaration the server uses to
+    /// bound incoming writes; for GET this is the server-reported
+    /// size the client uses to validate the received stream.
+    pub size: u64,
+}
+
 impl ServeClient {
     /// Connect with default capabilities (advertise all compression the
     /// client supports). Prefer `connect_with_caps` when the caller has
@@ -299,11 +318,15 @@ impl ServeClient {
     }
 
     async fn put_streaming(&mut self, data: &Path) -> Result<(), BcmrError> {
+        let algo = self.algo;
         let stdin = self
             .stdin
             .as_mut()
             .ok_or_else(|| BcmrError::InvalidInput("stdin already taken".into()))?;
-        write_file_data_frames(stdin, data, self.algo).await
+        // Single-file put() has no batch-level progress channel; skip
+        // reporting here and let the caller drive progress via their own
+        // means (the single-file CLI path already owns a per-byte meter).
+        write_file_data_frames(stdin, data, algo, &|_| {}).await
     }
 
     async fn put_with_dedup(&mut self, data: &Path, size: u64) -> Result<(), BcmrError> {
@@ -353,6 +376,64 @@ impl ServeClient {
         Ok(())
     }
 
+    /// Take ownership of `stdin` for a pipelined operation. Pairs with
+    /// `reap_writer_task`, which puts it back (or surfaces the writer's
+    /// failure).
+    fn take_stdin(&mut self) -> Result<ChildStdin, BcmrError> {
+        self.stdin
+            .take()
+            .ok_or_else(|| BcmrError::InvalidInput("stdin already taken (concurrent op?)".into()))
+    }
+
+    /// Common tail for the two pipelined methods. The reader task is the
+    /// caller; the writer task was spawned by the caller right after
+    /// `take_stdin`. This helper handles the three-way join:
+    ///
+    /// - if the reader bailed mid-batch (`reader_errored`), the writer
+    ///   may still be pushing frames into a connection whose reply side
+    ///   is full — abort it before awaiting to avoid a deadlock where
+    ///   the writer blocks on stdin (because SSH socket buffers are full
+    ///   because the server is blocked on stdout because nobody is
+    ///   reading the replies anymore).
+    /// - on clean success both sides finish, we reclaim stdin, caller
+    ///   can reuse the client.
+    /// - on writer-only failure (reader clean), propagate the writer
+    ///   error — the reader saw the EOF but didn't flag it because the
+    ///   happy-path recv got the EOF *after* collecting all expected
+    ///   replies, so recv_err is `None` even though something went
+    ///   wrong upstream.
+    async fn reap_writer_task(
+        &mut self,
+        writer: tokio::task::JoinHandle<Result<ChildStdin, BcmrError>>,
+        reader_errored: bool,
+    ) -> Result<(), BcmrError> {
+        if reader_errored {
+            writer.abort();
+        }
+        match writer.await {
+            Ok(Ok(stdin_back)) => {
+                self.stdin = Some(stdin_back);
+                Ok(())
+            }
+            Ok(Err(writer_err)) => {
+                if reader_errored {
+                    // reader's error is the "proximate cause"; the writer
+                    // I/O error is almost certainly the same wire closing
+                    // under it. Return Ok here and let the caller surface
+                    // the reader error.
+                    Ok(())
+                } else {
+                    Err(writer_err)
+                }
+            }
+            Err(join_err) if !join_err.is_cancelled() => Err(BcmrError::InvalidInput(format!(
+                "writer task join failed: {join_err}"
+            ))),
+            // Cancelled by our abort() — expected when reader_errored.
+            Err(_) => Ok(()),
+        }
+    }
+
     /// Stream-pipeline many small file PUTs over the same connection.
     ///
     /// The single-file `put()` is strict request-response: send Put +
@@ -383,39 +464,48 @@ impl ServeClient {
     /// left in an indeterminate state — the writer task may have
     /// half-flushed a frame, the server may have queued unread replies —
     /// so the caller should drop the client rather than try another op.
-    pub async fn pipelined_put_files<F>(
+    ///
+    /// `on_chunk(chunk_bytes)` fires once per Data frame the writer
+    /// emits, so a long-running upload can update a progress bar in
+    /// real time instead of jumping at file completion. `on_complete`
+    /// fires exactly once per file after its Ok is received. Both
+    /// callbacks must be `Send + Sync + 'static` because `on_chunk` is
+    /// moved into the writer task.
+    pub async fn pipelined_put_files<FChunk, FComplete>(
         &mut self,
-        files: Vec<(String, std::path::PathBuf, u64)>,
-        mut on_complete: F,
+        files: Vec<FileTransfer>,
+        on_chunk: FChunk,
+        mut on_complete: FComplete,
     ) -> Result<Vec<[u8; 32]>, BcmrError>
     where
-        F: FnMut(usize, &Path, u64),
+        FChunk: Fn(u64) + Send + Sync + 'static,
+        FComplete: FnMut(usize, &Path, u64),
     {
         let n = files.len();
         if n == 0 {
             return Ok(Vec::new());
         }
 
-        let stdin = self.stdin.take().ok_or_else(|| {
-            BcmrError::InvalidInput("stdin already taken (concurrent op?)".into())
-        })?;
+        let stdin = self.take_stdin()?;
         let algo = self.algo;
+        // Reader-side views of the input (just what on_complete needs).
+        // The writer task consumes `files` so we snapshot here.
         let progress: Vec<(std::path::PathBuf, u64)> =
-            files.iter().map(|(_, p, s)| (p.clone(), *s)).collect();
+            files.iter().map(|f| (f.local.clone(), f.size)).collect();
 
         let writer: tokio::task::JoinHandle<Result<ChildStdin, BcmrError>> =
             tokio::spawn(async move {
                 let mut stdin = stdin;
-                for (remote_path, data_path, size) in files {
+                for ft in files {
                     protocol::write_message(
                         &mut stdin,
                         &Message::Put {
-                            path: remote_path,
-                            size,
+                            path: ft.remote,
+                            size: ft.size,
                         },
                     )
                     .await?;
-                    write_file_data_frames(&mut stdin, &data_path, algo).await?;
+                    write_file_data_frames(&mut stdin, &ft.local, algo, &on_chunk).await?;
                     protocol::write_message(&mut stdin, &Message::Done).await?;
                 }
                 Ok(stdin)
@@ -456,29 +546,7 @@ impl ServeClient {
             }
         }
 
-        // If recv bailed mid-batch, the writer may still be pushing
-        // frames into a connection whose reply side is full — abort it
-        // before awaiting to avoid a deadlock where writer waits on stdin
-        // (server's stdin buffer is full because server is blocked on
-        // stdout writes that nobody is reading).
-        if recv_err.is_some() {
-            writer.abort();
-        }
-
-        match writer.await {
-            Ok(Ok(stdin_back)) => self.stdin = Some(stdin_back),
-            Ok(Err(writer_err)) => {
-                if recv_err.is_none() {
-                    return Err(writer_err);
-                }
-            }
-            Err(join_err) if !join_err.is_cancelled() => {
-                return Err(BcmrError::InvalidInput(format!(
-                    "writer task join failed: {join_err}"
-                )));
-            }
-            Err(_) => {} // cancelled by abort() — expected when recv_err is set
-        }
+        self.reap_writer_task(writer, recv_err.is_some()).await?;
 
         if let Some(e) = recv_err {
             return Err(e);
@@ -495,37 +563,48 @@ impl ServeClient {
     /// loop is FIFO so reply ordering matches send ordering — no
     /// per-message correlation id needed.
     ///
-    /// Each file's destination is created here (parent directory ensured
-    /// first). When `sync_after_each` is true, `sync_all()` is called on
-    /// the destination file before advancing to the next file's stream;
-    /// matches the per-PUT fsync behavior controlled by `CAP_SYNC` on
-    /// the upload side.
+    /// `on_file_start(idx, path, declared_size)` fires just before each
+    /// file's Data stream begins (after the dst is created). `on_chunk`
+    /// fires per Data frame with the decoded byte count — pair these to
+    /// drive a progress bar that doesn't stall on large files.
+    /// `sync_after_each` gates `sync_all()` on the dst before moving to
+    /// the next file; matches the per-PUT fsync behavior under
+    /// `CAP_SYNC`.
     ///
-    /// `on_complete` fires after each file's `Ok` has been processed
-    /// and the dst file is closed (and fsynced when requested).
+    /// **Validates `ft.size` against the received stream**: if the
+    /// server sends more bytes than declared, or `Ok` arrives before
+    /// enough bytes did, the call bails with an error rather than
+    /// silently truncating the dst. This catches server misbehavior and
+    /// inadvertent truncation at the protocol boundary.
     ///
-    /// Bails on the first `Error` frame or I/O failure; partial state
-    /// (some files completed, current file half-written) is the
-    /// caller's to clean up.
-    pub async fn pipelined_get_files<F>(
+    /// Bails on the first `Error` frame or I/O failure. Partial state
+    /// survives on disk: files completed before the bail are intact,
+    /// the file in progress is left half-written at its final path
+    /// (no `.tmp` + rename dance here — inherited behavior from the
+    /// pre-pipelining loop). The signal-handler-driven
+    /// `cleanup_partial_files` hook only knows about `TempFileGuard`
+    /// registrations, so Ctrl+C mid-batch leaves the current file
+    /// truncated until a retry overwrites it. Worth fixing when an
+    /// actual user reports it.
+    pub async fn pipelined_get_files<FStart, FChunk>(
         &mut self,
-        files: Vec<(String, std::path::PathBuf, u64)>,
+        files: Vec<FileTransfer>,
         sync_after_each: bool,
-        mut on_complete: F,
+        mut on_file_start: FStart,
+        mut on_chunk: FChunk,
     ) -> Result<(), BcmrError>
     where
-        F: FnMut(usize, &Path, u64),
+        FStart: FnMut(usize, &Path, u64),
+        FChunk: FnMut(u64),
     {
         let n = files.len();
         if n == 0 {
             return Ok(());
         }
 
-        let stdin = self.stdin.take().ok_or_else(|| {
-            BcmrError::InvalidInput("stdin already taken (concurrent op?)".into())
-        })?;
+        let stdin = self.take_stdin()?;
 
-        let request_paths: Vec<String> = files.iter().map(|(r, _, _)| r.clone()).collect();
+        let request_paths: Vec<String> = files.iter().map(|f| f.remote.clone()).collect();
 
         // Writer task: send all N Get requests in order. Each request is
         // ~30 bytes; even at N=10000 the cumulative ~300 KiB fits in the
@@ -542,38 +621,57 @@ impl ServeClient {
             });
 
         let mut recv_err: Option<BcmrError> = None;
-        'files_loop: for (i, (_, local_path, _expected_size)) in files.iter().enumerate() {
-            if let Some(parent) = local_path.parent() {
+        'files_loop: for (i, ft) in files.iter().enumerate() {
+            if let Some(parent) = ft.local.parent() {
                 if !parent.as_os_str().is_empty() && !parent.exists() {
                     if let Err(e) = tokio::fs::create_dir_all(parent).await {
                         recv_err = Some(BcmrError::InvalidInput(format!(
                             "create parent for {}: {e}",
-                            local_path.display()
+                            ft.local.display()
                         )));
                         break;
                     }
                 }
             }
-            let mut dst = match std::fs::File::create(local_path) {
+            // Intentional: sync `std::fs::File` + sync `write_all` inside
+            // an async fn. `tokio::fs` would wrap every read/write in its
+            // own spawn_blocking — for 4 MiB chunks on NVMe that's thread
+            // bounces dominating the actual I/O (same anti-pattern as
+            // local-perf Exp 13). Keeping the writes sync in-task is
+            // measurably faster here.
+            let mut dst = match std::fs::File::create(&ft.local) {
                 Ok(f) => f,
                 Err(e) => {
                     recv_err = Some(BcmrError::InvalidInput(format!(
                         "create dst {}: {e}",
-                        local_path.display()
+                        ft.local.display()
                     )));
                     break;
                 }
             };
+            on_file_start(i, &ft.local, ft.size);
+
             let mut received: u64 = 0;
             loop {
                 use std::io::Write;
                 match self.recv().await {
                     Ok(Message::Data { payload }) => {
+                        let n_bytes = payload.len() as u64;
+                        if received + n_bytes > ft.size {
+                            recv_err = Some(BcmrError::InvalidInput(format!(
+                                "server sent {} bytes past declared size {} for {}",
+                                received + n_bytes - ft.size,
+                                ft.size,
+                                ft.local.display()
+                            )));
+                            break 'files_loop;
+                        }
                         if let Err(e) = dst.write_all(&payload) {
                             recv_err = Some(BcmrError::InvalidInput(format!("write dst: {e}")));
                             break 'files_loop;
                         }
-                        received += payload.len() as u64;
+                        received += n_bytes;
+                        on_chunk(n_bytes);
                     }
                     Ok(Message::DataCompressed {
                         algo,
@@ -588,13 +686,32 @@ impl ServeClient {
                                 break 'files_loop;
                             }
                         };
+                        let n_bytes = decoded.len() as u64;
+                        if received + n_bytes > ft.size {
+                            recv_err = Some(BcmrError::InvalidInput(format!(
+                                "server sent {} bytes past declared size {} for {}",
+                                received + n_bytes - ft.size,
+                                ft.size,
+                                ft.local.display()
+                            )));
+                            break 'files_loop;
+                        }
                         if let Err(e) = dst.write_all(&decoded) {
                             recv_err = Some(BcmrError::InvalidInput(format!("write dst: {e}")));
                             break 'files_loop;
                         }
-                        received += decoded.len() as u64;
+                        received += n_bytes;
+                        on_chunk(n_bytes);
                     }
                     Ok(Message::Ok { .. }) => {
+                        if received != ft.size {
+                            recv_err = Some(BcmrError::InvalidInput(format!(
+                                "short read: got {received} bytes, declared {} for {}",
+                                ft.size,
+                                ft.local.display()
+                            )));
+                            break 'files_loop;
+                        }
                         if sync_after_each {
                             if let Err(e) = dst.sync_all() {
                                 recv_err = Some(BcmrError::InvalidInput(format!("fsync dst: {e}")));
@@ -602,7 +719,6 @@ impl ServeClient {
                             }
                         }
                         drop(dst);
-                        on_complete(i, local_path, received);
                         break; // next file
                     }
                     Ok(Message::Error { message }) => {
@@ -623,28 +739,7 @@ impl ServeClient {
             }
         }
 
-        // If we bailed, abort the writer so it stops queuing more requests
-        // into the now-doomed connection. The writer task will end either
-        // via abort (mid-write) or by completing if all sends were already
-        // queued before we bailed.
-        if recv_err.is_some() {
-            writer.abort();
-        }
-
-        match writer.await {
-            Ok(Ok(stdin_back)) => self.stdin = Some(stdin_back),
-            Ok(Err(writer_err)) => {
-                if recv_err.is_none() {
-                    return Err(writer_err);
-                }
-            }
-            Err(join_err) if !join_err.is_cancelled() => {
-                return Err(BcmrError::InvalidInput(format!(
-                    "writer task join failed: {join_err}"
-                )));
-            }
-            Err(_) => {} // cancelled by abort() — expected when recv_err is set
-        }
+        self.reap_writer_task(writer, recv_err.is_some()).await?;
 
         if let Some(e) = recv_err {
             return Err(e);
@@ -725,10 +820,14 @@ impl Drop for ServeClient {
 /// many-file `pipelined_put_files` writer task; extracting it here keeps
 /// the encode-loop in one place so a change to chunking, compression
 /// negotiation, or framing can't drift between the two callers.
+///
+/// `on_chunk(uncompressed_bytes)` fires once per Data frame so callers
+/// can drive a progress bar. Passing a `|_| {}` no-op skips reporting.
 async fn write_file_data_frames<W>(
     writer: &mut W,
     data: &Path,
     algo: CompressionAlgo,
+    on_chunk: &(impl Fn(u64) + ?Sized),
 ) -> Result<(), BcmrError>
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -742,6 +841,7 @@ where
         }
         let frame = compress::encode_block(algo, buf[..n].to_vec());
         protocol::write_message(writer, &frame).await?;
+        on_chunk(n as u64);
     }
     Ok(())
 }
