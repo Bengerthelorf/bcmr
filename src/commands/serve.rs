@@ -289,6 +289,7 @@ where
                 Ok(p) => handle_resume(p.to_str().unwrap_or(&path)).await,
                 Err(e) => Err(e),
             },
+            Message::OpenDirectChannel => handle_open_direct_channel().await,
             other => Err(anyhow::anyhow!("unexpected message: {other:?}")),
         };
 
@@ -826,6 +827,51 @@ fn enforce_write_bound(written: u64, incoming: usize, declared: u64) -> Result<(
 async fn handle_mkdir(path: &str) -> Result<Message> {
     fs::create_dir_all(path).await?;
     Ok(Message::Ok { hash: None })
+}
+
+/// Path B rendezvous (phase 3b scaffolding): allocate a listener on a
+/// loopback port, generate a fresh 32-byte AES-256-GCM session key from
+/// OS randomness, and spawn an accept task that — for now — accepts and
+/// immediately drops incoming connections. Phase 3c replaces the
+/// accept-and-drop stub with the real AuthHello check and AEAD-wrapped
+/// dispatch loop; phase 3b is deliberately scoped to "proves the
+/// rendezvous reply is well-formed and the server binds a real port"
+/// so the client side can be built against a stable server surface.
+///
+/// Binds to 127.0.0.1 only — direct-TCP is LAN-mode in design, but
+/// even within LAN the addr should be handed out to the intended peer
+/// only, not advertised broadly. Client sees the addr via the
+/// already-authenticated SSH control channel.
+///
+/// Listener's lifetime is currently the lifetime of this server
+/// process: the spawned task holds the listener and is never joined.
+/// Phase 3c will bind this to the enclosing SSH session so a lost
+/// session cleans up its dangling rendezvous points.
+async fn handle_open_direct_channel() -> Result<Message> {
+    use ring::rand::{SecureRandom, SystemRandom};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+
+    let rng = SystemRandom::new();
+    let mut session_key = [0u8; 32];
+    rng.fill(&mut session_key)
+        .map_err(|_| anyhow::anyhow!("ring::rand failed to produce session key"))?;
+
+    // Accept-and-drop stub. Phase 3c: verify AuthHello with a
+    // BLAKE3-keyed MAC over the session_key, then run the dispatch
+    // loop wrapped in AES-256-GCM.
+    tokio::spawn(async move {
+        while let Ok((stream, _peer)) = listener.accept().await {
+            drop(stream);
+        }
+    });
+
+    Ok(Message::DirectChannelReady {
+        addr: addr.to_string(),
+        session_key,
+    })
 }
 
 async fn handle_resume(path: &str) -> Result<Message> {

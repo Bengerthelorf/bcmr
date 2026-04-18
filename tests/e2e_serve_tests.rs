@@ -1171,3 +1171,87 @@ async fn serve_listen_tcp_handshake_and_put() {
     let _ = child.kill().await;
     let _ = child.wait().await;
 }
+
+/// Phase 3b: server handles `OpenDirectChannel` by binding a loopback
+/// TCP listener, generating a fresh 32-byte session key, and replying
+/// with `DirectChannelReady`. Verifies:
+/// - reply shape (parseable addr + non-zero key)
+/// - addr is actually reachable (TCP dial succeeds)
+/// - two separate requests get two different session keys (freshness)
+///
+/// Auth + AEAD come in phase 3c; here we just confirm the rendezvous
+/// wire reply is well-formed so the client side can be built against a
+/// stable server surface. Drives the raw protocol by hand because
+/// ServeClient doesn't expose this flow yet (phase 3e will add it).
+#[tokio::test]
+async fn serve_open_direct_channel_reply_is_well_formed() {
+    use bcmr::core::protocol::{read_message, write_message, Message, PROTOCOL_VERSION};
+    use std::process::Stdio;
+    use tokio::net::TcpStream;
+
+    let exe = std::env::current_exe().unwrap();
+    let bin_name = if cfg!(windows) { "bcmr.exe" } else { "bcmr" };
+    let bin = exe.parent().unwrap().parent().unwrap().join(bin_name);
+    let mut child = tokio::process::Command::new(&bin)
+        .args(["serve", "--root", "/"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+
+    // Hello/Welcome handshake first.
+    write_message(
+        &mut stdin,
+        &Message::Hello {
+            version: PROTOCOL_VERSION,
+            caps: 0,
+        },
+    )
+    .await
+    .unwrap();
+    let _welcome = read_message(&mut stdout).await.unwrap();
+
+    // Rendezvous request 1.
+    write_message(&mut stdin, &Message::OpenDirectChannel)
+        .await
+        .unwrap();
+    let reply1 = read_message(&mut stdout).await.unwrap().unwrap();
+    let (addr1, key1) = match reply1 {
+        Message::DirectChannelReady { addr, session_key } => (addr, session_key),
+        other => panic!("expected DirectChannelReady, got {other:?}"),
+    };
+
+    // addr must parse as a real SocketAddr with a non-zero port.
+    let parsed: std::net::SocketAddr = addr1.parse().expect("reply addr must parse");
+    assert_ne!(parsed.port(), 0, "listener must bind to a concrete port");
+
+    // Session key shouldn't be all zeros (trivially ruling out "forgot
+    // to initialise" / default-constructor bugs).
+    assert_ne!(key1, [0u8; 32], "session key must be randomised");
+
+    // TCP reachable — dial succeeds even though the server will drop
+    // the connection straight away in the 3b stub.
+    let sock = TcpStream::connect(parsed).await.expect("dial accept");
+    drop(sock);
+
+    // Fresh rendezvous → fresh key. If the key came from a static seed
+    // or a buggy RNG, two requests in a row would collide.
+    write_message(&mut stdin, &Message::OpenDirectChannel)
+        .await
+        .unwrap();
+    let reply2 = read_message(&mut stdout).await.unwrap().unwrap();
+    let key2 = match reply2 {
+        Message::DirectChannelReady { session_key, .. } => session_key,
+        other => panic!("expected DirectChannelReady on 2nd request, got {other:?}"),
+    };
+    assert_ne!(
+        key1, key2,
+        "two rendezvous requests must produce different session keys"
+    );
+
+    drop(stdin);
+    let _ = child.wait().await;
+}
