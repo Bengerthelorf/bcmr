@@ -25,6 +25,10 @@ sparse = "auto"          # "auto"（預設）、"force" 或 "disable"
 
 update_check = "off"     # "off"（預設，不存取網路）、"quiet" 或 "notify"
 
+[transfer]
+fallback_warning = true  # 當 serve 快速路徑失敗、退回到傳統 SSH 時
+                         # 在 stderr 印出一行原因（預設開啟）
+
 [scp]
 parallel_transfers = 4   # 並行 SSH 傳輸數（預設：4）
 compression = "auto"     # "auto"（預設）、"force" 或 "off"

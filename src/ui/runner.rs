@@ -92,3 +92,17 @@ impl ProgressRunner {
         let _ = self.progress.lock().finish_err(msg);
     }
 }
+
+/// Hard stop the ticker task when the runner is dropped without an
+/// explicit `finish_*`. Tokio's `JoinHandle` detaches on drop, so
+/// without this the 100 ms-tick painter keeps running in the background
+/// — and if the handler then spawns a *new* runner (e.g. serve fast
+/// path errors and we fall back to legacy SSH, which builds its own
+/// runner), two ticker tasks paint the same progress bar at once,
+/// corrupting the render. Belt-and-suspenders: `abort()` on an
+/// already-aborted handle is a no-op.
+impl Drop for ProgressRunner {
+    fn drop(&mut self) {
+        self.ticker_handle.abort();
+    }
+}

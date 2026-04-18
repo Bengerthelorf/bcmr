@@ -36,7 +36,38 @@ pub struct Config {
     #[serde(default)]
     pub scp: ScpConfig,
     #[serde(default)]
+    pub transfer: TransferConfig,
+    #[serde(default)]
     pub update_check: UpdateCheck,
+}
+
+/// Cross-transport settings for remote operations. Introduced in
+/// v0.5.19 so `scp`-specific knobs (parallel_transfers, compression)
+/// stay there and pan-remote knobs have their own home.
+#[derive(Debug, Deserialize, Clone)]
+pub struct TransferConfig {
+    /// When the `bcmr serve` fast path is unavailable and we fall back
+    /// to legacy SSH-per-file transfer, print a one-line stderr
+    /// warning explaining why and pointing at the fix. Default on:
+    /// silent fallback silently costs users 10× wall time with no
+    /// visible reason (the trap documented in Experiment 17). Set to
+    /// false in config if the noise outweighs the diagnostic value
+    /// (e.g. you're scripting a mixed-fleet rollout where some hosts
+    /// genuinely don't have bcmr installed yet).
+    #[serde(default = "default_fallback_warning")]
+    pub fallback_warning: bool,
+}
+
+fn default_fallback_warning() -> bool {
+    true
+}
+
+impl Default for TransferConfig {
+    fn default() -> Self {
+        Self {
+            fallback_warning: default_fallback_warning(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
@@ -147,6 +178,7 @@ impl Default for Config {
             },
             copy: CopyConfig::default(),
             scp: ScpConfig::default(),
+            transfer: TransferConfig::default(),
             update_check: UpdateCheck::default(),
         }
     }
@@ -208,6 +240,11 @@ impl Config {
             )
             .unwrap()
             .set_default("scp.compression", defaults.scp.compression)
+            .unwrap()
+            .set_default(
+                "transfer.fallback_warning",
+                defaults.transfer.fallback_warning,
+            )
             .unwrap()
             .set_default("update_check", "off")
             .unwrap();

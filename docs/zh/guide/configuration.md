@@ -25,6 +25,10 @@ sparse = "auto"          # "auto"（默认）、"force" 或 "disable"
 
 update_check = "off"     # "off"（默认，不访问网络）、"quiet" 或 "notify"
 
+[transfer]
+fallback_warning = true  # 当 serve 快速路径失败、回退到传统 SSH 时
+                         # 在 stderr 打印一行原因（默认开启）
+
 [scp]
 parallel_transfers = 4   # 并行 SSH 传输数（默认：4）
 compression = "auto"     # "auto"（默认）、"force" 或 "off"

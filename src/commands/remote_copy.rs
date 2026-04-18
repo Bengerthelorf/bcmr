@@ -297,22 +297,27 @@ pub async fn handle_remote_copy(
     match serve_result {
         Ok(()) => return Ok(()),
         Err(e) => {
-            // Surface the reason instead of silently falling back. Users
-            // reported "bcmr copy of /tmp/foo takes 30 s where scp takes
-            // 2 s" because the fast path errored on a path-jail escape
-            // and we silently dropped to the slow SSH-per-file path.
-            // Warning here tells the user why, without changing
-            // behavior — they can fix with `bcmr serve --root /` on the
-            // remote or just accept the fallback for paths under their
-            // home.
+            // Don't silently fall back. Even the "remote doesn't have
+            // bcmr" case is worth telling the user about — installing
+            // bcmr on the remote is ~5 minutes and recovers 5-10x
+            // throughput on many-file batches. The config knob
+            // `transfer.fallback_warning = false` lets ops folks
+            // silence it for scripted mixed-fleet rollouts where the
+            // message is pure noise.
             let msg = e.to_string();
-            if !msg.contains("dry-run fallback") {
+            let is_dry_run_redirect = msg.contains("dry-run fallback");
+            if !is_dry_run_redirect && CONFIG.transfer.fallback_warning {
+                // Leading newline: if a TUI progress bar was up before
+                // the error, its last rendered line is still on the
+                // terminal until the fallback runner repaints. Starting
+                // on a fresh line keeps the warning from visually
+                // gluing onto the progress bar's tail.
                 eprintln!(
-                    "bcmr: serve fast path unavailable ({msg}); \
-                     falling back to legacy SSH. If the remote has \
-                     bcmr but rejected a path outside the server root \
-                     jail, set `bcmr serve --root <path>` on the \
-                     remote to widen it."
+                    "\nbcmr: serve fast path unavailable ({msg}).\n\
+                     bcmr: falling back to legacy SSH (per-file scp \
+                     workers) — slower by ~5-10× on many-file batches.\n\
+                     bcmr: set `transfer.fallback_warning = false` in \
+                     ~/.config/bcmr/config.toml to silence this."
                 );
             }
         }

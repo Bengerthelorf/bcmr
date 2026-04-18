@@ -1010,3 +1010,56 @@ async fn serve_pool_n1_degenerate_behaves_like_single_client() {
     );
     pool.close().await.unwrap();
 }
+
+/// ServeClientPool error propagation: if *any* bucket's writer task
+/// errors mid-batch (here: one file in bucket K doesn't exist locally),
+/// `try_join_all` must cancel the other buckets' in-flight work and
+/// the top-level call must return Err. Guards the assumption that the
+/// pool's error path actually aborts sibling buckets rather than
+/// silently returning partial success.
+#[tokio::test]
+async fn serve_pool_one_bucket_error_cancels_siblings() {
+    let dir = tempfile::tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::create_dir_all(&dst_dir).unwrap();
+
+    // 12 files, N=4 pool → buckets of 3. Put a non-existent file at
+    // index 7 (lands in bucket 7 % 4 = 3). The other 3 buckets carry
+    // good files and will be mid-flight when bucket 3's writer opens
+    // the missing file and errors.
+    let n = 12usize;
+    let bad_idx = 7usize;
+    let mut files: Vec<FileTransfer> = Vec::with_capacity(n);
+    for i in 0..n {
+        let p = if i == bad_idx {
+            src_dir.join("does_not_exist.bin")
+        } else {
+            let p = src_dir.join(format!("ok_{i}.bin"));
+            create_file(&p, 2048 + i * 16);
+            p
+        };
+        files.push(FileTransfer {
+            remote: dst_dir
+                .join(format!("x_{i}.bin"))
+                .to_string_lossy()
+                .to_string(),
+            local: p,
+            size: if i == bad_idx { 4096 } else { 2048 + i * 16 } as u64,
+        });
+    }
+
+    let mut pool = ServeClientPool::connect_local(4).await.unwrap();
+    let result = pool
+        .pipelined_put_files_striped(files, |_| {}, |_, _, _| {})
+        .await;
+    assert!(
+        result.is_err(),
+        "one bucket failing must propagate as Err from the pool, got {result:?}"
+    );
+    // Don't assert on client reuse after this — the error path leaves
+    // the pool in an indeterminate state (documented in the method's
+    // doc comment); caller is expected to drop.
+    drop(pool);
+}

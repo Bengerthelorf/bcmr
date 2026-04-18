@@ -28,6 +28,10 @@ update_check = "off"     # "off" (default, no network), "quiet", or "notify"
 [scp]
 parallel_transfers = 4   # concurrent SSH transfers (default: 4)
 compression = "auto"     # "auto" (default), "force", or "off"
+
+[transfer]
+fallback_warning = true  # warn on stderr when serve fast path fails
+                         # and we fall back to legacy SSH (default: true)
 ```
 
 ## Progress Settings
