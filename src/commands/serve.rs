@@ -241,8 +241,6 @@ where
     // CAP_AEAD from the client's offer; both sides would then
     // intersect to zero, keep framing Plain, and the session would
     // carry real file bytes in the clear across the public internet.
-    // We require AEAD whenever a session key exists, which matches
-    // the "direct-TCP => encrypted" user expectation.
     if direct_tcp_key.is_some() && !aead {
         framing
             .write_message(
@@ -1009,21 +1007,61 @@ async fn run_rendezvous(
     session_key: zeroize::Zeroizing<[u8; 32]>,
     root: PathBuf,
 ) {
-    let timeout = std::time::Duration::from_secs(RENDEZVOUS_ACCEPT_TIMEOUT_SECS);
-    let stream = match tokio::time::timeout(timeout, listener.accept()).await {
-        Ok(Ok((stream, _peer))) => stream,
-        Ok(Err(e)) => {
-            eprintln!("serve: direct-tcp accept failed: {e}");
-            return;
+    // Keep accepting until a peer proves AuthHello knowledge. An
+    // unauthenticated squatter (same LAN, co-tenant, port scanner)
+    // that connects first must NOT be able to consume the listener
+    // and starve the real client — close that connection, loop back,
+    // and wait for the next one inside the same deadline.
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(RENDEZVOUS_ACCEPT_TIMEOUT_SECS);
+    let authed = loop {
+        let remaining = match deadline.checked_duration_since(tokio::time::Instant::now()) {
+            Some(d) if !d.is_zero() => d,
+            _ => return, // window elapsed, no authenticated peer
+        };
+        let mut stream = match tokio::time::timeout(remaining, listener.accept()).await {
+            Ok(Ok((stream, _peer))) => stream,
+            Ok(Err(e)) => {
+                eprintln!("serve: direct-tcp accept failed: {e}");
+                return;
+            }
+            Err(_) => return, // deadline hit, no peer dialed in
+        };
+        if verify_auth_hello(&mut stream, &session_key).await {
+            break stream;
         }
-        Err(_) => return, // peer never dialed in
+        // MAC mismatch / wrong first frame / EOF before AuthHello.
+        // Drop the stream, loop — listener stays open for the real
+        // client. A squatter who connects first and flunks the MAC
+        // must not starve the legitimate peer.
     };
-    // Drop listener now: at most one data session per rendezvous.
+    // Authenticated peer in hand; the listener has served its purpose.
     drop(listener);
 
-    if let Err(e) = run_direct_session(stream, &session_key, &root).await {
+    if let Err(e) = run_direct_session(authed, &session_key, &root).await {
         eprintln!("serve: direct-tcp session error: {e}");
     }
+}
+
+/// Consume the first frame of an accepted TCP stream and return
+/// `true` iff that frame is an AuthHello whose MAC matches the
+/// session key. On any failure (wrong frame type, MAC mismatch,
+/// I/O error) return `false` so the caller can drop the stream
+/// and keep accepting — no reply, no oracle for scanners.
+/// Takes `&mut` (not by-value) so subsequent frames on the same
+/// socket can still be read by `run_direct_session` without a
+/// split/reunite round-trip.
+async fn verify_auth_hello(
+    stream: &mut tokio::net::TcpStream,
+    session_key: &[u8; 32],
+) -> bool {
+    let mac = match protocol::read_message(stream).await {
+        Ok(Some(Message::AuthHello { mac })) => mac,
+        _ => return false,
+    };
+    let expected = blake3::keyed_hash(session_key, AUTH_HELLO_TAG);
+    // blake3::Hash implements constant-time PartialEq.
+    blake3::Hash::from(mac) == expected
 }
 
 async fn run_direct_session(
@@ -1033,21 +1071,8 @@ async fn run_direct_session(
 ) -> Result<()> {
     let (mut reader, mut writer) = stream.into_split();
 
-    // First frame on the data channel must prove the peer learned the
-    // session key from the authenticated control channel. Anything
-    // else is dropped without reply — no oracle for attackers.
-    let mac = match protocol::read_message(&mut reader).await? {
-        Some(Message::AuthHello { mac }) => mac,
-        Some(other) => bail!("direct-tcp: expected AuthHello, got {other:?}"),
-        None => return Ok(()),
-    };
-    let expected = blake3::keyed_hash(session_key, AUTH_HELLO_TAG);
-    // blake3::Hash implements constant-time PartialEq.
-    if blake3::Hash::from(mac) != expected {
-        bail!("direct-tcp: AuthHello MAC mismatch");
-    }
-
-    // Authenticated. Run a fresh protocol session on this socket.
+    // Caller has already verified AuthHello via verify_auth_hello.
+    // Run a fresh protocol session on this socket.
     //   allow_splice=false: TCP fd is not STDOUT_FILENO.
     //   allow_direct_tcp=false: already on direct-TCP; nesting would
     //   let the same peer open more listeners recursively.

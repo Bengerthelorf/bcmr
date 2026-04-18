@@ -1397,6 +1397,97 @@ async fn serve_direct_tcp_put_get_roundtrip() {
     assert_eq!(checksum::calculate_hash(&remote_dst).unwrap(), src_hash);
 }
 
+/// DoS-resistance: a squatter that connects first with a bogus
+/// AuthHello must NOT consume the rendezvous listener. The real
+/// client, dialing in second with the right MAC, still has to reach
+/// an open listener and complete the handshake.
+#[tokio::test]
+async fn serve_direct_tcp_squatter_does_not_starve_real_client() {
+    use bcmr::core::protocol::{
+        read_message, write_message, Message, CAP_DIRECT_TCP, PROTOCOL_VERSION,
+    };
+    use std::process::Stdio;
+    use tokio::net::TcpStream;
+
+    let exe = std::env::current_exe().unwrap();
+    let bin_name = if cfg!(windows) { "bcmr.exe" } else { "bcmr" };
+    let bin = exe.parent().unwrap().parent().unwrap().join(bin_name);
+    let mut child = tokio::process::Command::new(&bin)
+        .args(["serve", "--root", "/"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut ssh_stdin = child.stdin.take().unwrap();
+    let mut ssh_stdout = child.stdout.take().unwrap();
+
+    // Rendezvous over SSH to get the addr + key.
+    write_message(
+        &mut ssh_stdin,
+        &Message::Hello {
+            version: PROTOCOL_VERSION,
+            caps: CAP_DIRECT_TCP,
+        },
+    )
+    .await
+    .unwrap();
+    let _ = read_message(&mut ssh_stdout).await.unwrap();
+    write_message(&mut ssh_stdin, &Message::OpenDirectChannel)
+        .await
+        .unwrap();
+    let (addr, key) = match read_message(&mut ssh_stdout).await.unwrap().unwrap() {
+        Message::DirectChannelReady { addr, session_key } => (addr, session_key),
+        other => panic!("expected DirectChannelReady, got {other:?}"),
+    };
+
+    // Squatter: connects first, sends an AuthHello with a deliberately
+    // wrong MAC. Server must close this connection and keep listening.
+    let squatter = TcpStream::connect(&addr).await.unwrap();
+    let (_sr, mut sw) = squatter.into_split();
+    write_message(
+        &mut sw,
+        &Message::AuthHello {
+            mac: [0xAAu8; 32], // garbage
+        },
+    )
+    .await
+    .unwrap();
+    drop(sw);
+
+    // Real client: connects second with the right MAC, runs a Hello/
+    // Welcome handshake. Mirror the real bcmr client: close SSH stdin
+    // once the rendezvous has handed off, so the server's outer
+    // dispatch loop exits cleanly and only the TCP rendezvous task is
+    // left running the data session.
+    let real = TcpStream::connect(&addr).await.unwrap();
+    drop(ssh_stdin);
+    let (mut rr, mut rw) = real.into_split();
+    let good_mac = *blake3::keyed_hash(&key, b"bcmr-direct-v1").as_bytes();
+    write_message(&mut rw, &Message::AuthHello { mac: good_mac })
+        .await
+        .unwrap();
+    write_message(
+        &mut rw,
+        &Message::Hello {
+            version: PROTOCOL_VERSION,
+            caps: bcmr::core::protocol::CAP_AEAD,
+        },
+    )
+    .await
+    .unwrap();
+    // Welcome arrives plain (flip happens after); reading the raw
+    // frame is enough to prove the listener was still accepting.
+    match read_message(&mut rr).await.unwrap() {
+        Some(Message::Welcome { .. }) => {}
+        other => panic!("real client was starved by squatter, got {other:?}"),
+    }
+
+    drop(rw);
+    drop(rr);
+    let _ = child.wait().await;
+}
+
 /// Downgrade-attack guard: a rendezvous-authenticated peer that does
 /// NOT advertise CAP_AEAD must be rejected on the direct-TCP channel.
 /// Without this guard, an MITM stripping CAP_AEAD from a real client's
