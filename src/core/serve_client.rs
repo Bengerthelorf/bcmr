@@ -1491,7 +1491,6 @@ impl ServeClientPool {
     /// the source — no server-side hash is returned on chunked PUT
     /// (integrity lives in the AEAD per-frame MAC; callers who want a
     /// second-level check should re-read the dst after transfer).
-    #[allow(dead_code)] // CLI integration comes in a later commit
     pub async fn striped_put_file(
         &mut self,
         local: &Path,
@@ -1561,7 +1560,6 @@ impl ServeClientPool {
     /// truncate, per-fd seek). Returns the client-computed BLAKE3 of
     /// the received dst. Caller is responsible for knowing the remote
     /// size up-front (from `client.stat` or an upper bound).
-    #[allow(dead_code)] // CLI integration comes in a later commit
     pub async fn striped_get_file(
         &mut self,
         remote: &str,

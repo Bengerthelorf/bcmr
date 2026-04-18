@@ -39,6 +39,12 @@ const COMPRESSED_EXTENSIONS: &[&str] = &[
     "docx", "xlsx", "pptx", "dmg", "iso", "whl", "egg",
 ];
 
+/// Files smaller than this don't benefit from single-file striping —
+/// the extra rendezvous handshakes (one per pool member) cost more
+/// than a single pipelined stream saves. 64 MiB is the knee in the
+/// curve on typical LAN links.
+const STRIPING_MIN_FILE_SIZE: u64 = 64 * 1024 * 1024;
+
 fn should_compress(items: &[TransferItem]) -> bool {
     let (mut compressible, mut total) = (0u64, 0u64);
     for item in items {
@@ -690,10 +696,6 @@ async fn handle_serve_upload(
             continue;
         }
         if src.is_file() {
-            // Single-file uploads stay on the first connection so the
-            // dedup pre-flight (HaveBlocks/MissingBlocks round trip) can
-            // fire. Striping a single file across N connections would
-            // need protocol-level chunk routing we don't have.
             let remote_path = if multi_source || rdest.path.ends_with('/') {
                 format!(
                     "{}/{}",
@@ -705,16 +707,36 @@ async fn handle_serve_upload(
             };
             let size = src.metadata()?.len();
             (runner.file_callback())(&src.file_name().unwrap_or_default().to_string_lossy(), size);
-            let server_hash = pool.first_mut().put(&remote_path, src).await?;
-            if args.is_verify() {
-                let p = src.to_path_buf();
-                let local_hash =
-                    tokio::task::spawn_blocking(move || crate::core::checksum::calculate_hash(&p))
-                        .await??;
-                let server_hex: String = server_hash.iter().map(|b| format!("{:02x}", b)).collect();
-                if server_hex != local_hash {
-                    pool.close().await?;
-                    return runner.finish_err(format!("hash mismatch for {}", src.display()));
+
+            // Striping: only on the direct-TCP transport (AEAD per-frame
+            // MAC gives us chunk-level integrity without per-chunk
+            // server-side hashing), only for files big enough that the
+            // extra rendezvous handshakes pay for themselves, and only
+            // when the user actually asked for N>1 parallelism. Dedup
+            // and --verify both rely on a whole-file server-side hash,
+            // which we can't assemble across chunks — those paths still
+            // use the single-connection put().
+            let use_stripe = args.use_direct_tcp()
+                && pool.len() > 1
+                && size >= STRIPING_MIN_FILE_SIZE
+                && !args.is_verify();
+
+            if use_stripe {
+                let _ = pool.striped_put_file(src, &remote_path).await?;
+            } else {
+                let server_hash = pool.first_mut().put(&remote_path, src).await?;
+                if args.is_verify() {
+                    let p = src.to_path_buf();
+                    let local_hash = tokio::task::spawn_blocking(move || {
+                        crate::core::checksum::calculate_hash(&p)
+                    })
+                    .await??;
+                    let server_hex: String =
+                        server_hash.iter().map(|b| format!("{:02x}", b)).collect();
+                    if server_hex != local_hash {
+                        pool.close().await?;
+                        return runner.finish_err(format!("hash mismatch for {}", src.display()));
+                    }
                 }
             }
             (runner.inc_callback())(size);
@@ -900,10 +922,25 @@ async fn handle_serve_download(
     // Two-pass: directories serially first (parents before children), then
     // files via pipelined_get_files so request and reply streams overlap
     // through SSH instead of paying one full RTT per file.
+    // Split file list into "big" (striping candidates) and "normal"
+    // (pipelined batch). A big file eligible for striping monopolises
+    // the whole pool for one file at a time; pipelined batches run
+    // everything else afterwards. The striping threshold + use_stripe
+    // gate match the PUT path exactly — direct-TCP only, pool N>1,
+    // file above size knee, and no --verify (whole-file server hash
+    // can't be assembled from chunks).
+    let use_stripe = args.use_direct_tcp() && pool.len() > 1 && !args.is_verify();
+    let mut big_files: Vec<(String, PathBuf, u64)> = Vec::new();
     let mut files_to_get: Vec<FileTransfer> = Vec::new();
     for item in &items {
         if item.is_dir {
             tokio::fs::create_dir_all(&item.local_path).await?;
+        } else if use_stripe && item.size >= STRIPING_MIN_FILE_SIZE {
+            big_files.push((
+                item.remote_path.clone(),
+                item.local_path.clone(),
+                item.size,
+            ));
         } else {
             files_to_get.push(FileTransfer {
                 remote: item.remote_path.clone(),
@@ -913,21 +950,35 @@ async fn handle_serve_download(
         }
     }
 
-    let file_cb = runner.file_callback();
-    let inc = runner.inc_callback();
-    let sync = args.is_sync();
-    pool.pipelined_get_files_striped(
-        files_to_get,
-        sync,
-        move |_idx, path, size| {
-            file_cb(
-                &path.file_name().unwrap_or_default().to_string_lossy(),
-                size,
-            );
-        },
-        inc,
-    )
-    .await?;
+    for (remote_path, local_path, size) in &big_files {
+        (runner.file_callback())(
+            &local_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy(),
+            *size,
+        );
+        let _ = pool.striped_get_file(remote_path, local_path, *size).await?;
+        (runner.inc_callback())(*size);
+    }
+
+    if !files_to_get.is_empty() {
+        let file_cb = runner.file_callback();
+        let inc = runner.inc_callback();
+        let sync = args.is_sync();
+        pool.pipelined_get_files_striped(
+            files_to_get,
+            sync,
+            move |_idx, path, size| {
+                file_cb(
+                    &path.file_name().unwrap_or_default().to_string_lossy(),
+                    size,
+                );
+            },
+            inc,
+        )
+        .await?;
+    }
 
     pool.close().await?;
     runner.finish_ok()
