@@ -473,6 +473,102 @@ exact path that changed.
 
 ---
 
+## Experiment 19: Parallel SSH Connections Break the Single-Stream Ceiling
+
+**Hypothesis**: After Experiment 18 closed the per-file RTT gap
+through client-side pipelining, bcmr serve ran at ~1.18× `scp -r`
+on the happy path (light load) and, we discovered, fell back to
+~3-5× slower under heavy contention. The remaining gap has a
+structural cause: **SSH gives you one cipher stream per TCP
+connection**. AES-NI tops out at ~500 MB/s/core and ChaCha20 at
+~200-500; a single SSH session is walled in by exactly one
+crypto thread on each side. Opening N independent SSH connections
+in parallel — what `mscp` does — multiplies the crypto ceiling
+by N until NIC or disk takes over. No protocol change.
+
+**Method**: 10000 × 64 KiB files, host-L loopback ssh, same
+dataset as Experiment 17. Run under genuine production contention
+(load average ~93 from unrelated `minimap2 -t 30` jobs on the
+box) so the crypto bottleneck actually materialises — Experiment
+17's "load ~1" numbers hid the single-stream ceiling behind
+abundant headroom. 2 runs per N, `/usr/bin/time` for wall + CPU
+breakdown, `scp -r` as baseline.
+
+| Command | Wall mean (s) | Speedup vs N=1 | Ratio vs scp |
+|---------|--------------:|---------------:|-------------:|
+| `bcmr copy -r --parallel 1` | 67.3 | 1.00× | 3.47× slower |
+| `bcmr copy -r --parallel 2` | 40.8 | 1.65× | 2.10× slower |
+| `bcmr copy -r --parallel 4` | 23.7 | **2.84×** | 1.22× slower |
+| `bcmr copy -r --parallel 8` | **14.7** | **4.58×** | **1.32× faster** |
+| `scp -r` (baseline) | 19.4 | — | 1.00 |
+
+Near-linear through N=4, diminishing past that (box already
+running 90+ threads of other users' CPU work — we're taking what
+we can). **At N=8 bcmr beats scp by 24% on the same loaded box.**
+
+**Implementation**: New `ServeClientPool { clients: Vec<ServeClient> }`
+in `src/core/serve_client.rs`:
+
+- `connect_with_caps(target, caps, n)` opens N connections
+  concurrently via `futures::try_join_all` — total handshake
+  latency ≈ one connection's, not N×, because they auth in
+  parallel.
+- `pipelined_put_files_striped` / `pipelined_get_files_striped`
+  partition input files round-robin across the N clients and
+  drive all buckets concurrently via another `try_join_all`.
+  Each bucket runs the existing single-client pipelined method
+  unchanged; the pool is purely a dispatch-and-scatter layer.
+- PUT hashes come back in input-index order: each bucket saves
+  its original indices, results are re-scattered into a
+  size-N output vec at the end.
+- One-shot protocol ops (`stat`, `list`, `mkdir`) stay on
+  `pool.first_mut()` — no parallelism win for a single round
+  trip, so don't waste the other N-1 connections.
+
+**Server unchanged**: every connection talks the same protocol
+it always did. The pool is a client-side construct; `bcmr serve`
+on the other end sees N independent sessions exactly as if N
+separate users had opted in concurrently.
+
+**UX**: `--parallel N` on the CLI now applies to both transports.
+For the serve fast path, default stays **N=1** (no surprise
+behavior change for small batches — opening 8 SSH connections
+for a 3-file copy is pure handshake tax with no payoff).
+Users who know they're moving many small files or need to
+saturate a fat pipe opt in explicitly.
+
+**The part that's not free**:
+- N× SSH handshakes on connect (done concurrently so wall
+  latency is ~1 handshake, but CPU + auth cost is N×).
+- N× memory for per-client buffers, stdin/stdout pipes, tokio
+  tasks. For N=8 that's ~16 MiB of pipe buffers on the box
+  — trivial. Each `bcmr serve` subprocess adds a few MB of
+  its own.
+- Progress callbacks fire from multiple tasks simultaneously,
+  so they need `Fn + Send + Sync + Clone + 'static` (our
+  runner callbacks already are). `on_complete` no longer fires
+  in input order — documented.
+
+**What doesn't help**: OpenSSH `ControlMaster=auto` multiplexes
+channels over **one** TCP connection, which means they share a
+single cipher stream. Multi-channel ≠ multi-crypto. To lift the
+crypto ceiling you genuinely need N TCP connections = N SSH
+sessions.
+
+**Decision**: Ship. First release where bcmr serve is faster
+than `scp -r` on both many-small-files and a realistically
+contended system. Single-connection baseline (`--parallel 1`)
+unchanged; users who want the win opt in.
+
+**Remaining honest gap**: single large files still trail scp at
+~2× because the per-block BLAKE3 + frame overhead is
+per-stream, and one file uses one stream. Striping a single
+file across N connections would need protocol-level chunk
+routing we don't have; tracked in
+[Open Questions](/ablation/open-questions).
+
+---
+
 ## Summary
 
 Each row below states the specific workload behind the number.
@@ -489,3 +585,4 @@ Don't lift this table out of context without the qualifiers.
 | CAS LRU cap | Walk + sort the CAS dir per PUT (cheap) | Holds store size ≤ cap under 3× 24 MiB repeated uploads (Exp 15) |
 | `CAP_SYNC` per-file fsync gate | Negotiated bit; off by default (matches cp/scp) | 3.9× on 10000 × 64 KiB host-L loopback (24.75 → 6.35 s); ~10 % on 1 GiB single (Exp 17) |
 | Client-side request pipelining | Writer-task spawn per batch; writer.abort() on error path | 1.8× on 10000 × 64 KiB host-L loopback (6.35 → 3.58 s); lands at 1.18× of `scp -r` (Exp 18) |
+| `ServeClientPool` parallel SSH | `--parallel N` opts into N concurrent SSH sessions; default N=1 preserves old behavior | 4.58× scaling N=1→N=8 on host-L under load 93; bcmr N=8 **beats `scp -r` by 24%** (14.7 vs 19.4 s) on 10000 × 64 KiB (Exp 19) |

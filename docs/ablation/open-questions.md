@@ -146,6 +146,60 @@ because $remote rejected $path") and either continue with the
 fallback (current behavior) or exit non-zero (opinionated;
 breaks scripts that didn't realize they were inside a jail).
 
+## Path B: Direct TCP After SSH Rendezvous
+
+[Experiment 19](/ablation/wire-protocol#experiment-19-parallel-ssh-connections-break-the-single-stream-ceiling)
+shipped the "mscp-style" fix: open N independent SSH
+sessions, stripe files across them, get N× the crypto ceiling.
+That took us past `scp -r` on a contended box. The remaining
+single-stream ceiling that Path A **can't** remove is the
+~500 MB/s-per-core cap that each SSH session's cipher imposes:
+the only way past that per-connection is to not encrypt at the
+SSH layer at all.
+
+Shape of the fix:
+
+- Client opens **one** SSH connection to the remote and
+  invokes `bcmr serve --listen <port>` (or a dedicated rendezvous
+  subcommand). SSH is the authenticated channel — key exchange
+  happens here, a shared session key gets derived.
+- Server binds a TCP listener on `<port>`, replies with the
+  port + key over the SSH control channel.
+- Client opens a **direct TCP connection** to the listener,
+  authenticates with the key, and talks the same bcmr serve
+  wire protocol over that socket. SSH connection stays open
+  as the control/watchdog channel.
+- On LAN, the direct TCP path can skip encryption entirely
+  (user opts in via flag — the threat model is "we trust the
+  link"), or use a fast AEAD (AES-GCM with a session key)
+  that isn't constrained to OpenSSH's cipher negotiation.
+
+Risks / design questions that need actual work:
+
+- **Trust model**: now there's a second auth surface. Need to
+  bind the derived key to the SSH session tightly so an
+  attacker can't race to the listener. Review carefully.
+- **Firewall friendliness**: an extra port may not be reachable
+  through an institutional firewall that only allowed SSH. Flag
+  turns this on; otherwise fall back to Path A.
+- **Listener lifecycle**: port allocation, port collision, what
+  happens if the client dies mid-batch. Watchdog via SSH control
+  channel handles the last one; the first two are engineering.
+- **Code organization**: introduce `trait Transport` in
+  `src/core/transport/` with `SshTransport` (current) and
+  `DirectTcpTransport` (feature-gated `--features
+  direct-transport`). Same repo, not extracted to a new crate
+  until a second consumer shows up.
+
+Goal: single-stream saturate a 10 GbE NIC (~1.25 GB/s practical)
+or better on LAN. On WAN this helps less because the wire is
+already the bottleneck — Path A-style parallelism matters more
+there too, and the two are composable (N parallel direct-TCP
+streams).
+
+Tracked on its own branch per decision; won't merge until it's
+demonstrably safe and has a clear user story.
+
 ## xattr Cross-FS Edge Cases
 
 Today's xattr preservation (see code under `commands/copy.rs`) is
