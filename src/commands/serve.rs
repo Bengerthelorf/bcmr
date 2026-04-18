@@ -242,11 +242,8 @@ where
     if aead {
         let key = direct_tcp_key
             .expect("cap mask guarantees direct_tcp_key is Some when CAP_AEAD negotiated");
-        framing = Framing::aead_from_key(
-            key,
-            Direction::ServerToClient,
-            Direction::ClientToServer,
-        )?;
+        framing =
+            Framing::aead_from_key(key, Direction::ServerToClient, Direction::ClientToServer)?;
     }
 
     loop {
@@ -1123,9 +1120,7 @@ fn rendezvous_bind_ip() -> std::net::IpAddr {
     parsed.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
 }
 
-fn handle_open_direct_channel(
-    root: PathBuf,
-) -> Result<(Message, tokio::task::JoinHandle<()>)> {
+fn handle_open_direct_channel(root: PathBuf) -> Result<(Message, tokio::task::JoinHandle<()>)> {
     use ring::rand::{SecureRandom, SystemRandom};
     use zeroize::Zeroizing;
 
@@ -1189,10 +1184,7 @@ async fn run_rendezvous(
     }
 }
 
-async fn verify_auth_hello(
-    stream: &mut tokio::net::TcpStream,
-    session_key: &[u8; 32],
-) -> bool {
+async fn verify_auth_hello(stream: &mut tokio::net::TcpStream, session_key: &[u8; 32]) -> bool {
     let read_budget = std::time::Duration::from_secs(AUTH_HELLO_READ_TIMEOUT_SECS);
     let mac = match tokio::time::timeout(read_budget, protocol::read_message(stream)).await {
         Ok(Ok(Some(Message::AuthHello { mac }))) => mac,

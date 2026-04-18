@@ -108,10 +108,7 @@ impl ServeClient {
     /// `caps` are the data-session caps; CAP_DIRECT_TCP is set internally
     /// on the control handshake regardless.
     #[allow(dead_code)]
-    pub async fn connect_direct_with_caps(
-        ssh_target: &str,
-        caps: u8,
-    ) -> Result<Self, BcmrError> {
+    pub async fn connect_direct_with_caps(ssh_target: &str, caps: u8) -> Result<Self, BcmrError> {
         let spawn = ssh_transport::spawn_remote(ssh_target).await?;
         Self::promote_to_direct_tcp(spawn, caps, Some(ssh_target)).await
     }
@@ -170,7 +167,7 @@ impl ServeClient {
         caps: u8,
         ssh_target: Option<&str>,
     ) -> Result<Self, BcmrError> {
-        use tokio::io::{AsyncWriteExt as _, AsyncReadExt as _};
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         protocol::write_message(
             &mut spawn.stdin,
@@ -368,10 +365,7 @@ impl ServeClient {
 
     #[allow(dead_code)]
     pub fn is_aead_negotiated(&self) -> bool {
-        matches!(
-            self.tx.as_ref(),
-            Some(framing::SendHalf::Aead { .. })
-        )
+        matches!(self.tx.as_ref(), Some(framing::SendHalf::Aead { .. }))
     }
 
     pub async fn stat(&mut self, path: &str) -> Result<(u64, u64, bool), BcmrError> {

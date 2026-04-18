@@ -178,14 +178,9 @@ async fn serve_direct_tcp_squatter_does_not_starve_real_client() {
 
     let squatter = TcpStream::connect(&addr).await.unwrap();
     let (_sr, mut sw) = squatter.into_split();
-    write_message(
-        &mut sw,
-        &Message::AuthHello {
-            mac: [0xAAu8; 32],
-        },
-    )
-    .await
-    .unwrap();
+    write_message(&mut sw, &Message::AuthHello { mac: [0xAAu8; 32] })
+        .await
+        .unwrap();
     drop(sw);
 
     // Mirror the real bcmr client flow: close SSH stdin once the rendezvous
@@ -401,12 +396,7 @@ async fn serve_direct_tcp_pipelined_get_many_files_succeeds() {
     let mut client = ServeClient::connect_direct_local().await.unwrap();
     assert!(client.is_aead_negotiated());
     client
-        .pipelined_get_files(
-            files,
-            false,
-            |_idx, _path: &Path, _size| {},
-            |_n| {},
-        )
+        .pipelined_get_files(files, false, |_idx, _path: &Path, _size| {}, |_n| {})
         .await
         .unwrap();
     client.close().await.unwrap();
@@ -578,7 +568,10 @@ async fn serve_direct_tcp_striped_put_zero_byte_file() {
         .unwrap();
     pool.close().await.unwrap();
 
-    assert!(dst.exists(), "striped PUT of an empty file must still create the dst");
+    assert!(
+        dst.exists(),
+        "striped PUT of an empty file must still create the dst"
+    );
     assert_eq!(std::fs::metadata(&dst).unwrap().len(), 0);
     assert_eq!(
         bytes_to_hex(&returned_hash),
@@ -607,4 +600,3 @@ async fn serve_direct_tcp_striped_put_tiny_file_skips_empty_buckets() {
     assert_eq!(bytes_to_hex(&returned_hash), src_hash_hex);
     assert_eq!(checksum::calculate_hash(&dst).unwrap(), src_hash_hex);
 }
-

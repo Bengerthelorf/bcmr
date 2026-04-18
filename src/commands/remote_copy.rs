@@ -900,11 +900,7 @@ async fn handle_serve_download(
         if item.is_dir {
             tokio::fs::create_dir_all(&item.local_path).await?;
         } else if use_stripe && item.size >= STRIPING_MIN_FILE_SIZE {
-            big_files.push((
-                item.remote_path.clone(),
-                item.local_path.clone(),
-                item.size,
-            ));
+            big_files.push((item.remote_path.clone(), item.local_path.clone(), item.size));
         } else {
             files_to_get.push(FileTransfer {
                 remote: item.remote_path.clone(),
@@ -916,13 +912,12 @@ async fn handle_serve_download(
 
     for (remote_path, local_path, size) in &big_files {
         (runner.file_callback())(
-            &local_path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy(),
+            &local_path.file_name().unwrap_or_default().to_string_lossy(),
             *size,
         );
-        let _ = pool.striped_get_file(remote_path, local_path, *size).await?;
+        let _ = pool
+            .striped_get_file(remote_path, local_path, *size)
+            .await?;
         (runner.inc_callback())(*size);
     }
 

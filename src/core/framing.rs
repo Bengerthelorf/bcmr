@@ -71,11 +71,7 @@ impl Framing {
         }
     }
 
-    pub async fn write_message<W>(
-        &mut self,
-        writer: &mut W,
-        msg: &Message,
-    ) -> Result<(), BcmrError>
+    pub async fn write_message<W>(&mut self, writer: &mut W, msg: &Message) -> Result<(), BcmrError>
     where
         W: AsyncWrite + Unpin,
     {
@@ -141,11 +137,7 @@ pub fn aead_halves(
 }
 
 impl SendHalf {
-    pub async fn write_message<W>(
-        &mut self,
-        writer: &mut W,
-        msg: &Message,
-    ) -> Result<(), BcmrError>
+    pub async fn write_message<W>(&mut self, writer: &mut W, msg: &Message) -> Result<(), BcmrError>
     where
         W: AsyncWrite + Unpin,
     {
@@ -191,18 +183,12 @@ mod tests {
     #[tokio::test]
     async fn aead_round_trip_server_to_client_and_back() {
         let key = [0x77u8; 32];
-        let mut server = Framing::aead_from_key(
-            &key,
-            Direction::ServerToClient,
-            Direction::ClientToServer,
-        )
-        .unwrap();
-        let mut client = Framing::aead_from_key(
-            &key,
-            Direction::ClientToServer,
-            Direction::ServerToClient,
-        )
-        .unwrap();
+        let mut server =
+            Framing::aead_from_key(&key, Direction::ServerToClient, Direction::ClientToServer)
+                .unwrap();
+        let mut client =
+            Framing::aead_from_key(&key, Direction::ClientToServer, Direction::ServerToClient)
+                .unwrap();
 
         let (mut s_to_c_a, mut s_to_c_b) = tokio::io::duplex(64 * 1024);
         let (mut c_to_s_a, mut c_to_s_b) = tokio::io::duplex(64 * 1024);
