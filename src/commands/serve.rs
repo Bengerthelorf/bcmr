@@ -359,6 +359,66 @@ where
                 }
                 Err(e) => Err(e),
             },
+            Message::PutChunked {
+                path,
+                offset,
+                length,
+            } => match validate_path(&path, root) {
+                Ok(p) => {
+                    handle_put_chunked(
+                        p.to_str().unwrap_or(&path),
+                        offset,
+                        length,
+                        sync,
+                        reader,
+                        &mut framing,
+                    )
+                    .await
+                }
+                Err(e) => Err(e),
+            },
+            Message::GetChunked {
+                path,
+                offset,
+                length,
+            } => {
+                match validate_path(&path, root) {
+                    Ok(p) => {
+                        if let Err(e) = handle_get_chunked(
+                            p.to_str().unwrap_or(&path),
+                            offset,
+                            length,
+                            algo,
+                            writer,
+                            &mut framing,
+                        )
+                        .await
+                        {
+                            eprintln!("serve: handler error: {e}");
+                            framing
+                                .write_message(
+                                    writer,
+                                    &Message::Error {
+                                        message: e.to_string(),
+                                    },
+                                )
+                                .await?;
+                        }
+                    }
+                    Err(e) => {
+                        framing
+                            .write_message(
+                                writer,
+                                &Message::Error {
+                                    message: e.to_string(),
+                                },
+                            )
+                            .await?;
+                    }
+                }
+                writer.flush().await?;
+                continue;
+            }
             Message::Mkdir { path } => match validate_path(&path, root) {
                 Ok(p) => handle_mkdir(p.to_str().unwrap_or(&path)).await,
                 Err(e) => Err(e),
@@ -927,6 +987,132 @@ fn enforce_write_bound(written: u64, incoming: usize, declared: u64) -> Result<(
             written
         );
     }
+    Ok(())
+}
+
+/// Receive exactly `length` bytes of Data frames from the client and
+/// pwrite them into `path` starting at `offset`. Unlike `handle_put`,
+/// this handler expects the file to be concurrently written by other
+/// server processes at other offsets (one per chunk from the pool),
+/// so it opens `O_WRONLY|O_CREAT` without truncating, `seek`s to its
+/// own offset, and only that region is its responsibility. Returns
+/// `Ok { hash: None }` — whole-file integrity lives either in the
+/// AEAD per-frame MAC (default) or in the client's post-transfer
+/// rehash under `--verify`.
+async fn handle_put_chunked<R>(
+    path: &str,
+    offset: u64,
+    length: u64,
+    sync: bool,
+    reader: &mut R,
+    framing: &mut Framing,
+) -> Result<Message>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::{AsyncSeekExt, AsyncWriteExt as _};
+
+    if let Some(parent) = Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).await?;
+        }
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .await?;
+    file.seek(std::io::SeekFrom::Start(offset)).await?;
+
+    let mut written: u64 = 0;
+    loop {
+        if written == length {
+            break;
+        }
+        match framing.read_message(reader).await? {
+            Some(Message::Data { payload }) => {
+                if written + payload.len() as u64 > length {
+                    bail!(
+                        "put_chunked: client sent {} bytes past the declared {}",
+                        written + payload.len() as u64 - length,
+                        length
+                    );
+                }
+                file.write_all(&payload).await?;
+                written += payload.len() as u64;
+            }
+            Some(Message::DataCompressed {
+                algo,
+                original_size,
+                payload,
+            }) => {
+                let decoded = compress::decode_block(algo, original_size, &payload)?;
+                if written + decoded.len() as u64 > length {
+                    bail!(
+                        "put_chunked: client sent {} bytes past the declared {}",
+                        written + decoded.len() as u64 - length,
+                        length
+                    );
+                }
+                file.write_all(&decoded).await?;
+                written += decoded.len() as u64;
+            }
+            Some(Message::Done) => break,
+            Some(other) => bail!("put_chunked: unexpected message {other:?}"),
+            None => bail!("put_chunked: client closed connection before Done"),
+        }
+    }
+    if written != length {
+        bail!(
+            "put_chunked: declared {} bytes, received {}",
+            length,
+            written
+        );
+    }
+    if sync {
+        file.sync_all().await?;
+    }
+    Ok(Message::Ok { hash: None })
+}
+
+/// Stream exactly `length` bytes of `path` starting at `offset` as
+/// Data frames, followed by Ok. Mirror of handle_put_chunked.
+async fn handle_get_chunked<W>(
+    path: &str,
+    offset: u64,
+    length: u64,
+    algo: CompressionAlgo,
+    out: &mut W,
+    framing: &mut Framing,
+) -> Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let mut file = fs::File::open(path).await?;
+    file.seek(std::io::SeekFrom::Start(offset)).await?;
+
+    let mut remaining = length;
+    let mut buf = vec![0u8; CHUNK_SIZE];
+    while remaining > 0 {
+        let want = remaining.min(CHUNK_SIZE as u64) as usize;
+        let n = file.read(&mut buf[..want]).await?;
+        if n == 0 {
+            bail!(
+                "get_chunked: unexpected EOF at offset {} (still needed {} bytes)",
+                offset + length - remaining,
+                remaining
+            );
+        }
+        let frame = compress::encode_block(algo, buf[..n].to_vec());
+        framing.write_message(out, &frame).await?;
+        remaining -= n as u64;
+    }
+    framing
+        .write_message(out, &Message::Ok { hash: None })
+        .await?;
     Ok(())
 }
 

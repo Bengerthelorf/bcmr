@@ -16,6 +16,8 @@ const TYPE_DONE: u8 = 0x09;
 const TYPE_HAVE_BLOCKS: u8 = 0x0a;
 const TYPE_OPEN_DIRECT: u8 = 0x0b;
 const TYPE_AUTH_HELLO: u8 = 0x0c;
+const TYPE_PUT_CHUNKED: u8 = 0x0d;
+const TYPE_GET_CHUNKED: u8 = 0x0e;
 
 const TYPE_WELCOME: u8 = 0x81;
 const TYPE_OK: u8 = 0x82;
@@ -161,6 +163,32 @@ pub enum Message {
     OpenDirectChannel,
     AuthHello {
         mac: [u8; 32],
+    },
+    /// Single-file striping PUT: client takes one large file, cuts it
+    /// into N non-overlapping ranges, and fans each range out to its
+    /// own ServeClient (typically from a ServeClientPool). Each chunk
+    /// PUT names the same `path`, declares its own `[offset, offset +
+    /// length)` region, and streams exactly `length` bytes of data
+    /// frames (possibly compressed). Clients coordinate file
+    /// pre-creation by racing on open(2) with O_CREAT|O_WRONLY on the
+    /// first chunk — every server process writes to non-overlapping
+    /// ranges, so no per-fd seeking conflicts exist across the pool.
+    /// Server reply: Ok { hash: None }. Per-chunk hashing doesn't
+    /// compose cleanly into a whole-file BLAKE3 without a second
+    /// read pass, so the client either accepts the AEAD per-frame
+    /// MAC as integrity proof (default) or re-reads the finalised
+    /// dst and hashes itself (under `--verify`).
+    PutChunked {
+        path: String,
+        offset: u64,
+        length: u64,
+    },
+    /// Single-file striping GET: mirror of PutChunked. Server seeks
+    /// to `offset` and streams exactly `length` bytes, then Ok.
+    GetChunked {
+        path: String,
+        offset: u64,
+        length: u64,
     },
 
     // Responses (server → client)
@@ -404,6 +432,26 @@ pub fn encode_message(msg: &Message) -> Vec<u8> {
             write_string(&mut payload, addr);
             payload.extend_from_slice(session_key);
         }
+        Message::PutChunked {
+            path,
+            offset,
+            length,
+        } => {
+            write_u8(&mut payload, TYPE_PUT_CHUNKED);
+            write_string(&mut payload, path);
+            write_u64_le(&mut payload, *offset);
+            write_u64_le(&mut payload, *length);
+        }
+        Message::GetChunked {
+            path,
+            offset,
+            length,
+        } => {
+            write_u8(&mut payload, TYPE_GET_CHUNKED);
+            write_string(&mut payload, path);
+            write_u64_le(&mut payload, *offset);
+            write_u64_le(&mut payload, *length);
+        }
     }
 
     let mut frame = Vec::with_capacity(4 + payload.len());
@@ -607,6 +655,16 @@ pub fn decode_message(data: &[u8]) -> Option<Message> {
         TYPE_DIRECT_READY => Message::DirectChannelReady {
             addr: p.read_string()?,
             session_key: p.read_fixed::<32>()?,
+        },
+        TYPE_PUT_CHUNKED => Message::PutChunked {
+            path: p.read_string()?,
+            offset: p.read_u64_le()?,
+            length: p.read_u64_le()?,
+        },
+        TYPE_GET_CHUNKED => Message::GetChunked {
+            path: p.read_string()?,
+            offset: p.read_u64_le()?,
+            length: p.read_u64_le()?,
         },
         _ => return None,
     };

@@ -573,6 +573,145 @@ impl ServeClient {
         write_file_data_frames(w, tx, data, algo, &|_| {}).await
     }
 
+    /// Single-chunk of a striped PUT: streams exactly `length` bytes
+    /// of `local` starting at `local_offset` to the server, declaring
+    /// the dst `remote` with range `[remote_offset, remote_offset +
+    /// length)`. Paired with `handle_put_chunked` on the server.
+    #[allow(dead_code)] // CLI integration comes in a later commit
+    pub async fn put_chunked(
+        &mut self,
+        remote: &str,
+        local: &Path,
+        local_offset: u64,
+        length: u64,
+    ) -> Result<(), BcmrError> {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+        self.send(&Message::PutChunked {
+            path: remote.to_owned(),
+            offset: local_offset,
+            length,
+        })
+        .await?;
+
+        let algo = self.algo;
+        let w = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| BcmrError::InvalidInput("writer already taken".into()))?;
+        let tx = self
+            .tx
+            .as_mut()
+            .ok_or_else(|| BcmrError::InvalidInput("send framing taken".into()))?;
+
+        let mut file = File::open(local).await?;
+        file.seek(std::io::SeekFrom::Start(local_offset)).await?;
+        let mut remaining = length;
+        let mut buf = vec![0u8; DEDUP_BLOCK_SIZE];
+        while remaining > 0 {
+            let want = remaining.min(DEDUP_BLOCK_SIZE as u64) as usize;
+            let n = file.read(&mut buf[..want]).await?;
+            if n == 0 {
+                return Err(BcmrError::InvalidInput(format!(
+                    "local source truncated: expected {length} bytes from offset {local_offset}"
+                )));
+            }
+            let frame = compress::encode_block(algo, buf[..n].to_vec());
+            tx.write_message(w, &frame).await?;
+            remaining -= n as u64;
+        }
+        tx.write_message(w, &Message::Done).await?;
+        w.flush().await?;
+
+        match self.recv().await? {
+            Message::Ok { .. } => Ok(()),
+            Message::Error { message } => Err(BcmrError::InvalidInput(message)),
+            other => Err(BcmrError::InvalidInput(format!(
+                "unexpected reply to PutChunked: {other:?}"
+            ))),
+        }
+    }
+
+    /// Single-chunk of a striped GET: requests `[remote_offset,
+    /// remote_offset + length)` of `remote` and writes the bytes to
+    /// `local` at `local_offset`. Paired with `handle_get_chunked` on
+    /// the server.
+    #[allow(dead_code)] // CLI integration comes in a later commit
+    pub async fn get_chunked(
+        &mut self,
+        remote: &str,
+        local: &Path,
+        remote_offset: u64,
+        local_offset: u64,
+        length: u64,
+    ) -> Result<(), BcmrError> {
+        use tokio::io::{AsyncSeekExt, AsyncWriteExt as _};
+
+        self.send(&Message::GetChunked {
+            path: remote.to_owned(),
+            offset: remote_offset,
+            length,
+        })
+        .await?;
+
+        // Pre-open + seek the dst so concurrent chunks from other
+        // pool clients don't serialise on `OpenOptions::open`.
+        let mut dst = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(local)
+            .await?;
+        dst.seek(std::io::SeekFrom::Start(local_offset)).await?;
+
+        let mut written = 0u64;
+        loop {
+            match self.recv().await? {
+                Message::Data { payload } => {
+                    if written + payload.len() as u64 > length {
+                        return Err(BcmrError::InvalidInput(format!(
+                            "get_chunked: server sent {} bytes past the requested {}",
+                            written + payload.len() as u64 - length,
+                            length
+                        )));
+                    }
+                    dst.write_all(&payload).await?;
+                    written += payload.len() as u64;
+                }
+                Message::DataCompressed {
+                    algo,
+                    original_size,
+                    payload,
+                } => {
+                    let decoded = compress::decode_block(algo, original_size, &payload)?;
+                    if written + decoded.len() as u64 > length {
+                        return Err(BcmrError::InvalidInput(format!(
+                            "get_chunked: server sent {} bytes past the requested {}",
+                            written + decoded.len() as u64 - length,
+                            length
+                        )));
+                    }
+                    dst.write_all(&decoded).await?;
+                    written += decoded.len() as u64;
+                }
+                Message::Ok { .. } => {
+                    if written != length {
+                        return Err(BcmrError::InvalidInput(format!(
+                            "get_chunked: expected {length} bytes, got {written}"
+                        )));
+                    }
+                    return Ok(());
+                }
+                Message::Error { message } => return Err(BcmrError::InvalidInput(message)),
+                other => {
+                    return Err(BcmrError::InvalidInput(format!(
+                        "unexpected reply to GetChunked: {other:?}"
+                    )))
+                }
+            }
+        }
+    }
+
     async fn put_with_dedup(&mut self, data: &Path, size: u64) -> Result<(), BcmrError> {
         // Compute one hash per block. We re-read the file later for the
         // actual transfer of missing blocks; the alternative (hash and
@@ -1341,6 +1480,158 @@ impl ServeClientPool {
 
         futures::future::try_join_all(futs).await?;
         Ok(())
+    }
+
+    /// Stripe a single file across all N pool clients: cut the source
+    /// into N non-overlapping ranges, farm one range to each client,
+    /// run them concurrently. Each client opens the same dst path
+    /// (O_WRONLY | O_CREAT, no truncate) and writes its region only,
+    /// so the ranges land at their correct offsets via each connection's
+    /// own fd. Returns the whole-file BLAKE3 computed client-side from
+    /// the source — no server-side hash is returned on chunked PUT
+    /// (integrity lives in the AEAD per-frame MAC; callers who want a
+    /// second-level check should re-read the dst after transfer).
+    #[allow(dead_code)] // CLI integration comes in a later commit
+    pub async fn striped_put_file(
+        &mut self,
+        local: &Path,
+        remote: &str,
+    ) -> Result<[u8; 32], BcmrError> {
+        if self.clients.is_empty() {
+            return Err(BcmrError::InvalidInput("pool is empty".into()));
+        }
+        let file_size = tokio::fs::metadata(local).await?.len();
+        let n = self.clients.len() as u64;
+        // Client-side whole-file hash: compute in parallel with the
+        // transfer so the caller gets a final digest without a
+        // separate pass on the hot path.
+        let local_for_hash = local.to_path_buf();
+        let hash_task = tokio::task::spawn_blocking(move || -> Result<[u8; 32], BcmrError> {
+            use std::io::Read;
+            let mut f = std::fs::File::open(&local_for_hash)?;
+            let mut hasher = blake3::Hasher::new();
+            let mut buf = vec![0u8; DEDUP_BLOCK_SIZE];
+            loop {
+                let n = f.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
+            Ok(*hasher.finalize().as_bytes())
+        });
+
+        // Divide the file into N ranges. Last range absorbs the
+        // remainder so total chunks cover exactly [0, file_size).
+        let chunk_size = file_size.div_ceil(n);
+        let mut ranges: Vec<(u64, u64)> = Vec::with_capacity(self.clients.len());
+        let mut offset = 0u64;
+        for _ in 0..self.clients.len() {
+            let length = chunk_size.min(file_size.saturating_sub(offset));
+            ranges.push((offset, length));
+            offset += length;
+        }
+
+        // Farm each range to its pool client. try_join_all runs them
+        // concurrently; any one failure cancels the others and we
+        // surface the first Err.
+        let local_owned = local.to_path_buf();
+        let remote_owned = remote.to_owned();
+        let futs: Vec<_> = self
+            .clients
+            .iter_mut()
+            .zip(ranges.into_iter())
+            .filter(|(_, (_, length))| *length > 0)
+            .map(|(client, (offset, length))| {
+                let local = local_owned.clone();
+                let remote = remote_owned.clone();
+                async move { client.put_chunked(&remote, &local, offset, length).await }
+            })
+            .collect();
+        futures::future::try_join_all(futs).await?;
+
+        hash_task
+            .await
+            .map_err(|e| BcmrError::InvalidInput(format!("hash task join: {e}")))?
+    }
+
+    /// Mirror of `striped_put_file`: pull a single remote file in N
+    /// parallel chunks, each client writing into its own region of
+    /// the local destination (also via `O_WRONLY | O_CREAT`, no
+    /// truncate, per-fd seek). Returns the client-computed BLAKE3 of
+    /// the received dst. Caller is responsible for knowing the remote
+    /// size up-front (from `client.stat` or an upper bound).
+    #[allow(dead_code)] // CLI integration comes in a later commit
+    pub async fn striped_get_file(
+        &mut self,
+        remote: &str,
+        local: &Path,
+        remote_size: u64,
+    ) -> Result<[u8; 32], BcmrError> {
+        if self.clients.is_empty() {
+            return Err(BcmrError::InvalidInput("pool is empty".into()));
+        }
+        // Pre-create + set length so every client's seek+write finds
+        // a properly sized destination (avoids a race where one
+        // client's write grows past another's).
+        let f = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(local)
+            .await?;
+        f.set_len(remote_size).await?;
+        drop(f);
+
+        let n = self.clients.len() as u64;
+        let chunk_size = remote_size.div_ceil(n);
+        let mut ranges: Vec<(u64, u64)> = Vec::with_capacity(self.clients.len());
+        let mut offset = 0u64;
+        for _ in 0..self.clients.len() {
+            let length = chunk_size.min(remote_size.saturating_sub(offset));
+            ranges.push((offset, length));
+            offset += length;
+        }
+
+        let local_owned = local.to_path_buf();
+        let remote_owned = remote.to_owned();
+        let futs: Vec<_> = self
+            .clients
+            .iter_mut()
+            .zip(ranges.into_iter())
+            .filter(|(_, (_, length))| *length > 0)
+            .map(|(client, (offset, length))| {
+                let local = local_owned.clone();
+                let remote = remote_owned.clone();
+                async move {
+                    client
+                        .get_chunked(&remote, &local, offset, offset, length)
+                        .await
+                }
+            })
+            .collect();
+        futures::future::try_join_all(futs).await?;
+
+        // Final hash: re-read dst. Cheaper than trying to compose
+        // chunk hashes (BLAKE3 would require merkle-tree alignment
+        // and adds wire overhead).
+        let local_for_hash = local.to_path_buf();
+        tokio::task::spawn_blocking(move || -> Result<[u8; 32], BcmrError> {
+            use std::io::Read;
+            let mut f = std::fs::File::open(&local_for_hash)?;
+            let mut hasher = blake3::Hasher::new();
+            let mut buf = vec![0u8; DEDUP_BLOCK_SIZE];
+            loop {
+                let n = f.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
+            Ok(*hasher.finalize().as_bytes())
+        })
+        .await
+        .map_err(|e| BcmrError::InvalidInput(format!("hash task join: {e}")))?
     }
 
     /// Cleanly close all N connections.

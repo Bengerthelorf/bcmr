@@ -537,3 +537,89 @@ async fn serve_direct_tcp_pool_striped_put_n4_succeeds() {
     let total_expected: u64 = (0..n).map(|i| (512 + i * 16) as u64).sum();
     assert_eq!(*received.lock().unwrap(), total_expected);
 }
+
+/// Striping: pool with N=4 direct-TCP connections splits a single
+/// 16 MiB file into 4 non-overlapping ranges, each connection pwrites
+/// its range to the shared dst path. Proves the per-client pwrite
+/// concurrency actually composes: total file must be byte-identical
+/// to the source and correctly sized.
+#[tokio::test]
+async fn serve_direct_tcp_striped_put_single_large_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("big.bin");
+    let dst = dir.path().join("big_dst.bin");
+    create_file(&src, 16 * 1024 * 1024 + 731); // non-aligned for range-split edge case
+    let src_hash_hex = checksum::calculate_hash(&src).unwrap();
+
+    let mut pool = ServeClientPool::connect_direct_local(4).await.unwrap();
+    let returned_hash = pool
+        .striped_put_file(&src, dst.to_str().unwrap())
+        .await
+        .unwrap();
+    pool.close().await.unwrap();
+
+    assert_eq!(
+        bytes_to_hex(&returned_hash),
+        src_hash_hex,
+        "pool.striped_put_file must return the whole-file BLAKE3 computed client-side",
+    );
+    assert_eq!(
+        checksum::calculate_hash(&dst).unwrap(),
+        src_hash_hex,
+        "dst on the server side must be byte-identical to src after striped PUT",
+    );
+    assert_eq!(
+        std::fs::metadata(&dst).unwrap().len(),
+        std::fs::metadata(&src).unwrap().len(),
+        "dst size must match src size exactly — no holes, no overrun",
+    );
+}
+
+/// Mirror: striped GET over direct-TCP for a single large file. Pool
+/// with N=4, source file on the server side, each client pulls its
+/// range and writes into the shared local dst. Must produce a
+/// byte-identical copy.
+#[tokio::test]
+async fn serve_direct_tcp_striped_get_single_large_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("big_src.bin");
+    let dst = dir.path().join("big_got.bin");
+    create_file(&src, 16 * 1024 * 1024 + 501);
+    let src_size = std::fs::metadata(&src).unwrap().len();
+    let src_hash_hex = checksum::calculate_hash(&src).unwrap();
+
+    let mut pool = ServeClientPool::connect_direct_local(4).await.unwrap();
+    let got_hash = pool
+        .striped_get_file(src.to_str().unwrap(), &dst, src_size)
+        .await
+        .unwrap();
+    pool.close().await.unwrap();
+
+    assert_eq!(bytes_to_hex(&got_hash), src_hash_hex);
+    assert_eq!(checksum::calculate_hash(&dst).unwrap(), src_hash_hex);
+    assert_eq!(std::fs::metadata(&dst).unwrap().len(), src_size);
+}
+
+/// Edge case: striping a file smaller than pool-size * 1 byte. Some
+/// buckets end up with a zero-byte share. Those buckets must be
+/// skipped rather than sending a PutChunked with length=0 (which
+/// would create a degenerate no-op frame).
+#[tokio::test]
+async fn serve_direct_tcp_striped_put_tiny_file_skips_empty_buckets() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("tiny.bin");
+    let dst = dir.path().join("tiny_dst.bin");
+    create_file(&src, 7); // 7 bytes, pool N=4 → chunk sizes 2, 2, 2, 1
+    let src_hash_hex = checksum::calculate_hash(&src).unwrap();
+
+    let mut pool = ServeClientPool::connect_direct_local(4).await.unwrap();
+    let returned_hash = pool
+        .striped_put_file(&src, dst.to_str().unwrap())
+        .await
+        .unwrap();
+    pool.close().await.unwrap();
+
+    assert_eq!(bytes_to_hex(&returned_hash), src_hash_hex);
+    assert_eq!(checksum::calculate_hash(&dst).unwrap(), src_hash_hex);
+}
+
