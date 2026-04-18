@@ -1397,6 +1397,84 @@ async fn serve_direct_tcp_put_get_roundtrip() {
     assert_eq!(checksum::calculate_hash(&remote_dst).unwrap(), src_hash);
 }
 
+/// Downgrade-attack guard: a rendezvous-authenticated peer that does
+/// NOT advertise CAP_AEAD must be rejected on the direct-TCP channel.
+/// Without this guard, an MITM stripping CAP_AEAD from a real client's
+/// Hello could force the whole data session to run in the clear even
+/// though both sides nominally wanted encryption.
+#[tokio::test]
+async fn serve_direct_tcp_refuses_session_without_aead() {
+    use bcmr::core::protocol::{
+        read_message, write_message, Message, CAP_DIRECT_TCP, PROTOCOL_VERSION,
+    };
+    use std::process::Stdio;
+    use tokio::net::TcpStream;
+
+    let exe = std::env::current_exe().unwrap();
+    let bin_name = if cfg!(windows) { "bcmr.exe" } else { "bcmr" };
+    let bin = exe.parent().unwrap().parent().unwrap().join(bin_name);
+    let mut child = tokio::process::Command::new(&bin)
+        .args(["serve", "--root", "/"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut ssh_stdin = child.stdin.take().unwrap();
+    let mut ssh_stdout = child.stdout.take().unwrap();
+
+    // SSH control: rendezvous, collect addr + key.
+    write_message(
+        &mut ssh_stdin,
+        &Message::Hello {
+            version: PROTOCOL_VERSION,
+            caps: CAP_DIRECT_TCP,
+        },
+    )
+    .await
+    .unwrap();
+    let _welcome = read_message(&mut ssh_stdout).await.unwrap();
+    write_message(&mut ssh_stdin, &Message::OpenDirectChannel)
+        .await
+        .unwrap();
+    let (addr, session_key) = match read_message(&mut ssh_stdout).await.unwrap().unwrap() {
+        Message::DirectChannelReady { addr, session_key } => (addr, session_key),
+        other => panic!("expected DirectChannelReady, got {other:?}"),
+    };
+
+    // TCP data plane: send AuthHello with the real MAC, then a
+    // CAP_AEAD-less Hello (simulating an MITM strip).
+    let stream = TcpStream::connect(&addr).await.unwrap();
+    let (mut rdr, mut wtr) = stream.into_split();
+    let mac = *blake3::keyed_hash(&session_key, b"bcmr-direct-v1").as_bytes();
+    write_message(&mut wtr, &Message::AuthHello { mac })
+        .await
+        .unwrap();
+    write_message(
+        &mut wtr,
+        &Message::Hello {
+            version: PROTOCOL_VERSION,
+            caps: 0, // CAP_AEAD deliberately missing
+        },
+    )
+    .await
+    .unwrap();
+
+    // Server must refuse with Error, not reply with Welcome.
+    match read_message(&mut rdr).await.unwrap() {
+        Some(Message::Error { message }) => {
+            assert!(
+                message.contains("CAP_AEAD"),
+                "expected AEAD-required error, got: {message}"
+            );
+        }
+        other => panic!("direct-TCP session accepted without CAP_AEAD, got {other:?}"),
+    }
+
+    drop(ssh_stdin);
+    let _ = child.wait().await;
+}
+
 /// CAP_AEAD must be masked off on the SSH transport: the server has no
 /// session key to derive the AEAD key from, so advertising the cap
 /// would be a lie that the data plane can't honor. Regression guard.

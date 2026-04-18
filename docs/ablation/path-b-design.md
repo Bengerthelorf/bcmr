@@ -268,7 +268,25 @@ direct-TCP-plain are the same decorator stacked differently.
   current single-core Data frame, not a replacement. v2.
 - **Key rotation within a session**: not v1. 2⁶⁴ nonces per session
   key is unreachable; no practical need.
-- **`direct=plain` over public internet**: the user can shoot
-  themselves if they try. The CLI help and stderr at `--direct=plain`
-  will call this out explicitly but not refuse the combination —
-  forcing the user's hand is worse UX than warning them.
+- **`direct=plain` over public internet**: not exposed as a flag
+  today. The server refuses any direct-TCP session without CAP_AEAD
+  (downgrade-attack guard — see below). If a future workload really
+  wants plaintext on a trusted LAN, reinstate a separate `direct=plain`
+  flag that flips the server-side guard off, clearly gated behind the
+  explicit user choice.
+
+## Downgrade-attack guard
+
+The Hello/Welcome handshake on the data plane runs in plain framing
+so both peers can see the caps byte and decide on AEAD before flipping.
+That's a small window where an on-path attacker could, in principle,
+strip `CAP_AEAD` from a real client's Hello (or the server's Welcome)
+and drive both sides to intersect on zero — silent downgrade to
+plaintext on a session the user asked to be encrypted.
+
+Guard: server refuses to proceed past Welcome on a rendezvous-backed
+session whose effective caps lack `CAP_AEAD`. Client mirrors the same
+check on its side when it has a session key. Stripping the bit is
+therefore a hard failure, not a silent downgrade.
+
+`serve_direct_tcp_refuses_session_without_aead` exercises this path.

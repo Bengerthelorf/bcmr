@@ -352,6 +352,16 @@ impl ServeClient {
                     )?;
                     self.tx = Some(tx);
                     self.rx = rx;
+                } else if session_key.is_some() {
+                    // Mirror the server-side downgrade guard: if we
+                    // have a session key (we asked for direct-TCP)
+                    // but the intersection dropped CAP_AEAD, something
+                    // between us and the server stripped the bit.
+                    // Bail rather than run the data plane unencrypted.
+                    return Err(BcmrError::CryptoFailure(
+                        "direct-TCP negotiated without CAP_AEAD — possible downgrade, refusing"
+                            .into(),
+                    ));
                 }
                 Ok(())
             }

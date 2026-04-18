@@ -235,6 +235,28 @@ where
     let direct_tcp = (effective_caps & CAP_DIRECT_TCP) != 0;
     let aead = (effective_caps & CAP_AEAD) != 0;
 
+    // Downgrade-attack guard: on a rendezvous-backed direct-TCP
+    // transport, refuse to proceed without AEAD. Without this, an
+    // attacker who can strip bits from a MITM'd Hello could clear
+    // CAP_AEAD from the client's offer; both sides would then
+    // intersect to zero, keep framing Plain, and the session would
+    // carry real file bytes in the clear across the public internet.
+    // We require AEAD whenever a session key exists, which matches
+    // the "direct-TCP => encrypted" user expectation.
+    if direct_tcp_key.is_some() && !aead {
+        framing
+            .write_message(
+                writer,
+                &Message::Error {
+                    message: "direct-TCP transport requires CAP_AEAD; refusing plain session"
+                        .to_string(),
+                },
+            )
+            .await?;
+        writer.flush().await?;
+        return Ok(());
+    }
+
     framing
         .write_message(
             writer,
