@@ -92,6 +92,7 @@ impl CompressionAlgo {
 pub struct ListEntry {
     pub path: String,
     pub size: u64,
+    pub mtime: i64,
     pub is_dir: bool,
 }
 
@@ -246,6 +247,7 @@ fn write_opt_u64(buf: &mut Vec<u8>, opt: &Option<u64>) {
 fn write_list_entry(buf: &mut Vec<u8>, entry: &ListEntry) {
     write_string(buf, &entry.path);
     write_u64_le(buf, entry.size);
+    write_i64_le(buf, entry.mtime);
     write_u8(buf, entry.is_dir as u8);
 }
 
@@ -491,8 +493,14 @@ impl<'a> Cursor<'a> {
     fn read_list_entry(&mut self) -> Option<ListEntry> {
         let path = self.read_string()?;
         let size = self.read_u64_le()?;
+        let mtime = self.read_i64_le()?;
         let is_dir = self.read_u8()? != 0;
-        Some(ListEntry { path, size, is_dir })
+        Some(ListEntry {
+            path,
+            size,
+            mtime,
+            is_dir,
+        })
     }
 }
 
