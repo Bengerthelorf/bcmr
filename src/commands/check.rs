@@ -154,20 +154,34 @@ async fn collect_both(
         let rdest = parse_remote_path(&dest_str).ok_or_else(|| {
             BcmrError::InvalidInput(format!("Invalid remote path: {}", dest.display()))
         })?;
-        let rdest_sub = if src_is_dir {
+        let rdest_is_dir = remote_is_dir(&rdest, serve).await.unwrap_or(false);
+        let rdest_sub = if rdest_is_dir {
             rdest.join(&src_name)
         } else {
             rdest
         };
         emit_scanning(&rdest_sub.display());
-        let entries = collect_remote_entries(&rdest_sub, serve)
-            .await
-            .unwrap_or_default();
-        emit_scanning_done(entries.len());
-        entries
+        if src_is_dir {
+            let entries = collect_remote_entries(&rdest_sub, serve)
+                .await
+                .unwrap_or_default();
+            emit_scanning_done(entries.len());
+            entries
+        } else {
+            let entry = match remote_size(&rdest_sub, serve).await {
+                Ok(size) => vec![Entry {
+                    rel_path: src_name.clone(),
+                    size,
+                    is_dir: false,
+                }],
+                Err(_) => Vec::new(),
+            };
+            emit_scanning_done(entry.len());
+            entry
+        }
     } else {
         let dest_is_dir = dest.exists() && dest.is_dir();
-        let resolved_dest = if src_is_dir && dest_is_dir {
+        let resolved_dest = if dest_is_dir {
             dest.join(&src_name)
         } else {
             dest.to_path_buf()
@@ -176,13 +190,8 @@ async fn collect_both(
             collect_local_entries(&resolved_dest, excludes).unwrap_or_default()
         } else if resolved_dest.exists() {
             let size = resolved_dest.metadata()?.len();
-            let fname = resolved_dest
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
             vec![Entry {
-                rel_path: fname,
+                rel_path: src_name.clone(),
                 size,
                 is_dir: false,
             }]

@@ -90,9 +90,17 @@ pub(super) async fn handle_serve_upload(
                     }
                 }
             }
+            if args.is_preserve() {
+                let target = RemotePath {
+                    user: rdest.user.clone(),
+                    host: rdest.host.clone(),
+                    path: remote_path.clone(),
+                };
+                crate::core::remote::preserve_remote_attrs(src, &target).await?;
+            }
             (runner.inc_callback())(size);
         } else if src.is_dir() && args.is_recursive() {
-            serve_upload_dir(&mut pool, src, rdest, &runner, excludes, args.is_verify()).await?;
+            serve_upload_dir(&mut pool, src, rdest, &runner, excludes, args).await?;
         }
     }
 
@@ -106,7 +114,7 @@ async fn serve_upload_dir(
     remote_base: &RemotePath,
     runner: &ProgressRunner,
     excludes: &[regex::Regex],
-    verify: bool,
+    args: &Commands,
 ) -> Result<()> {
     let dir_name = local_dir.file_name().unwrap_or_default().to_string_lossy();
     let remote_dir = format!("{}/{}", remote_base.path, dir_name);
@@ -129,8 +137,10 @@ async fn serve_upload_dir(
         }
     }
 
-    let verify_inputs: Option<Vec<PathBuf>> =
-        verify.then(|| files_to_put.iter().map(|f| f.local.clone()).collect());
+    let per_file_inputs: Vec<(PathBuf, String)> = files_to_put
+        .iter()
+        .map(|f| (f.local.clone(), f.remote.clone()))
+        .collect();
 
     let file_cb = runner.file_callback();
     let inc_for_chunks = runner.inc_callback();
@@ -143,8 +153,8 @@ async fn serve_upload_dir(
         })
         .await?;
 
-    if let Some(local_paths) = verify_inputs {
-        for (local_path, server_hash) in local_paths.iter().zip(server_hashes.iter()) {
+    if args.is_verify() {
+        for ((local_path, _), server_hash) in per_file_inputs.iter().zip(server_hashes.iter()) {
             let p = local_path.clone();
             let local_hash =
                 tokio::task::spawn_blocking(move || crate::core::checksum::calculate_hash(&p))
@@ -153,6 +163,16 @@ async fn serve_upload_dir(
             if server_hex != local_hash {
                 bail!("hash mismatch for {}", local_path.display());
             }
+        }
+    }
+    if args.is_preserve() {
+        for (local_path, remote_path) in &per_file_inputs {
+            let target = RemotePath {
+                user: remote_base.user.clone(),
+                host: remote_base.host.clone(),
+                path: remote_path.clone(),
+            };
+            crate::core::remote::preserve_remote_attrs(local_path, &target).await?;
         }
     }
     Ok(())
@@ -298,6 +318,42 @@ pub(super) async fn handle_serve_download(
             inc,
         )
         .await?;
+    }
+
+    if args.is_verify() {
+        for item in &items {
+            if item.is_dir {
+                continue;
+            }
+            let p = item.local_path.clone();
+            let local_hash =
+                tokio::task::spawn_blocking(move || crate::core::checksum::calculate_hash(&p))
+                    .await??;
+            let remote_hash = pool.first_mut().hash(&item.remote_path, 0, None).await?;
+            let remote_hex: String = remote_hash.iter().map(|b| format!("{:02x}", b)).collect();
+            if remote_hex != local_hash {
+                pool.close().await?;
+                return runner
+                    .finish_err(format!("hash mismatch for {}", item.local_path.display()));
+            }
+        }
+    }
+    if args.is_preserve() {
+        let (user, host) = match ssh_target.split_once('@') {
+            Some((u, h)) => (Some(u.to_string()), h.to_string()),
+            None => (None, ssh_target.to_string()),
+        };
+        for item in &items {
+            if item.is_dir {
+                continue;
+            }
+            let target = RemotePath {
+                user: user.clone(),
+                host: host.clone(),
+                path: item.remote_path.clone(),
+            };
+            crate::core::remote::apply_remote_attrs_locally(&target, &item.local_path).await?;
+        }
     }
 
     pool.close().await?;

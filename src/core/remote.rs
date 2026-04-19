@@ -5,7 +5,7 @@ mod ssh_cmd;
 mod transfer;
 
 #[allow(unused_imports)]
-pub use attrs::verify_remote_file;
+pub use attrs::{apply_remote_attrs_locally, preserve_remote_attrs, verify_remote_file};
 #[allow(unused_imports)]
 pub use ops::{
     complete_remote_path, remote_file_hash, remote_file_size, remote_list_files, remote_stat,
