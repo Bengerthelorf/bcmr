@@ -9,6 +9,8 @@ const SESSION_MAGIC: &[u8; 4] = b"BCMR";
 const SESSION_VERSION: u8 = 2;
 const BLOCK_SIZE: u64 = 4 * 1024 * 1024;
 const SESSION_MAX_AGE_SECS: u64 = 7 * 24 * 3600;
+const HASH_LEN: usize = 32;
+const SERIALIZE_FIXED_OVERHEAD: usize = 256;
 
 #[derive(Debug)]
 pub struct Session {
@@ -52,11 +54,13 @@ impl Session {
     }
 
     pub fn session_path(src: &Path, dst: &Path) -> PathBuf {
-        // Separator is NUL because POSIX paths can't contain it — ':' can,
-        // giving (src="a:", dst="b") and (src="a", dst=":b") the same key.
-        let mut key = path_to_raw_bytes(src);
-        key.push(0);
-        key.extend_from_slice(&path_to_raw_bytes(dst));
+        let src_bytes = path_to_raw_bytes(src);
+        let dst_bytes = path_to_raw_bytes(dst);
+        let mut key = Vec::with_capacity(8 + src_bytes.len() + dst_bytes.len());
+        key.extend_from_slice(&(src_bytes.len() as u32).to_le_bytes());
+        key.extend_from_slice(&src_bytes);
+        key.extend_from_slice(&(dst_bytes.len() as u32).to_le_bytes());
+        key.extend_from_slice(&dst_bytes);
         let hash = blake3::hash(&key);
         let hex = &hash.to_hex()[..16];
         session_dir().join(format!("{}.session", hex))
@@ -87,6 +91,11 @@ impl Session {
     pub fn save(&self) -> io::Result<()> {
         let dir = session_dir();
         fs::create_dir_all(&dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+        }
 
         let path = Self::session_path(&self.src_path, &self.dst_path);
         let tmp_path = path.with_extension("tmp");
@@ -146,7 +155,7 @@ impl Session {
 
             use std::io::Seek;
             if file.seek(std::io::SeekFrom::Start(block_offset)).is_err() {
-                continue;
+                return 0;
             }
             let mut read = 0;
             while read < BLOCK_SIZE as usize {
@@ -170,16 +179,20 @@ impl Session {
     }
 
     fn serialize(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
+        let src_bytes = path_to_raw_bytes(&self.src_path);
+        let dst_bytes = path_to_raw_bytes(&self.dst_path);
+        let capacity = SERIALIZE_FIXED_OVERHEAD
+            + src_bytes.len()
+            + dst_bytes.len()
+            + HASH_LEN * self.block_hashes.len();
+        let mut buf = Vec::with_capacity(capacity);
 
         buf.extend_from_slice(SESSION_MAGIC);
         buf.push(SESSION_VERSION);
 
-        let src_bytes = path_to_raw_bytes(&self.src_path);
         buf.extend_from_slice(&(src_bytes.len() as u32).to_le_bytes());
         buf.extend_from_slice(&src_bytes);
 
-        let dst_bytes = path_to_raw_bytes(&self.dst_path);
         buf.extend_from_slice(&(dst_bytes.len() as u32).to_le_bytes());
         buf.extend_from_slice(&dst_bytes);
 
@@ -310,9 +323,14 @@ fn raw_bytes_to_path(bytes: &[u8]) -> PathBuf {
 }
 
 fn session_dir() -> PathBuf {
-    directories::ProjectDirs::from("", "", "bcmr")
-        .map(|d| d.data_local_dir().join("sessions"))
-        .unwrap_or_else(|| PathBuf::from("/tmp/bcmr-sessions"))
+    if let Some(d) = directories::ProjectDirs::from("", "", "bcmr") {
+        return d.data_local_dir().join("sessions");
+    }
+    #[cfg(unix)]
+    let suffix = format!("bcmr-sessions-{}", unsafe { libc::getuid() });
+    #[cfg(not(unix))]
+    let suffix = String::from("bcmr-sessions");
+    std::env::temp_dir().join(suffix)
 }
 
 fn now_secs() -> u64 {
@@ -464,9 +482,6 @@ mod tests {
 
     #[test]
     fn test_session_path_distinct_when_colon_at_boundary() {
-        // With a ':' separator (src="a:", dst="b") and (src="a", dst=":b")
-        // both flatten to b"a::b" and collide. A NUL separator is safe
-        // because POSIX paths forbid NUL.
         let sp1 = Session::session_path(Path::new("a:"), Path::new("b"));
         let sp2 = Session::session_path(Path::new("a"), Path::new(":b"));
         assert_ne!(sp1, sp2);
