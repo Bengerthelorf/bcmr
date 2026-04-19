@@ -55,6 +55,7 @@ impl ServeClient {
                         &Message::Put {
                             path: ft.remote,
                             size: ft.size,
+                            offset: 0,
                         },
                     )
                     .await?;

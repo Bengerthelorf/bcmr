@@ -180,7 +180,25 @@ async fn write_file_data_frames<W>(
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
+    write_file_data_frames_from(writer, tx, data, 0, algo, on_chunk).await
+}
+
+async fn write_file_data_frames_from<W>(
+    writer: &mut W,
+    tx: &mut SendHalf,
+    data: &Path,
+    offset: u64,
+    algo: CompressionAlgo,
+    on_chunk: &(impl Fn(u64) + ?Sized),
+) -> Result<(), BcmrError>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncSeekExt;
     let mut file = File::open(data).await?;
+    if offset > 0 {
+        file.seek(std::io::SeekFrom::Start(offset)).await?;
+    }
     let mut buf = vec![0u8; DEDUP_BLOCK_SIZE];
     loop {
         let n = file.read(&mut buf).await?;

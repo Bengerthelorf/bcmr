@@ -296,6 +296,7 @@ fn write_all_fd(fd: i32, mut buf: &[u8]) -> std::io::Result<()> {
 pub(super) async fn handle_put<W, R>(
     path: &str,
     declared_size: u64,
+    offset: u64,
     sync: bool,
     out: &mut W,
     reader: &mut R,
@@ -305,37 +306,63 @@ where
     W: tokio::io::AsyncWrite + Unpin,
     R: tokio::io::AsyncRead + Unpin,
 {
+    use tokio::io::AsyncSeekExt;
+
+    if offset > declared_size {
+        bail!(
+            "put: offset {} past declared size {}",
+            offset,
+            declared_size
+        );
+    }
     ensure_parent_dir(path).await?;
 
-    let mut file = fs::File::create(path).await?;
-    let mut hasher = blake3::Hasher::new();
-    let mut written: u64 = 0;
+    let mut file = if offset == 0 {
+        fs::File::create(path).await?
+    } else {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .await?;
+        f.seek(std::io::SeekFrom::Start(offset)).await?;
+        f
+    };
+    let mut hasher = if offset == 0 {
+        Some(blake3::Hasher::new())
+    } else {
+        None
+    };
+    let mut written: u64 = offset;
 
     let first = framing.read_message(reader).await?;
     let mut dedup_state: Option<DedupState> = None;
     let mut next: Option<Message> = first;
 
-    if let Some(Message::HaveBlocks { hashes, .. }) = next {
-        if let Some(cap) = cas::cap_bytes() {
-            let _ = tokio::task::spawn_blocking(move || cas::evict_to_cap(cap)).await;
-        }
-
-        let mut bits = vec![0u8; hashes.len().div_ceil(8)];
-        for (i, h) in hashes.iter().enumerate() {
-            if !cas::has(h) {
-                bits[i / 8] |= 1 << (i % 8);
+    if offset == 0 {
+        if let Some(Message::HaveBlocks { hashes, .. }) = next {
+            if let Some(cap) = cas::cap_bytes() {
+                let _ = tokio::task::spawn_blocking(move || cas::evict_to_cap(cap)).await;
             }
+
+            let mut bits = vec![0u8; hashes.len().div_ceil(8)];
+            for (i, h) in hashes.iter().enumerate() {
+                if !cas::has(h) {
+                    bits[i / 8] |= 1 << (i % 8);
+                }
+            }
+            framing
+                .write_message(out, &Message::MissingBlocks { bits: bits.clone() })
+                .await?;
+            out.flush().await?;
+            dedup_state = Some(DedupState {
+                hashes,
+                bits,
+                cursor: 0,
+            });
+            next = None;
         }
-        framing
-            .write_message(out, &Message::MissingBlocks { bits: bits.clone() })
-            .await?;
-        out.flush().await?;
-        dedup_state = Some(DedupState {
-            hashes,
-            bits,
-            cursor: 0,
-        });
-        next = None;
     }
 
     let mut msg = next;
@@ -352,7 +379,7 @@ where
                 consume_block(
                     &payload,
                     &mut file,
-                    &mut hasher,
+                    hasher.as_mut(),
                     dedup_state.as_mut(),
                     &mut written,
                     declared_size,
@@ -368,7 +395,7 @@ where
                 consume_block(
                     &decoded,
                     &mut file,
-                    &mut hasher,
+                    hasher.as_mut(),
                     dedup_state.as_mut(),
                     &mut written,
                     declared_size,
@@ -381,8 +408,14 @@ where
     }
 
     if let Some(state) = dedup_state.as_mut() {
-        flush_remaining_cas_blocks(state, &mut file, &mut hasher, &mut written, declared_size)
-            .await?;
+        flush_remaining_cas_blocks(
+            state,
+            &mut file,
+            hasher.as_mut(),
+            &mut written,
+            declared_size,
+        )
+        .await?;
     }
     if written != declared_size {
         bail!(
@@ -398,8 +431,8 @@ where
     }
     drop(file);
 
-    let hash = hasher.finalize().to_hex().to_string();
-    Ok(Message::Ok { hash: Some(hash) })
+    let hash = hasher.map(|h| h.finalize().to_hex().to_string());
+    Ok(Message::Ok { hash })
 }
 
 struct DedupState {
@@ -417,7 +450,7 @@ impl DedupState {
 async fn consume_block(
     block: &[u8],
     file: &mut tokio::fs::File,
-    hasher: &mut blake3::Hasher,
+    mut hasher: Option<&mut blake3::Hasher>,
     dedup: Option<&mut DedupState>,
     written: &mut u64,
     declared_size: u64,
@@ -426,7 +459,9 @@ async fn consume_block(
         while state.cursor < state.hashes.len() && !state.is_missing(state.cursor) {
             let cached = cas::read(&state.hashes[state.cursor])?;
             enforce_write_bound(*written, cached.len(), declared_size)?;
-            hasher.update(&cached);
+            if let Some(h) = hasher.as_mut() {
+                h.update(&cached);
+            }
             file.write_all(&cached).await?;
             *written += cached.len() as u64;
             state.cursor += 1;
@@ -439,7 +474,9 @@ async fn consume_block(
         }
     }
     enforce_write_bound(*written, block.len(), declared_size)?;
-    hasher.update(block);
+    if let Some(h) = hasher.as_mut() {
+        h.update(block);
+    }
     file.write_all(block).await?;
     *written += block.len() as u64;
     Ok(())
@@ -448,7 +485,7 @@ async fn consume_block(
 async fn flush_remaining_cas_blocks(
     state: &mut DedupState,
     file: &mut tokio::fs::File,
-    hasher: &mut blake3::Hasher,
+    mut hasher: Option<&mut blake3::Hasher>,
     written: &mut u64,
     declared_size: u64,
 ) -> Result<()> {
@@ -461,7 +498,9 @@ async fn flush_remaining_cas_blocks(
         }
         let cached = cas::read(&state.hashes[state.cursor])?;
         enforce_write_bound(*written, cached.len(), declared_size)?;
-        hasher.update(&cached);
+        if let Some(h) = hasher.as_mut() {
+            h.update(&cached);
+        }
         file.write_all(&cached).await?;
         *written += cached.len() as u64;
         state.cursor += 1;

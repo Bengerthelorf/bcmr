@@ -285,12 +285,7 @@ pub async fn handle_remote_copy(
     let serve_parallel = parallel.max(1);
 
     let ssh_target = check_target.ssh_target();
-    let needs_resume_semantics = args.is_resume() || args.is_strict() || args.is_append();
-    let serve_result = if needs_resume_semantics {
-        Err(anyhow::anyhow!(
-            "serve: --resume/--strict/--append not implemented, fallback to legacy"
-        ))
-    } else if let Some(ref rdest) = remote_dest {
+    let serve_result = if let Some(ref rdest) = remote_dest {
         handle_serve_upload(args, sources, rdest, &ssh_target, excludes, serve_parallel).await
     } else {
         handle_serve_download(args, sources, dest, &ssh_target, excludes, serve_parallel).await
@@ -301,7 +296,8 @@ pub async fn handle_remote_copy(
         Err(e) => {
             let msg = e.to_string();
             let is_dry_run_redirect = msg.contains("dry-run fallback");
-            let is_resume_redirect = msg.contains("not implemented, fallback to legacy");
+            let is_resume_redirect = msg.contains("not yet supported, fallback to legacy")
+                || msg.contains("not supported, fallback to legacy");
             if !is_dry_run_redirect && !is_resume_redirect && CONFIG.transfer.fallback_warning {
                 eprintln!(
                     "\nbcmr: serve fast path unavailable ({msg}).\n\

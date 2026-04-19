@@ -114,6 +114,7 @@ impl ServeClient {
         self.send(&Message::Put {
             path: path.to_owned(),
             size,
+            offset: 0,
         })
         .await?;
 
@@ -134,6 +135,45 @@ impl ServeClient {
                 "unexpected put response: {other:?}"
             ))),
         }
+    }
+
+    pub async fn put_at(&mut self, path: &str, data: &Path, offset: u64) -> Result<(), BcmrError> {
+        let metadata = tokio::fs::metadata(data).await?;
+        let size = metadata.len();
+        if offset > size {
+            return Err(BcmrError::InvalidInput(format!(
+                "put_at: offset {offset} past local size {size}"
+            )));
+        }
+        self.send(&Message::Put {
+            path: path.to_owned(),
+            size,
+            offset,
+        })
+        .await?;
+        self.put_streaming_from(data, offset).await?;
+        self.send(&Message::Done).await?;
+        match self.recv().await? {
+            Message::Ok { .. } => Ok(()),
+            Message::Error { message } => Err(BcmrError::InvalidInput(message)),
+            other => Err(BcmrError::InvalidInput(format!(
+                "unexpected put_at response: {other:?}"
+            ))),
+        }
+    }
+
+    async fn put_streaming_from(&mut self, data: &Path, offset: u64) -> Result<(), BcmrError> {
+        let algo = self.algo;
+        let w = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| BcmrError::InvalidInput("writer already taken".into()))?;
+        let tx = self
+            .tx
+            .as_mut()
+            .ok_or_else(|| BcmrError::InvalidInput("send framing taken".into()))?;
+        super::super::serve_client::write_file_data_frames_from(w, tx, data, offset, algo, &|_| {})
+            .await
     }
 
     async fn put_streaming(&mut self, data: &Path) -> Result<(), BcmrError> {

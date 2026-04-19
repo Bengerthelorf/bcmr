@@ -222,6 +222,7 @@ fn test_put_roundtrip() {
     let msg = Message::Put {
         path: "/remote/dest.bin".to_string(),
         size: 4_294_967_295,
+        offset: 123_456,
     };
     assert_eq!(roundtrip(msg.clone()), msg);
 }

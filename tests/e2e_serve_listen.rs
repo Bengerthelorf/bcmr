@@ -60,6 +60,7 @@ async fn serve_listen_tcp_handshake_and_put() {
         &Message::Put {
             path: dst.to_string_lossy().into_owned(),
             size: payload.len() as u64,
+            offset: 0,
         },
     )
     .await

@@ -11,6 +11,7 @@ pub use ops::{
     complete_remote_path, remote_file_hash, remote_file_size, remote_list_files, remote_stat,
     remote_total_size, validate_ssh_connection,
 };
+pub use resume::{check_resume_state, ResumeDecision};
 pub use transfer::{
     download_directory, download_file, ensure_remote_tree, upload_directory, upload_file,
 };

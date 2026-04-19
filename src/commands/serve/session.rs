@@ -172,11 +172,12 @@ where
                 Ok(p) => handle_hash(p.to_str().unwrap_or(&path), offset, limit).await,
                 Err(e) => Err(e),
             },
-            Message::Put { path, size } => match validate_path(&path, root) {
+            Message::Put { path, size, offset } => match validate_path(&path, root) {
                 Ok(p) => {
                     handle_put(
                         p.to_str().unwrap_or(&path),
                         size,
+                        offset,
                         sync,
                         writer,
                         reader,
