@@ -216,6 +216,84 @@ async fn serve_direct_tcp_squatter_does_not_starve_real_client() {
 }
 
 #[tokio::test]
+async fn serve_direct_tcp_hung_squatters_do_not_starve_real_client() {
+    use bcmr::core::protocol::{
+        read_message, write_message, Message, CAP_AEAD, CAP_DIRECT_TCP, PROTOCOL_VERSION,
+    };
+    use tokio::net::TcpStream;
+
+    let ServeChild {
+        mut child,
+        stdin: mut ssh_stdin,
+        stdout: mut ssh_stdout,
+    } = spawn_serve("/");
+
+    write_message(
+        &mut ssh_stdin,
+        &Message::Hello {
+            version: PROTOCOL_VERSION,
+            caps: CAP_DIRECT_TCP,
+        },
+    )
+    .await
+    .unwrap();
+    let _ = read_message(&mut ssh_stdout).await.unwrap();
+    write_message(&mut ssh_stdin, &Message::OpenDirectChannel)
+        .await
+        .unwrap();
+    let (addr, key) = match read_message(&mut ssh_stdout).await.unwrap().unwrap() {
+        Message::DirectChannelReady { addr, session_key } => (addr, session_key),
+        other => panic!("expected DirectChannelReady, got {other:?}"),
+    };
+
+    let mut hung = Vec::with_capacity(8);
+    for _ in 0..8 {
+        hung.push(TcpStream::connect(&addr).await.unwrap());
+    }
+
+    let start = std::time::Instant::now();
+    let real = TcpStream::connect(&addr).await.unwrap();
+    drop(ssh_stdin);
+    let (mut rr, mut rw) = real.into_split();
+    let nonce = match read_message(&mut rr).await.unwrap().unwrap() {
+        Message::AuthChallenge { nonce } => nonce,
+        other => panic!("expected AuthChallenge, got {other:?}"),
+    };
+    let good_mac = {
+        let mut input = Vec::with_capacity(b"bcmr-direct-v1".len() + 32);
+        input.extend_from_slice(b"bcmr-direct-v1");
+        input.extend_from_slice(&nonce);
+        *blake3::keyed_hash(&key, &input).as_bytes()
+    };
+    write_message(&mut rw, &Message::AuthHello { mac: good_mac })
+        .await
+        .unwrap();
+    write_message(
+        &mut rw,
+        &Message::Hello {
+            version: PROTOCOL_VERSION,
+            caps: CAP_AEAD,
+        },
+    )
+    .await
+    .unwrap();
+    match read_message(&mut rr).await.unwrap() {
+        Some(Message::Welcome { .. }) => {}
+        other => panic!("real client was starved by hung squatters, got {other:?}"),
+    }
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "serial verify would take 8 * 2s = 16s; got {elapsed:?}"
+    );
+
+    drop(hung);
+    drop(rw);
+    drop(rr);
+    let _ = child.wait().await;
+}
+
+#[tokio::test]
 async fn serve_direct_tcp_refuses_session_without_aead() {
     use bcmr::core::protocol::{
         read_message, write_message, Message, CAP_DIRECT_TCP, PROTOCOL_VERSION,

@@ -98,27 +98,39 @@ async fn run_rendezvous(
     root: PathBuf,
 ) {
     let deadline = tokio::time::Instant::now() + rendezvous_accept_timeout();
-    let authed = loop {
-        let remaining = match deadline.checked_duration_since(tokio::time::Instant::now()) {
-            Some(d) if !d.is_zero() => d,
-            _ => return,
-        };
-        let mut stream = match tokio::time::timeout(remaining, listener.accept()).await {
-            Ok(Ok((stream, _peer))) => stream,
-            Ok(Err(e)) => {
-                eprintln!("serve: direct-tcp accept failed: {e}");
-                return;
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<tokio::net::TcpStream>(1);
+
+    let authed: Option<tokio::net::TcpStream> = loop {
+        tokio::select! {
+            biased;
+            winner = rx.recv() => break winner,
+            _ = tokio::time::sleep_until(deadline) => break None,
+            accept_res = listener.accept() => match accept_res {
+                Ok((stream, _peer)) => {
+                    let sk = zeroize::Zeroizing::new(*session_key);
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        let mut stream = stream;
+                        if verify_auth_hello(&mut stream, &sk).await {
+                            let _ = tx.send(stream).await;
+                        }
+                    });
+                }
+                Err(e) => {
+                    eprintln!("serve: direct-tcp accept failed: {e}");
+                    break None;
+                }
             }
-            Err(_) => return,
-        };
-        if verify_auth_hello(&mut stream, &session_key).await {
-            break stream;
         }
     };
-    drop(listener);
 
-    if let Err(e) = run_direct_session(authed, &session_key, &root).await {
-        eprintln!("serve: direct-tcp session error: {e}");
+    drop(listener);
+    drop(tx);
+
+    if let Some(stream) = authed {
+        if let Err(e) = run_direct_session(stream, &session_key, &root).await {
+            eprintln!("serve: direct-tcp session error: {e}");
+        }
     }
 }
 
