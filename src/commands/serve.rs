@@ -598,7 +598,7 @@ where
         if offset > 0 {
             std_file.seek(std::io::SeekFrom::Start(offset))?;
         }
-        let total_size = std_file.metadata()?.len() - offset;
+        let total_size = std_file.metadata()?.len().saturating_sub(offset);
 
         let mut fds = [0i32; 2];
         if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
@@ -679,7 +679,10 @@ fn splice_n(
             return Err(std::io::Error::last_os_error());
         }
         if got == 0 {
-            break;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "splice hit EOF before the advertised frame payload was produced",
+            ));
         }
         let mut drained = 0usize;
         while drained < got as usize {
@@ -697,7 +700,10 @@ fn splice_n(
                 return Err(std::io::Error::last_os_error());
             }
             if n2 == 0 {
-                break;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "splice could not drain the pipe into stdout",
+                ));
             }
             drained += n2 as usize;
         }
@@ -792,9 +798,15 @@ where
         };
         match m {
             Message::Data { payload } => {
-                enforce_write_bound(written, payload.len(), declared_size)?;
-                consume_block(&payload, &mut file, &mut hasher, dedup_state.as_mut()).await?;
-                written += payload.len() as u64;
+                consume_block(
+                    &payload,
+                    &mut file,
+                    &mut hasher,
+                    dedup_state.as_mut(),
+                    &mut written,
+                    declared_size,
+                )
+                .await?;
             }
             Message::DataCompressed {
                 algo,
@@ -802,9 +814,15 @@ where
                 payload,
             } => {
                 let decoded = compress::decode_block(algo, original_size, &payload)?;
-                enforce_write_bound(written, decoded.len(), declared_size)?;
-                consume_block(&decoded, &mut file, &mut hasher, dedup_state.as_mut()).await?;
-                written += decoded.len() as u64;
+                consume_block(
+                    &decoded,
+                    &mut file,
+                    &mut hasher,
+                    dedup_state.as_mut(),
+                    &mut written,
+                    declared_size,
+                )
+                .await?;
             }
             Message::Done => break,
             other => return Err(anyhow::anyhow!("put: unexpected message {other:?}")),
@@ -816,6 +834,9 @@ where
     if let Some(state) = dedup_state.as_mut() {
         flush_remaining_cas_blocks(state, &mut file, &mut hasher, &mut written, declared_size)
             .await?;
+    }
+    if written != declared_size {
+        bail!("put: declared {} bytes, received {}", declared_size, written);
     }
 
     file.flush().await?;
@@ -845,12 +866,16 @@ async fn consume_block(
     file: &mut tokio::fs::File,
     hasher: &mut blake3::Hasher,
     dedup: Option<&mut DedupState>,
+    written: &mut u64,
+    declared_size: u64,
 ) -> Result<()> {
     if let Some(state) = dedup {
         while state.cursor < state.hashes.len() && !state.is_missing(state.cursor) {
             let cached = cas::read(&state.hashes[state.cursor])?;
+            enforce_write_bound(*written, cached.len(), declared_size)?;
             hasher.update(&cached);
             file.write_all(&cached).await?;
+            *written += cached.len() as u64;
             state.cursor += 1;
         }
         if state.cursor < state.hashes.len() && state.is_missing(state.cursor) {
@@ -861,8 +886,10 @@ async fn consume_block(
             state.cursor += 1;
         }
     }
+    enforce_write_bound(*written, block.len(), declared_size)?;
     hasher.update(block);
     file.write_all(block).await?;
+    *written += block.len() as u64;
     Ok(())
 }
 

@@ -132,6 +132,65 @@ async fn serve_put_size_bound_rejects_oversized() {
     let _ = child.wait().await;
 }
 
+/// Security regression: PUT must also reject a client that sends fewer bytes
+/// than declared and then terminates with Done.
+#[tokio::test]
+async fn serve_put_size_bound_rejects_short_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let dst = dir.path().join("truncated.bin");
+
+    use bcmr::core::protocol::{read_message, write_message, Message, PROTOCOL_VERSION};
+    let ServeChild {
+        mut child,
+        mut stdin,
+        mut stdout,
+    } = spawn_serve("/");
+
+    write_message(
+        &mut stdin,
+        &Message::Hello {
+            version: PROTOCOL_VERSION,
+            caps: 0,
+        },
+    )
+    .await
+    .unwrap();
+    let _welcome = read_message(&mut stdout).await.unwrap();
+
+    write_message(
+        &mut stdin,
+        &Message::Put {
+            path: dst.to_string_lossy().into_owned(),
+            size: 10,
+        },
+    )
+    .await
+    .unwrap();
+    write_message(
+        &mut stdin,
+        &Message::Data {
+            payload: vec![0xcd; 5],
+        },
+    )
+    .await
+    .unwrap();
+    write_message(&mut stdin, &Message::Done).await.unwrap();
+
+    let reply = read_message(&mut stdout).await.unwrap().unwrap();
+    match reply {
+        Message::Error { message } => {
+            assert!(
+                message.contains("declared 10 bytes, received 5"),
+                "expected short-write error, got: {message}"
+            );
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+
+    drop(stdin);
+    let _ = child.wait().await;
+}
+
 #[tokio::test]
 async fn serve_stat_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -378,6 +437,39 @@ async fn serve_get_fast_returns_no_hash_but_correct_bytes() {
     tmp.write_all(&data).unwrap();
     let dst_hash = checksum::calculate_hash(&dir.path().join("fast.dst")).unwrap();
     assert_eq!(dst_hash, src_hash, "fast-mode download must match source");
+}
+
+#[tokio::test]
+async fn serve_get_fast_with_offset_past_eof_returns_empty() {
+    use bcmr::core::protocol::CAP_FAST;
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("fast-offset.bin");
+    create_file(&src, 1024 * 1024);
+
+    let received: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let received_clone = Arc::clone(&received);
+
+    let mut client = bcmr::core::serve_client::ServeClient::connect_local_with_caps(CAP_FAST)
+        .await
+        .unwrap();
+    let server_hash = tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        client.get(src.to_str().unwrap(), 2 * 1024 * 1024, move |chunk| {
+            received_clone.lock().unwrap().extend_from_slice(chunk);
+        }),
+    )
+    .await
+    .expect("fast GET with offset past EOF should terminate")
+    .unwrap();
+    client.close().await.unwrap();
+
+    assert!(
+        server_hash.is_none(),
+        "fast mode should still suppress the server hash past EOF"
+    );
+    let data = Arc::try_unwrap(received).unwrap().into_inner().unwrap();
+    assert!(data.is_empty(), "expected no bytes beyond EOF");
 }
 
 #[tokio::test]
