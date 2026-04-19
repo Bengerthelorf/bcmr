@@ -305,6 +305,10 @@ pub(super) async fn handle_serve_download(
         let _ = pool
             .striped_get_file(remote_path, local_path, *size)
             .await?;
+        if args.is_sync() {
+            let f = tokio::fs::File::open(local_path).await?;
+            crate::core::io::durable_sync_async(&f).await?;
+        }
         (runner.inc_callback())(*size);
     }
 
