@@ -2,6 +2,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use bcmr::core::checksum;
 use bcmr::core::io as durable_io;
@@ -470,6 +471,46 @@ fn e2e_copy_preserves_existing_on_no_force() {
 
     let dst_hash_after = checksum::calculate_hash(&dst).unwrap();
     assert_eq!(dst_hash_before, dst_hash_after);
+}
+
+#[test]
+fn e2e_pipeline_copy_honors_jobs_concurrency() {
+    let dir = tempfile::tempdir().unwrap();
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir(&dst_dir).unwrap();
+
+    let mut args: Vec<String> = vec![
+        "copy".to_string(),
+        "--jobs".to_string(),
+        "4".to_string(),
+        "--test-mode".to_string(),
+        "delay:400".to_string(),
+    ];
+
+    for i in 0..6 {
+        let src = dir.path().join(format!("src-{i}.txt"));
+        fs::write(&src, b"x").unwrap();
+        args.push(src.to_string_lossy().into_owned());
+    }
+    args.push(dst_dir.to_string_lossy().into_owned());
+
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let start = Instant::now();
+    let (ok, _, stderr) = run_bcmr(&arg_refs);
+    let elapsed = start.elapsed();
+
+    assert!(ok, "copy with --jobs should succeed: {}", stderr);
+    assert!(
+        elapsed < Duration::from_millis(1800),
+        "expected file copies to overlap with --jobs; elapsed={elapsed:?}"
+    );
+
+    for i in 0..6 {
+        assert!(
+            dst_dir.join(format!("src-{i}.txt")).exists(),
+            "destination file src-{i}.txt missing"
+        );
+    }
 }
 
 /// Exercises the `block_hashes[..keep]` carry-forward path in `copy_file`:

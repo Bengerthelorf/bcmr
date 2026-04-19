@@ -7,6 +7,7 @@ use crate::ui::display::{print_dry_run, ActionType};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex as ParkingMutex;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
@@ -499,7 +500,7 @@ where
     let test_mode = cli.get_test_mode();
     let callback = ProgressCallback {
         callback: progress_callback,
-        on_new_file: Box::new(on_new_file),
+        on_new_file: Arc::new(on_new_file),
     };
 
     // Directories must exist before concurrent file copies into them,
@@ -558,7 +559,16 @@ where
 #[allow(clippy::type_complexity)]
 pub struct ProgressCallback<F> {
     callback: F,
-    on_new_file: Box<dyn Fn(&str, u64) + Send + Sync>,
+    on_new_file: Arc<dyn Fn(&str, u64) + Send + Sync>,
+}
+
+impl<F: Clone> Clone for ProgressCallback<F> {
+    fn clone(&self) -> Self {
+        Self {
+            callback: self.callback.clone(),
+            on_new_file: Arc::clone(&self.on_new_file),
+        }
+    }
 }
 
 pub async fn copy_path<F>(
@@ -575,7 +585,7 @@ where
     let test_mode = cli.get_test_mode();
     let callback = ProgressCallback {
         callback: progress_callback,
-        on_new_file: Box::new(on_new_file),
+        on_new_file: Arc::new(on_new_file),
     };
 
     if traversal::is_excluded(src, excludes) {
@@ -888,7 +898,7 @@ where
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    (callback.on_new_file)(&file_name, file_size);
+    callback.on_new_file.as_ref()(&file_name, file_size);
 
     let (try_reflink, fail_on_error) = resolve_reflink_mode(reflink_arg);
     let sparse_mode = resolve_sparse_mode(sparse_arg);
@@ -1114,9 +1124,11 @@ where
 {
     let test_mode = cli.get_test_mode();
     let recursive = cli.is_recursive();
+    let jobs = cli.local_jobs();
+    let verbose = cli.is_verbose();
     let callback = ProgressCallback {
         callback: cb.on_progress,
-        on_new_file: cb.on_new_file,
+        on_new_file: Arc::from(cb.on_new_file),
     };
     let on_total_update = cb.on_total_update;
     let on_scan_complete = cb.on_scan_complete;
@@ -1149,6 +1161,7 @@ where
     });
 
     let mut dir_entries: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut in_flight = tokio::task::JoinSet::new();
 
     while let Some(msg) = rx.recv().await {
         match msg {
@@ -1162,17 +1175,24 @@ where
                 PlanEntry::CopyFile { ref src, ref dst } => {
                     check_overwrite(dst, cli).await?;
 
-                    copy_file(
-                        src,
-                        dst,
-                        CopyFileOptions::from_cli(cli, test_mode.clone()),
-                        &callback,
-                    )
-                    .await?;
-
-                    if cli.is_verbose() {
-                        eprintln!("'{}' -> '{}'", src.display(), dst.display());
+                    while in_flight.len() >= jobs {
+                        match in_flight.join_next().await {
+                            Some(res) => res??,
+                            None => break,
+                        }
                     }
+
+                    let src = src.clone();
+                    let dst = dst.clone();
+                    let opts = CopyFileOptions::from_cli(cli, test_mode.clone());
+                    let cb = callback.clone();
+                    in_flight.spawn(async move {
+                        copy_file(&src, &dst, opts, &cb).await?;
+                        if verbose {
+                            eprintln!("'{}' -> '{}'", src.display(), dst.display());
+                        }
+                        Ok::<(), BcmrError>(())
+                    });
                 }
             },
             ScanMessage::Done => {
@@ -1180,6 +1200,10 @@ where
                 break;
             }
         }
+    }
+
+    while let Some(res) = in_flight.join_next().await {
+        res??;
     }
 
     scanner.await??;
