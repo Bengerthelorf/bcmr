@@ -472,6 +472,10 @@ fn e2e_copy_preserves_existing_on_no_force() {
 
 #[test]
 fn e2e_pipeline_copy_honors_jobs_concurrency() {
+    const FILES: usize = 12;
+    const DELAY_MS: u64 = 600;
+    const THRESHOLD_MS: u64 = 4000;
+
     let dir = tempfile::tempdir().unwrap();
     let dst_dir = dir.path().join("dst");
     fs::create_dir(&dst_dir).unwrap();
@@ -481,10 +485,10 @@ fn e2e_pipeline_copy_honors_jobs_concurrency() {
         "--jobs".to_string(),
         "4".to_string(),
         "--test-mode".to_string(),
-        "delay:400".to_string(),
+        format!("delay:{DELAY_MS}"),
     ];
 
-    for i in 0..6 {
+    for i in 0..FILES {
         let src = dir.path().join(format!("src-{i}.txt"));
         fs::write(&src, b"x").unwrap();
         args.push(src.to_string_lossy().into_owned());
@@ -498,11 +502,11 @@ fn e2e_pipeline_copy_honors_jobs_concurrency() {
 
     assert!(ok, "copy with --jobs should succeed: {}", stderr);
     assert!(
-        elapsed < Duration::from_millis(2300),
+        elapsed < Duration::from_millis(THRESHOLD_MS),
         "expected file copies to overlap with --jobs; elapsed={elapsed:?}"
     );
 
-    for i in 0..6 {
+    for i in 0..FILES {
         assert!(
             dst_dir.join(format!("src-{i}.txt")).exists(),
             "destination file src-{i}.txt missing"
