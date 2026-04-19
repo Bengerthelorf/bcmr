@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 struct Entry {
     rel_path: String,
     size: u64,
+    mtime: i64,
     is_dir: bool,
 }
 
@@ -136,16 +137,18 @@ async fn collect_both(
             vec![Entry {
                 rel_path: src_name.clone(),
                 size,
+                mtime: 0,
                 is_dir: false,
             }]
         }
     } else if src_is_dir {
         collect_local_entries(src, excludes)?
     } else {
-        let size = src.metadata()?.len();
+        let meta = src.metadata()?;
         vec![Entry {
             rel_path: src_name.clone(),
-            size,
+            size: meta.len(),
+            mtime: mtime_secs(&meta),
             is_dir: false,
         }]
     };
@@ -172,6 +175,7 @@ async fn collect_both(
                 Ok(size) => vec![Entry {
                     rel_path: src_name.clone(),
                     size,
+                    mtime: 0,
                     is_dir: false,
                 }],
                 Err(_) => Vec::new(),
@@ -189,10 +193,11 @@ async fn collect_both(
         if resolved_dest.exists() && resolved_dest.is_dir() {
             collect_local_entries(&resolved_dest, excludes).unwrap_or_default()
         } else if resolved_dest.exists() {
-            let size = resolved_dest.metadata()?.len();
+            let meta = resolved_dest.metadata()?;
             vec![Entry {
                 rel_path: src_name.clone(),
-                size,
+                size: meta.len(),
+                mtime: mtime_secs(&meta),
                 is_dir: false,
             }]
         } else {
@@ -236,6 +241,7 @@ async fn collect_remote_entries(
                     .map(|e| Entry {
                         rel_path: e.path,
                         size: e.size,
+                        mtime: 0,
                         is_dir: e.is_dir,
                     })
                     .collect());
@@ -251,6 +257,7 @@ async fn collect_remote_entries(
         .map(|(rel_path, size, is_dir)| Entry {
             rel_path,
             size,
+            mtime: 0,
             is_dir,
         })
         .collect())
@@ -263,9 +270,11 @@ fn collect_local_entries(root: &Path, excludes: &[regex::Regex]) -> Result<Vec<E
         let path = entry.path();
         let relative = path.strip_prefix(root)?;
         let meta = entry.metadata()?;
+        let mt = if meta.is_dir() { 0 } else { mtime_secs(&meta) };
         entries.push(Entry {
             rel_path: relative.to_string_lossy().to_string(),
             size: if meta.is_dir() { 0 } else { meta.len() },
+            mtime: mt,
             is_dir: meta.is_dir(),
         });
     }
@@ -295,6 +304,14 @@ fn emit_scanning_done(count: usize) {
     eprintln!(" {} entries", count);
 }
 
+fn mtime_secs(meta: &std::fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 fn diff_entries(src: Vec<Entry>, dst: Vec<Entry>) -> (Vec<FileDiff>, Vec<FileDiff>, Vec<FileDiff>) {
     let dst_map: HashMap<&str, &Entry> = dst.iter().map(|e| (e.rel_path.as_str(), e)).collect();
     let src_map: HashMap<&str, &Entry> = src.iter().map(|e| (e.rel_path.as_str(), e)).collect();
@@ -314,7 +331,11 @@ fn diff_entries(src: Vec<Entry>, dst: Vec<Entry>) -> (Vec<FileDiff>, Vec<FileDif
                     is_dir: s.is_dir,
                 });
             }
-            Some(d) if !s.is_dir && s.size != d.size => {
+            Some(d)
+                if !s.is_dir
+                    && (s.size != d.size
+                        || (s.mtime != 0 && d.mtime != 0 && s.mtime != d.mtime)) =>
+            {
                 modified.push(FileDiff {
                     path: PathBuf::from(&s.rel_path),
                     size: None,
