@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::{Duration, SystemTime};
 
 fn bcmr_bin() -> PathBuf {
     let mut path = std::env::current_exe()
@@ -76,4 +77,31 @@ fn e2e_check_multi_source_detects_real_mismatch() {
     assert!(stdout.contains("\"modified\":[{\"path\":\"a.txt\""));
     assert!(stdout.contains("\"added\":[{\"path\":\"b.txt\""));
     assert!(!stdout.contains("c.txt"));
+}
+
+#[test]
+fn e2e_check_same_size_different_mtime_is_modified() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("x.bin");
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir(&dst_dir).unwrap();
+    let dst = dst_dir.join("x.bin");
+    fs::write(&src, b"1234567890").unwrap();
+    fs::write(&dst, b"1234567890").unwrap();
+
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    let ft = filetime::FileTime::from_system_time(old);
+    filetime::set_file_mtime(&dst, ft).unwrap();
+
+    let (_, stdout, _stderr) = run_bcmr(&[
+        "check",
+        src.to_str().unwrap(),
+        dst_dir.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(stdout.contains("\"in_sync\":false"), "got: {stdout}");
+    assert!(
+        stdout.contains("\"modified\":[{\"path\":\"x.bin\""),
+        "got: {stdout}"
+    );
 }

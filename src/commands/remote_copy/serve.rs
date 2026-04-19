@@ -226,6 +226,12 @@ pub(super) async fn handle_serve_download(
                     is_dir: true,
                 });
                 for entry in &entries {
+                    if crate::core::traversal::is_excluded(
+                        std::path::Path::new(&entry.path),
+                        excludes,
+                    ) {
+                        continue;
+                    }
                     let local = local_base.join(&entry.path);
                     let remote = format!("{}/{}", rp.path, entry.path);
                     if entry.is_dir {
