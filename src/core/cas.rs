@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
 use std::time::SystemTime;
 
+// Env is read once on first use — glibc's getenv lock shows up in profiles
+// on dedup-heavy paths where every block lookup would otherwise hit it.
 static CACHED_ROOT: OnceLock<PathBuf> = OnceLock::new();
 static ROOT_OVERRIDE: RwLock<Option<PathBuf>> = RwLock::new(None);
 

@@ -140,6 +140,9 @@ pub async fn streaming_copy(
     need_src_hash: bool,
     callback: &(impl Fn(u64) + Send + Sync + Clone + 'static),
 ) -> Result<Option<blake3::Hash>, BcmrError> {
+    // dup fds into std handles so the whole copy loop runs under one
+    // spawn_blocking — tokio::fs would dispatch per-read/-write, costing
+    // ~1024 pool bounces per 2 GB (≈6× slowdown observed on Linux NVMe).
     let src_std = src_file.try_clone().await?.into_std().await;
     let dst_std = dst_file.try_clone().await?.into_std().await;
     let session_in = session.take();

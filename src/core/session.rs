@@ -52,8 +52,10 @@ impl Session {
     }
 
     pub fn session_path(src: &Path, dst: &Path) -> PathBuf {
+        // Separator is NUL because POSIX paths can't contain it — ':' can,
+        // giving (src="a:", dst="b") and (src="a", dst=":b") the same key.
         let mut key = path_to_raw_bytes(src);
-        key.push(b':');
+        key.push(0);
         key.extend_from_slice(&path_to_raw_bytes(dst));
         let hash = blake3::hash(&key);
         let hex = &hash.to_hex()[..16];
@@ -458,6 +460,16 @@ mod tests {
             Session::session_path(&src_a, &dst_a),
             Session::session_path(&other, &dst_a)
         );
+    }
+
+    #[test]
+    fn test_session_path_distinct_when_colon_at_boundary() {
+        // With a ':' separator (src="a:", dst="b") and (src="a", dst=":b")
+        // both flatten to b"a::b" and collide. A NUL separator is safe
+        // because POSIX paths forbid NUL.
+        let sp1 = Session::session_path(Path::new("a:"), Path::new("b"));
+        let sp2 = Session::session_path(Path::new("a"), Path::new(":b"));
+        assert_ne!(sp1, sp2);
     }
 
     #[test]

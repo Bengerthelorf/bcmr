@@ -1,3 +1,9 @@
+//! AES-256-GCM framing. Wire: `[u32 LE ct+tag_len] [ciphertext] [16B tag]`.
+//! Nonce = `direction byte || per-direction u64 counter` (never transmitted).
+//! The direction byte is load-bearing: without it the two counters-from-zero
+//! streams sharing one session key would collide on nonce, and AES-GCM
+//! nonce reuse is a catastrophic failure (plaintext + auth key recovery).
+
 #![allow(dead_code)]
 
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};

@@ -1,3 +1,8 @@
+//! Wire frame: `[u32 LE payload_len] [u8 type] [payload…]`. Integers are
+//! little-endian, strings are `[u32 len][bytes]`, optional fields are
+//! tag-prefixed. Type bytes 0x01–0x0f are client→server, 0x81–0x8c are
+//! server→client.
+
 use std::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
