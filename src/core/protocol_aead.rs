@@ -235,7 +235,7 @@ mod tests {
     #[test]
     fn multi_message_ordered_decode() {
         let key = test_key();
-        let msgs = vec![
+        let msgs = [
             Message::Hello {
                 version: 1,
                 caps: 0,

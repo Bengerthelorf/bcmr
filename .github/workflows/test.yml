@@ -37,7 +37,7 @@ jobs:
         run: cargo test --verbose --features test-support
 
       - name: Clippy (deny warnings)
-        run: cargo clippy --features test-support -- -D warnings
+        run: cargo clippy --all-targets --features test-support -- -D warnings
 
       - name: Formatting check
         run: cargo fmt --check

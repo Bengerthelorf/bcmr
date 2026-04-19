@@ -33,6 +33,11 @@ impl CleanupRegistry {
     pub fn len(&self) -> usize {
         self.paths.lock().len()
     }
+
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.paths.lock().is_empty()
+    }
 }
 
 impl Default for CleanupRegistry {
@@ -55,10 +60,11 @@ mod tests {
     fn register_unregister_roundtrip() {
         let r = CleanupRegistry::new();
         let p = PathBuf::from("/tmp/does-not-matter-42");
+        assert!(r.is_empty());
         r.register(&p);
         assert_eq!(r.len(), 1);
         r.unregister(&p);
-        assert_eq!(r.len(), 0);
+        assert!(r.is_empty());
     }
 
     #[test]
@@ -74,7 +80,7 @@ mod tests {
         r.drain_and_remove();
         assert!(!a.exists());
         assert!(!b.exists());
-        assert_eq!(r.len(), 0);
+        assert!(r.is_empty());
     }
 
     #[test]

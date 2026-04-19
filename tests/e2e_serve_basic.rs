@@ -222,13 +222,10 @@ async fn serve_list_directory() {
 
     let names: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
     assert!(
-        names.iter().any(|n| *n == "alpha.bin"),
+        names.contains(&"alpha.bin"),
         "missing alpha.bin in {names:?}"
     );
-    assert!(
-        names.iter().any(|n| *n == "beta.bin"),
-        "missing beta.bin in {names:?}"
-    );
+    assert!(names.contains(&"beta.bin"), "missing beta.bin in {names:?}");
     assert!(
         names.iter().any(|n| n.contains("gamma.bin")),
         "missing gamma.bin in {names:?}"
@@ -314,6 +311,7 @@ async fn serve_get_compressible_roundtrip() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn serve_cas_lru_eviction_under_load() {
     let _g = cas_test_lock();
 
@@ -368,6 +366,7 @@ async fn serve_cas_lru_eviction_under_load() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn serve_dedup_repeats_use_cas() {
     let _g = cas_test_lock();
     let cas_tmp = tempfile::tempdir().unwrap();

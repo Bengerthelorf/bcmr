@@ -110,7 +110,7 @@ proptest! {
     fn decode_handles_length_prefix_without_payload(len in 0u32..1024) {
         let mut buf = len.to_le_bytes().to_vec();
         let _ = decode_message(&buf);
-        buf.extend_from_slice(&vec![0u8; 4]);
+        buf.extend_from_slice(&[0u8; 4]);
         let _ = decode_message(&buf);
     }
 

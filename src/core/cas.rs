@@ -8,6 +8,8 @@ use std::time::SystemTime;
 // on dedup-heavy paths where every block lookup would otherwise hit it.
 static CACHED_ROOT: OnceLock<PathBuf> = OnceLock::new();
 static ROOT_OVERRIDE: RwLock<Option<PathBuf>> = RwLock::new(None);
+static CACHED_CAP: OnceLock<Option<u64>> = OnceLock::new();
+static CAP_OVERRIDE: RwLock<Option<Option<u64>>> = RwLock::new(None);
 
 pub fn cas_root() -> PathBuf {
     if let Some(p) = ROOT_OVERRIDE.read().unwrap().as_ref() {
@@ -84,6 +86,13 @@ fn unique_tmp_path(dst: &Path) -> PathBuf {
 }
 
 pub fn cap_bytes() -> Option<u64> {
+    if let Some(p) = CAP_OVERRIDE.read().unwrap().as_ref() {
+        return *p;
+    }
+    *CACHED_CAP.get_or_init(compute_cap)
+}
+
+fn compute_cap() -> Option<u64> {
     let raw = std::env::var("BCMR_CAS_CAP_MB").ok();
     let mb: u64 = match raw.as_deref().and_then(|s| s.parse().ok()) {
         Some(0) => return None,
@@ -91,6 +100,11 @@ pub fn cap_bytes() -> Option<u64> {
         None => 1024,
     };
     Some(mb * 1024 * 1024)
+}
+
+#[cfg(test)]
+pub fn set_cap_override(v: Option<Option<u64>>) {
+    *CAP_OVERRIDE.write().unwrap() = v;
 }
 
 pub fn evict_to_cap(cap: u64) -> io::Result<u64> {
@@ -265,17 +279,13 @@ mod tests {
     }
 
     #[test]
-    fn cap_env_zero_disables() {
+    fn cap_override_zero_disables() {
         let _g = lock_cas();
-        let prev = std::env::var("BCMR_CAS_CAP_MB").ok();
-        std::env::set_var("BCMR_CAS_CAP_MB", "0");
+        set_cap_override(Some(None));
         assert!(cap_bytes().is_none());
-        std::env::set_var("BCMR_CAS_CAP_MB", "10");
+        set_cap_override(Some(Some(10 * 1024 * 1024)));
         assert_eq!(cap_bytes(), Some(10 * 1024 * 1024));
-        match prev {
-            Some(v) => std::env::set_var("BCMR_CAS_CAP_MB", v),
-            None => std::env::remove_var("BCMR_CAS_CAP_MB"),
-        }
+        set_cap_override(None);
     }
 
     #[test]
