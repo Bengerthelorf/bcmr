@@ -2,6 +2,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(not(windows))]
 use std::time::{Duration, Instant};
 
 use bcmr::core::checksum;
@@ -470,6 +471,7 @@ fn e2e_copy_preserves_existing_on_no_force() {
     assert_eq!(dst_hash_before, dst_hash_after);
 }
 
+#[cfg(not(windows))]
 #[test]
 fn e2e_pipeline_copy_honors_jobs_concurrency() {
     const FILES: usize = 12;
