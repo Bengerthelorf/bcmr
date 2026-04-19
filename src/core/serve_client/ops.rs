@@ -46,8 +46,6 @@ impl ServeClient {
         }
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    #[allow(dead_code)]
     pub async fn hash(
         &mut self,
         path: &str,

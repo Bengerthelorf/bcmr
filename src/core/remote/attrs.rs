@@ -4,10 +4,7 @@ use super::RemotePath;
 use crate::core::error::BcmrError;
 use std::path::Path;
 
-pub(super) async fn preserve_remote_attrs(
-    local_src: &Path,
-    remote: &RemotePath,
-) -> Result<(), BcmrError> {
+pub async fn preserve_remote_attrs(local_src: &Path, remote: &RemotePath) -> Result<(), BcmrError> {
     let meta = local_src.metadata()?;
 
     let mode = {
@@ -111,7 +108,7 @@ fn apply_local_attrs(
     Ok(())
 }
 
-pub(super) async fn apply_remote_attrs_locally(
+pub async fn apply_remote_attrs_locally(
     remote: &RemotePath,
     local_path: &Path,
 ) -> Result<(), BcmrError> {
