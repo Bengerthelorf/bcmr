@@ -1,10 +1,87 @@
-use super::{is_plain_mode, STRIPING_MIN_FILE_SIZE};
+use super::{is_plain_mode, transfer_options_from_cli, STRIPING_MIN_FILE_SIZE};
 use crate::cli::Commands;
-use crate::core::remote::{parse_remote_path, RemotePath};
+use crate::core::remote::{check_resume_state, parse_remote_path, RemotePath, ResumeDecision};
 use crate::core::serve_client::{FileTransfer, ServeClientPool};
 use crate::ui::runner::ProgressRunner;
 use anyhow::{bail, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+enum UploadDecision {
+    Skip,
+    Overwrite,
+    Append(u64),
+}
+
+async fn upload_resume_offset(
+    pool: &mut ServeClientPool,
+    args: &Commands,
+    local_src: &Path,
+    remote_path: &str,
+    local_size: u64,
+) -> Result<Option<UploadDecision>> {
+    let opts = transfer_options_from_cli(args);
+    if !(opts.resume || opts.append || opts.strict) {
+        return Ok(None);
+    }
+    let existing_size = match pool.first_mut().stat(remote_path).await {
+        Ok((size, _mtime, is_dir)) => {
+            if is_dir {
+                bail!("remote path {remote_path} is a directory");
+            }
+            Some(size)
+        }
+        Err(_) => None,
+    };
+    let local_clone = local_src.to_path_buf();
+    let remote_str = remote_path.to_string();
+    let decision = check_resume_state(
+        &opts,
+        existing_size,
+        local_size,
+        async move || {
+            let bytes = pool_hash(pool, &remote_str, None).await?;
+            Ok(hex_of(&bytes))
+        },
+        async move || {
+            let p = local_clone.clone();
+            let h = tokio::task::spawn_blocking(move || crate::core::checksum::calculate_hash(&p))
+                .await??;
+            Ok(h)
+        },
+        async move |limit| {
+            let p = local_src.to_path_buf();
+            let h = tokio::task::spawn_blocking(move || {
+                crate::core::checksum::calculate_partial_hash(&p, limit)
+            })
+            .await??;
+            Ok(h)
+        },
+    )
+    .await?;
+    Ok(Some(to_upload_decision(decision)))
+}
+
+async fn pool_hash(
+    pool: &mut ServeClientPool,
+    remote: &str,
+    limit: Option<u64>,
+) -> Result<[u8; 32], crate::core::error::BcmrError> {
+    pool.first_mut().hash(remote, 0, limit).await
+}
+
+fn hex_of(b: &[u8; 32]) -> String {
+    b.iter().map(|x| format!("{:02x}", x)).collect()
+}
+
+fn to_upload_decision(d: ResumeDecision) -> UploadDecision {
+    if d.skip_entirely {
+        UploadDecision::Skip
+    } else if d.use_append_mode && d.skip_bytes > 0 {
+        UploadDecision::Append(d.skip_bytes)
+    } else {
+        UploadDecision::Overwrite
+    }
+}
 
 pub(super) async fn handle_serve_upload(
     args: &Commands,
@@ -67,13 +144,41 @@ pub(super) async fn handle_serve_upload(
             let size = src.metadata()?.len();
             (runner.file_callback())(&src.file_name().unwrap_or_default().to_string_lossy(), size);
 
+            let resume_offset =
+                upload_resume_offset(&mut pool, args, src, &remote_path, size).await?;
+            if let Some(UploadDecision::Skip) = resume_offset {
+                (runner.inc_callback())(size);
+                continue;
+            }
+            let offset = match resume_offset {
+                Some(UploadDecision::Append(o)) => o,
+                _ => 0,
+            };
+
             let use_stripe = args.use_direct_tcp()
                 && pool.len() > 1
                 && size >= STRIPING_MIN_FILE_SIZE
-                && !args.is_verify();
+                && !args.is_verify()
+                && offset == 0;
 
             if use_stripe {
                 let _ = pool.striped_put_file(src, &remote_path).await?;
+            } else if offset > 0 {
+                pool.first_mut().put_at(&remote_path, src, offset).await?;
+                if args.is_verify() {
+                    let p = src.to_path_buf();
+                    let local_hash = tokio::task::spawn_blocking(move || {
+                        crate::core::checksum::calculate_hash(&p)
+                    })
+                    .await??;
+                    let remote_hash = pool.first_mut().hash(&remote_path, 0, None).await?;
+                    let remote_hex: String =
+                        remote_hash.iter().map(|b| format!("{:02x}", b)).collect();
+                    if remote_hex != local_hash {
+                        pool.close().await?;
+                        return runner.finish_err(format!("hash mismatch for {}", src.display()));
+                    }
+                }
             } else {
                 let server_hash = pool.first_mut().put(&remote_path, src).await?;
                 if args.is_verify() {
@@ -100,6 +205,12 @@ pub(super) async fn handle_serve_upload(
             }
             (runner.inc_callback())(size);
         } else if src.is_dir() && args.is_recursive() {
+            if args.is_resume() || args.is_strict() || args.is_append() {
+                pool.close().await?;
+                return Err(anyhow::anyhow!(
+                    "serve: recursive --resume/--strict/--append not supported, fallback to legacy"
+                ));
+            }
             serve_upload_dir(&mut pool, src, rdest, &runner, excludes, args).await?;
         }
     }
@@ -192,6 +303,13 @@ pub(super) async fn handle_serve_download(
         ServeClientPool::connect_with_caps(ssh_target, args.protocol_caps(), parallel).await
     }
     .map_err(|e| anyhow::anyhow!("serve unavailable: {}", e))?;
+
+    if args.is_resume() || args.is_strict() || args.is_append() {
+        pool.close().await?;
+        return Err(anyhow::anyhow!(
+            "serve: download --resume/--strict/--append not yet supported, fallback to legacy"
+        ));
+    }
 
     if args.is_dry_run() {
         pool.close().await?;

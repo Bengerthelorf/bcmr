@@ -44,6 +44,7 @@ async fn serve_root_jail_rejects_escape() {
         &Message::Put {
             path: outside_target.to_string_lossy().into_owned(),
             size: 5,
+            offset: 0,
         },
     )
     .await
@@ -95,6 +96,7 @@ async fn serve_put_size_bound_rejects_oversized() {
         &Message::Put {
             path: dst.to_string_lossy().into_owned(),
             size: 10,
+            offset: 0,
         },
     )
     .await
@@ -153,6 +155,7 @@ async fn serve_put_size_bound_rejects_short_write() {
         &Message::Put {
             path: dst.to_string_lossy().into_owned(),
             size: 10,
+            offset: 0,
         },
     )
     .await

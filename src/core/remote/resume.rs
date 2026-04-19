@@ -1,13 +1,13 @@
 use super::RemoteTransferOptions;
 use crate::core::error::BcmrError;
 
-pub(super) struct ResumeDecision {
-    pub(super) skip_bytes: u64,
-    pub(super) use_append_mode: bool,
-    pub(super) skip_entirely: bool,
+pub struct ResumeDecision {
+    pub skip_bytes: u64,
+    pub use_append_mode: bool,
+    pub skip_entirely: bool,
 }
 
-pub(super) async fn check_resume_state(
+pub async fn check_resume_state(
     opts: &RemoteTransferOptions,
     existing_size: Option<u64>,
     source_size: u64,

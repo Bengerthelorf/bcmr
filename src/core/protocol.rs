@@ -120,6 +120,7 @@ pub enum Message {
     Put {
         path: String,
         size: u64,
+        offset: u64,
     },
     Mkdir {
         path: String,
@@ -283,10 +284,11 @@ pub fn encode_message(msg: &Message) -> Vec<u8> {
             write_string(&mut payload, path);
             write_u64_le(&mut payload, *offset);
         }
-        Message::Put { path, size } => {
+        Message::Put { path, size, offset } => {
             write_u8(&mut payload, TYPE_PUT);
             write_string(&mut payload, path);
             write_u64_le(&mut payload, *size);
+            write_u64_le(&mut payload, *offset);
         }
         Message::Mkdir { path } => {
             write_u8(&mut payload, TYPE_MKDIR);
@@ -539,6 +541,7 @@ pub fn decode_message(data: &[u8]) -> Option<Message> {
         TYPE_PUT => Message::Put {
             path: p.read_string()?,
             size: p.read_u64_le()?,
+            offset: p.read_u64_le()?,
         },
         TYPE_MKDIR => Message::Mkdir {
             path: p.read_string()?,
