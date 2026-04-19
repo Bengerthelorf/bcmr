@@ -1,6 +1,3 @@
-//! Process-wide registry of partial-copy tmp files, drained on SIGINT or
-//! TempFileGuard drop.
-
 use std::path::{Path, PathBuf};
 
 use once_cell::sync::Lazy;

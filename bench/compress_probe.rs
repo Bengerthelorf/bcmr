@@ -1,6 +1,3 @@
-//! Compression ratio + encode/decode throughput for LZ4 and Zstd-1/3/9 on
-//! random, text-like, and mixed 4 MiB blocks.
-
 use std::time::Instant;
 
 fn gen_random(n: usize) -> Vec<u8> {

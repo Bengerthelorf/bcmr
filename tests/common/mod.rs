@@ -1,4 +1,3 @@
-// Each integration test is its own binary; items shared only with other files trip dead_code.
 #![allow(dead_code)]
 
 use std::fs;
@@ -65,7 +64,6 @@ pub fn bytes_to_hex(hash: &[u8; 32]) -> String {
     hash.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-/// Serialises tests that mutate `BCMR_CAS_CAP_MB`; shared-env race otherwise.
 pub fn cas_test_lock() -> std::sync::MutexGuard<'static, ()> {
     use std::sync::{Mutex, OnceLock};
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();

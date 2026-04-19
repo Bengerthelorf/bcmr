@@ -8,8 +8,8 @@ use crate::core::compress;
 use crate::core::error::BcmrError;
 use crate::core::framing::{self, RecvHalf, SendHalf};
 use crate::core::protocol::{
-    self, CompressionAlgo, ListEntry, Message, CAP_AEAD, CAP_DEDUP, CAP_DIRECT_TCP, CAP_LZ4,
-    CAP_ZSTD, PROTOCOL_VERSION,
+    self, CompressionAlgo, ListEntry, Message, AUTH_HELLO_TAG, CAP_AEAD, CAP_DEDUP, CAP_DIRECT_TCP,
+    CAP_LZ4, CAP_ZSTD, PROTOCOL_VERSION,
 };
 use crate::core::protocol_aead::Direction;
 use crate::core::transport::ssh as ssh_transport;
@@ -20,10 +20,6 @@ fn auth_hello_mac(session_key: &[u8; 32], nonce: &[u8; 32]) -> blake3::Hash {
     input[AUTH_HELLO_TAG.len()..].copy_from_slice(nonce);
     blake3::keyed_hash(session_key, &input)
 }
-
-/// Must match the server's `AUTH_HELLO_TAG`; domain-separates the
-/// rendezvous MAC from any other keyed hash sharing this session key.
-const AUTH_HELLO_TAG: &[u8] = b"bcmr-direct-v1";
 
 async fn ssh_target_uses_proxyjump(target: &str) -> bool {
     let target = target.to_owned();
@@ -52,29 +48,22 @@ type BoxedWriter = Box<dyn AsyncWrite + Send + Unpin>;
 
 struct Transport {
     child: Child,
-    /// Direct-TCP only: drains sshd stdout so local ssh doesn't wedge on a
-    /// full pipe.
     _drain: Option<tokio::task::JoinHandle<()>>,
 }
 
 const CLIENT_CAPS: u8 = CAP_LZ4 | CAP_ZSTD | CAP_DEDUP;
 
-/// Below this size the HaveBlocks/MissingBlocks round trip dominates.
 const DEDUP_MIN_FILE_SIZE: u64 = 16 * 1024 * 1024;
 const DEDUP_BLOCK_SIZE: usize = 4 * 1024 * 1024;
 
 pub struct ServeClient {
     transport: Transport,
     reader: BoxedReader,
-    /// Pipelined paths move both into a writer task and restore via
-    /// `reap_writer_task`.
     writer: Option<BoxedWriter>,
     tx: Option<SendHalf>,
     rx: RecvHalf,
     algo: CompressionAlgo,
     dedup_enabled: bool,
-    /// After a pipelined mid-stream error the wire position is indeterminate;
-    /// forcing reconnect is cheaper than resync.
     poisoned: bool,
 }
 
@@ -143,7 +132,6 @@ impl ServeClient {
     #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     fn locate_bcmr_binary() -> Result<std::path::PathBuf, BcmrError> {
-        // current_exe() is the test binary; look alongside it.
         let exe = std::env::current_exe()?;
         let bin_dir = exe
             .parent()
@@ -229,8 +217,6 @@ impl ServeClient {
             }
         };
 
-        // Dial before releasing SSH stdin so the rendezvous backlog has us
-        // before any fast EOF cascade.
         let stream = match tokio::net::TcpStream::connect(&addr).await {
             Ok(s) => s,
             Err(e) => {
@@ -255,7 +241,6 @@ impl ServeClient {
 
         drop(spawn.stdin);
 
-        // Local ssh wedges on a full pipe if we stop reading.
         let mut stdout = spawn.stdout;
         let stdout_drain = tokio::spawn(async move {
             let mut buf = [0u8; 512];
@@ -351,8 +336,6 @@ impl ServeClient {
                     self.tx = Some(tx);
                     self.rx = rx;
                 } else if session_key.is_some() {
-                    // Downgrade guard: direct-TCP without CAP_AEAD means
-                    // something stripped the bit; never cleartext here.
                     return Err(BcmrError::CryptoFailure(
                         "direct-TCP negotiated without CAP_AEAD — possible downgrade, refusing"
                             .into(),
@@ -587,8 +570,6 @@ impl ServeClient {
         })
         .await?;
 
-        // Pre-open + seek so concurrent pool chunks don't serialize on
-        // `OpenOptions::open`.
         let mut dst = tokio::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -646,7 +627,6 @@ impl ServeClient {
     }
 
     async fn put_with_dedup(&mut self, data: &Path, size: u64) -> Result<(), BcmrError> {
-        // Re-reads the file instead of buffering (buffering caps size at RAM).
         let hashes = compute_block_hashes(data, size).await?;
         let n_blocks = hashes.len();
 
@@ -713,8 +693,6 @@ impl ServeClient {
                 Ok(())
             }
             Ok(Err(writer_err)) => {
-                // Reader error is the proximate cause; writer's I/O error
-                // is the same wire closing under it.
                 if reader_errored {
                     Ok(())
                 } else {
@@ -728,7 +706,6 @@ impl ServeClient {
         }
     }
 
-    /// Skips dedup; large files belong on `put()`. Any error poisons `self`.
     pub async fn pipelined_put_files<FChunk, FComplete>(
         &mut self,
         files: Vec<FileTransfer>,
@@ -765,7 +742,6 @@ impl ServeClient {
 
         let (mut wire, mut tx) = self.take_writer()?;
         let algo = self.algo;
-        // Writer task consumes `files`; snapshot for on_complete.
         let progress: Vec<(std::path::PathBuf, u64)> =
             files.iter().map(|f| (f.local.clone(), f.size)).collect();
 
@@ -830,8 +806,6 @@ impl ServeClient {
         Ok(hashes)
     }
 
-    /// On error, completed files are intact; the in-progress file is left
-    /// half-written at its final path (no `.tmp` + rename). Poisons `self`.
     pub async fn pipelined_get_files<FStart, FChunk>(
         &mut self,
         files: Vec<FileTransfer>,
@@ -894,7 +868,6 @@ impl ServeClient {
                     }
                 }
             }
-            // Sync fs: tokio::fs would spawn_blocking per 4 MiB chunk.
             let mut dst = match std::fs::File::create(&ft.local) {
                 Ok(f) => f,
                 Err(e) => {
@@ -1190,7 +1163,6 @@ impl ServeClientPool {
         }
         let n_clients = self.clients.len().min(n_files);
 
-        // Original indices kept per bucket to re-scatter hashes at the end.
         let mut buckets: Vec<(Vec<usize>, Vec<FileTransfer>)> =
             (0..n_clients).map(|_| (Vec::new(), Vec::new())).collect();
         for (i, ft) in files.into_iter().enumerate() {
@@ -1283,8 +1255,6 @@ impl ServeClientPool {
         Ok(())
     }
 
-    /// Dst pre-truncated to handle stale tails and zero-byte src. Returned
-    /// BLAKE3 is client-side; wire integrity is the AEAD per-frame MAC.
     pub async fn striped_put_file(
         &mut self,
         local: &Path,
@@ -1331,8 +1301,6 @@ impl ServeClientPool {
         if self.clients.is_empty() {
             return Err(BcmrError::InvalidInput("pool is empty".into()));
         }
-        // Pre-size so chunks seek+write to final offsets without racing
-        // each other's growth.
         let f = tokio::fs::OpenOptions::new()
             .write(true)
             .create(true)

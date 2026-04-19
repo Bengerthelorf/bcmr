@@ -1,6 +1,3 @@
-//! Wire compression with per-block auto-skip: blocks within 5% of raw are
-//! sent uncompressed.
-
 use crate::core::protocol::{CompressionAlgo, Message};
 
 const AUTO_SKIP_RATIO: f64 = 0.95;

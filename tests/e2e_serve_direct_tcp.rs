@@ -17,8 +17,6 @@ async fn serve_open_direct_channel_reply_is_well_formed() {
     };
     use tokio::net::TcpStream;
 
-    // Tight rendezvous timeout so the per-channel listener doesn't pin the
-    // child for the full default.
     let ServeChild {
         mut child,
         mut stdin,

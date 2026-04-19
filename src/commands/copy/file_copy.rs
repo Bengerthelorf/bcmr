@@ -92,7 +92,6 @@ async fn try_copy_file_range(
     Some(Ok(()))
 }
 
-/// Best-effort xattr copy; ENOTSUP / EPERM are soft failures, matching `cp -p`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn copy_xattrs(src: &Path, dst: &Path) -> std::result::Result<(), BcmrError> {
     let names = match xattr::list(src) {

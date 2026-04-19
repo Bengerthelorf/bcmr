@@ -32,23 +32,20 @@ const TYPE_MISSING_BLOCKS: u8 = 0x8a;
 const TYPE_DIRECT_READY: u8 = 0x8b;
 const TYPE_AUTH_CHALLENGE: u8 = 0x8c;
 
-/// Content-addressed dedup: PUT exchanges block hashes first, only missing
-/// blocks go on the wire.
 pub const CAP_DEDUP: u8 = 0x04;
 
-/// Skip server-side BLAKE3 on PUT/GET; client verifies if it wants to.
 pub const CAP_FAST: u8 = 0x08;
 
-/// Per-file fsync after PUT/GET.
 pub const CAP_SYNC: u8 = 0x10;
 
 pub const CAP_DIRECT_TCP: u8 = 0x20;
 
-/// AES-256-GCM on every post-Welcome message. Hello/Welcome stays plain.
 pub const CAP_AEAD: u8 = 0x40;
 
 pub const CAP_LZ4: u8 = 0x01;
 pub const CAP_ZSTD: u8 = 0x02;
+
+pub const AUTH_HELLO_TAG: &[u8] = b"bcmr-direct-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompressionAlgo {
@@ -129,7 +126,6 @@ pub enum Message {
     AuthHello {
         mac: [u8; 32],
     },
-    /// One slice of a striped PUT; integrity comes from the AEAD per-frame MAC.
     PutChunked {
         path: String,
         offset: u64,
@@ -140,8 +136,6 @@ pub enum Message {
         offset: u64,
         length: u64,
     },
-    /// Preamble to a striped PUT: create-or-truncate dst to exactly `size`.
-    /// Covers "new src smaller than existing dst" and zero-byte src.
     Truncate {
         path: String,
         size: u64,
@@ -192,8 +186,6 @@ pub enum Message {
         addr: String,
         session_key: [u8; 32],
     },
-    /// Binds the AuthHello MAC to a fresh nonce, blocking replay of a
-    /// captured AuthHello into the rendezvous slot.
     AuthChallenge {
         nonce: [u8; 32],
     },
@@ -252,7 +244,6 @@ fn write_list_entry(buf: &mut Vec<u8>, entry: &ListEntry) {
     write_u8(buf, entry.is_dir as u8);
 }
 
-/// Frame: `[4 LE payload_len][1 type][payload...]`.
 pub fn encode_message(msg: &Message) -> Vec<u8> {
     let mut payload = Vec::new();
 

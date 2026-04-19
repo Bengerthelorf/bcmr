@@ -52,8 +52,10 @@ impl Session {
     }
 
     pub fn session_path(src: &Path, dst: &Path) -> PathBuf {
-        let key = format!("{}:{}", src.display(), dst.display());
-        let hash = blake3::hash(key.as_bytes());
+        let mut key = path_to_raw_bytes(src);
+        key.push(b':');
+        key.extend_from_slice(&path_to_raw_bytes(dst));
+        let hash = blake3::hash(&key);
         let hex = &hash.to_hex()[..16];
         session_dir().join(format!("{}.session", hex))
     }
@@ -118,8 +120,6 @@ impl Session {
         }
     }
 
-    /// Offset immediately after the last block whose hash still matches dst,
-    /// walking backward from the tail.
     pub fn find_resume_offset(&self, dst: &Path) -> u64 {
         use std::io::Read;
 
@@ -437,6 +437,27 @@ mod tests {
         let restored = Session::deserialize(&data).unwrap();
         assert_eq!(path_to_raw_bytes(&restored.src_path), raw);
         assert_eq!(path_to_raw_bytes(&restored.dst_path), raw);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_session_path_stable_for_non_utf8_inputs() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        let src_a = PathBuf::from(OsString::from_vec(vec![b'/', 0xff, 0xfe, b'a']));
+        let dst_a = PathBuf::from(OsString::from_vec(vec![b'/', 0xc3, 0x28, b'b']));
+        let src_b = PathBuf::from(OsString::from_vec(vec![b'/', 0xff, 0xfe, b'a']));
+        let dst_b = PathBuf::from(OsString::from_vec(vec![b'/', 0xc3, 0x28, b'b']));
+        assert_eq!(
+            Session::session_path(&src_a, &dst_a),
+            Session::session_path(&src_b, &dst_b)
+        );
+
+        let other = PathBuf::from(OsString::from_vec(vec![b'/', 0xff, 0xff, b'a']));
+        assert_ne!(
+            Session::session_path(&src_a, &dst_a),
+            Session::session_path(&other, &dst_a)
+        );
     }
 
     #[test]

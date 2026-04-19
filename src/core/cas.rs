@@ -1,13 +1,9 @@
-//! Content-addressed store at `~/.local/share/bcmr/cas/<aa>/<bb>/<rest>.blk`,
-//! mtime-LRU on every access.
-
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
 use std::time::SystemTime;
 
-// Env read once: glibc's getenv lock contended on dedup-heavy paths.
 static CACHED_ROOT: OnceLock<PathBuf> = OnceLock::new();
 static ROOT_OVERRIDE: RwLock<Option<PathBuf>> = RwLock::new(None);
 
@@ -85,7 +81,6 @@ fn unique_tmp_path(dst: &Path) -> PathBuf {
     dst.with_extension(format!("blk.tmp.{}.{}", std::process::id(), n))
 }
 
-/// `BCMR_CAS_CAP_MB=0` disables the cap; default 1024.
 pub fn cap_bytes() -> Option<u64> {
     let raw = std::env::var("BCMR_CAS_CAP_MB").ok();
     let mb: u64 = match raw.as_deref().and_then(|s| s.parse().ok()) {
@@ -158,8 +153,6 @@ mod tests {
     use super::*;
 
     fn unique_hash() -> [u8; 32] {
-        // macOS clock resolution is coarser than nanoseconds — counter
-        // guarantees uniqueness.
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -209,7 +202,6 @@ mod tests {
         clear_root();
     }
 
-    // Serialized via CAS_DIR_LOCK: the root override is process-wide.
     fn isolated_cas() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
         set_root_override(Some(tmp.path().to_path_buf()));

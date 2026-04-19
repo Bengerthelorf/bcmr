@@ -242,7 +242,6 @@ where
         on_new_file: Arc::new(on_new_file),
     };
 
-    // Directories must exist before concurrent file copies into them.
     for entry in &plan.entries {
         if let PlanEntry::CreateDir { dst, .. } = entry {
             if !dst.exists() {

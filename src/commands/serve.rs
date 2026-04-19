@@ -46,8 +46,6 @@ pub(super) fn validate_path(raw: &str, root: &Path) -> Result<PathBuf> {
     Ok(canonical)
 }
 
-/// Symlinks are only followed on the existing prefix; a symlink escaping
-/// `root` is caught by the caller's `starts_with` check.
 fn canonicalize_with_ancestor(path: &Path) -> Result<PathBuf> {
     if path.exists() {
         return Ok(std::fs::canonicalize(path)?);
@@ -87,7 +85,6 @@ pub async fn run(root: Option<PathBuf>) -> Result<()> {
 }
 
 pub async fn run_listen(root: Option<PathBuf>, addr: std::net::SocketAddr) -> Result<()> {
-    // Non-loopback bind has no peer auth; require explicit env opt-in.
     if !addr.ip().is_loopback() {
         if std::env::var("BCMR_UNSAFE_LAN_LISTEN").is_ok_and(|v| v == "1") {
             eprintln!(
@@ -105,7 +102,6 @@ pub async fn run_listen(root: Option<PathBuf>, addr: std::net::SocketAddr) -> Re
     let root = resolve_root(root)?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
-    // INVARIANT: test harnesses parse this line for the port — don't change format.
     use tokio::io::AsyncWriteExt as _;
     let mut stdout = io::stdout();
     stdout

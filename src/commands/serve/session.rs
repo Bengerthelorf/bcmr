@@ -28,8 +28,6 @@ where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    // Non-TTY transports must not offer CAP_DIRECT_TCP (recursive
-    // rendezvous amplification) or CAP_AEAD (needs a session key).
     let mut offered_caps = SERVER_CAPS;
     if !allow_direct_tcp {
         offered_caps &= !CAP_DIRECT_TCP;
@@ -80,7 +78,6 @@ where
     let direct_tcp = (effective_caps & CAP_DIRECT_TCP) != 0;
     let aead = (effective_caps & CAP_AEAD) != 0;
 
-    // Downgrade guard: MITM stripping CAP_AEAD would run this session plain.
     if direct_tcp_key.is_some() && !aead {
         framing
             .write_message(
@@ -106,7 +103,6 @@ where
         .await?;
     writer.flush().await?;
 
-    // INVARIANT: Welcome is the plain→AEAD switchover; both sides flip here.
     if aead {
         let key = direct_tcp_key
             .expect("cap mask guarantees direct_tcp_key is Some when CAP_AEAD negotiated");
@@ -120,7 +116,6 @@ where
             None => break,
         };
 
-        // Get/GetChunked arms drive `writer` directly; dispatch must not reply.
         let response = match msg {
             Message::Get { path, offset } => {
                 match validate_path(&path, root) {

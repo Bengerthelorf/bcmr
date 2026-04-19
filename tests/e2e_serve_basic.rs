@@ -125,8 +125,6 @@ async fn serve_put_size_bound_rejects_oversized() {
     let _ = child.wait().await;
 }
 
-/// Security regression: PUT must also reject a client that sends fewer bytes
-/// than declared and then terminates with Done.
 #[tokio::test]
 async fn serve_put_size_bound_rejects_short_write() {
     let dir = tempfile::tempdir().unwrap();

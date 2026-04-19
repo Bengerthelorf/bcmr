@@ -167,7 +167,6 @@ where
                 return Ok(());
             }
 
-            // rename(2) ignores excludes; copy-then-remove honours them.
             copy::copy_path(
                 src,
                 dst,
@@ -240,7 +239,6 @@ async fn remove_directory_contents(
         if path.is_file() {
             fs::remove_file(path).await?;
         } else if path.is_dir() {
-            // remove_dir (not remove_dir_all) — only empties are removed.
             let _ = fs::remove_dir(path).await;
         }
     }

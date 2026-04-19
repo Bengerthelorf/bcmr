@@ -1,6 +1,3 @@
-//! Framing wrapper over `protocol::{read,write}_message`, optionally AEAD.
-//! Starts Plain; flipped to Aead once both peers agree on CAP_AEAD.
-
 use std::sync::Arc;
 
 use ring::aead::LessSafeKey;
@@ -86,8 +83,6 @@ impl Framing {
     }
 }
 
-/// Split-half of a Framing so writer and reader tasks each own their
-/// direction's counter without sharing a `&mut`.
 pub enum SendHalf {
     Plain,
     Aead {

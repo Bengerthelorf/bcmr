@@ -145,7 +145,6 @@ where
     use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
     use tokio::io::AsyncWriteExt;
 
-    // Flush async stdout so raw write(2) in the blocking loop doesn't race.
     out.flush().await?;
 
     let path = path.to_owned();
@@ -310,7 +309,6 @@ where
     let mut next: Option<Message> = first;
 
     if let Some(Message::HaveBlocks { hashes, .. }) = next {
-        // Evict before writing so this PUT doesn't push further past the cap.
         if let Some(cap) = cas::cap_bytes() {
             let _ = tokio::task::spawn_blocking(move || cas::evict_to_cap(cap)).await;
         }
@@ -477,7 +475,6 @@ fn enforce_write_bound(written: u64, incoming: usize, declared: u64) -> Result<(
     Ok(())
 }
 
-/// No truncate: parallel pool writers share the file and write disjoint ranges.
 pub(super) async fn handle_put_chunked<R>(
     path: &str,
     offset: u64,

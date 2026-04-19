@@ -1,5 +1,3 @@
-//! Single-core AEAD encrypt/decrypt/roundtrip throughput at 4 MiB chunks.
-
 use ring::aead::{self, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, CHACHA20_POLY1305};
 use ring::rand::{SecureRandom, SystemRandom};
 use std::time::Instant;

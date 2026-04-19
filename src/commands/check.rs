@@ -232,7 +232,6 @@ async fn collect_remote_entries(
                     .collect());
             }
             Err(_) => {
-                // Serve list caps at the frame size; SSH find has no limit.
                 *serve = None;
             }
         }

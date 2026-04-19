@@ -30,8 +30,6 @@ fn check_removes_sync(
             continue;
         }
 
-        // symlink_metadata() lets us see dangling symlinks (metadata()
-        // would follow the link and report NotFound).
         let md = match path.symlink_metadata() {
             Ok(m) => m,
             Err(_) if force => continue,

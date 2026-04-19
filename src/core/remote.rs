@@ -227,8 +227,6 @@ fn ssh_base_args(target: &str) -> Vec<String> {
     args
 }
 
-/// Per-worker ControlPath: the shared ControlMaster would serialize N
-/// workers onto one cipher context, defeating the parallelism.
 fn ssh_base_args_for_worker(target: &str, worker_id: usize) -> Vec<String> {
     let dir = std::env::temp_dir().join("bcmr-ssh");
     let _ = std::fs::create_dir_all(&dir);
@@ -910,7 +908,6 @@ fn unix_to_touch_ts(secs: i64) -> String {
     let minutes = (rem % 3600) / 60;
     let seconds = rem % 60;
 
-    // Howard Hinnant civil-from-days.
     let z = days as i32 + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
     let doe = (z - era * 146097) as u32;

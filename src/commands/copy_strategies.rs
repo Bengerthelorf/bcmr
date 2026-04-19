@@ -237,8 +237,6 @@ fn streaming_copy_sync(
             blocks_since_checkpoint += 1;
 
             if blocks_since_checkpoint >= CHECKPOINT_INTERVAL_BLOCKS {
-                // Crash-safety invariant: every block in the session is
-                // physically on disk before the session file records it.
                 if let Some(ref s) = session {
                     durable_io::durable_sync(&dst_file)?;
                     let _ = s.save();

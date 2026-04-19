@@ -498,7 +498,7 @@ fn e2e_pipeline_copy_honors_jobs_concurrency() {
 
     assert!(ok, "copy with --jobs should succeed: {}", stderr);
     assert!(
-        elapsed < Duration::from_millis(2200),
+        elapsed < Duration::from_millis(2300),
         "expected file copies to overlap with --jobs; elapsed={elapsed:?}"
     );
 

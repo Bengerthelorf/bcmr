@@ -1,10 +1,9 @@
-use crate::core::protocol::{self, Message};
+use crate::core::protocol::{self, Message, AUTH_HELLO_TAG};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
 const RENDEZVOUS_ACCEPT_TIMEOUT_SECS: u64 = 30;
 
-/// Sub-leased from the accept deadline; `connect+stall` must not drain it.
 const AUTH_HELLO_READ_TIMEOUT_SECS: u64 = 2;
 
 pub(super) const MAX_RENDEZVOUS_PER_SESSION: usize = 16;
@@ -17,7 +16,6 @@ fn rendezvous_accept_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
-/// Drop aborts orphans; `drain_gracefully` awaits on the happy path.
 pub(super) struct RendezvousTasks {
     handles: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -52,10 +50,6 @@ impl Drop for RendezvousTasks {
     }
 }
 
-/// Domain-separation tag for the AuthHello MAC — must match the client side.
-const AUTH_HELLO_TAG: &[u8] = b"bcmr-direct-v1";
-
-/// Bind to the SSH-facing interface only — never 0.0.0.0.
 fn rendezvous_bind_ip() -> std::net::IpAddr {
     use std::net::{IpAddr, Ipv4Addr};
     let parsed = std::env::var("SSH_CONNECTION").ok().and_then(|v| {
@@ -75,8 +69,6 @@ pub(super) fn handle_open_direct_channel(
     use ring::rand::{SecureRandom, SystemRandom};
     use zeroize::Zeroizing;
 
-    // INVARIANT: sync body — adding `.await` breaks the recursion
-    // run_session → this → run_direct_session → run_session.
     let bind_addr = std::net::SocketAddr::new(rendezvous_bind_ip(), 0);
     let std_listener = std::net::TcpListener::bind(bind_addr)?;
     std_listener.set_nonblocking(true)?;
@@ -105,8 +97,6 @@ async fn run_rendezvous(
     session_key: zeroize::Zeroizing<[u8; 32]>,
     root: PathBuf,
 ) {
-    // Squatters must not burn the rendezvous slot; loop-accept until
-    // an authenticated peer dials in or the deadline elapses.
     let deadline = tokio::time::Instant::now() + rendezvous_accept_timeout();
     let authed = loop {
         let remaining = match deadline.checked_duration_since(tokio::time::Instant::now()) {
@@ -177,8 +167,6 @@ async fn run_direct_session(
 ) -> Result<()> {
     let (mut reader, mut writer) = stream.into_split();
 
-    // Box::pin breaks the type-level recursion between run_session
-    // and run_direct_session.
     Box::pin(super::session::run_session(
         &mut reader,
         &mut writer,

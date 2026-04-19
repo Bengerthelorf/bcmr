@@ -2,7 +2,7 @@ use bcmr::core::protocol::{decode_message, encode_message, ListEntry, Message, P
 use proptest::prelude::*;
 
 fn arb_string() -> impl Strategy<Value = String> {
-    "[a-zA-Z0-9/_.-]{0,128}"
+    prop::collection::vec(any::<char>(), 0..128).prop_map(|v| v.into_iter().collect())
 }
 
 fn arb_hash() -> impl Strategy<Value = [u8; 32]> {

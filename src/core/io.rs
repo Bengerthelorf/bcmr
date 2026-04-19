@@ -26,7 +26,6 @@ pub async fn durable_sync_async(file: &tokio::fs::File) -> io::Result<()> {
         .map_err(io::Error::other)?
 }
 
-/// Required after rename() on XFS; ext4's `auto_da_alloc` is the exception.
 pub fn fsync_dir(dir: &Path) {
     if let Ok(d) = std::fs::File::open(dir) {
         let _ = durable_sync(&d);

@@ -33,8 +33,15 @@ pub async fn resolve(
         });
     }
 
-    let dst_len = dst.metadata()?.len();
-    let mut loaded_session = load_and_validate_session(src, dst, file_size)?;
+    let src_pb = src.to_path_buf();
+    let dst_pb = dst.to_path_buf();
+    let (dst_len, mut loaded_session) =
+        tokio::task::spawn_blocking(move || -> Result<(u64, Option<Session>), BcmrError> {
+            let dst_len = dst_pb.metadata()?.len();
+            let session = load_and_validate_session(&src_pb, &dst_pb, file_size)?;
+            Ok((dst_len, session))
+        })
+        .await??;
 
     let decision = if strict {
         resolve_strict(src, dst, file_size, dst_len).await?
@@ -65,8 +72,6 @@ pub async fn resolve(
         Decision::Resume => {}
     }
 
-    // find_resume_offset does blocking disk I/O — offloaded so `-r --jobs N`
-    // doesn't starve the runtime.
     let start_offset = if let Some(session) = loaded_session.take() {
         let dst_pb = dst.to_path_buf();
         let (verified, session) = tokio::task::spawn_blocking(move || {

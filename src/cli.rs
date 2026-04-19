@@ -82,7 +82,6 @@ pub struct CopyMoveArgs {
     #[arg(short = 'n', long)]
     pub dry_run: bool,
 
-    /// Hidden test mode for simulation
     #[arg(long, hide = true, value_parser = parse_test_mode)]
     pub test_mode: Option<TestMode>,
 
@@ -199,7 +198,6 @@ pub enum Commands {
         shell: clap_complete::Shell,
     },
 
-    /// Run as a remote helper (called via SSH, not directly by users)
     #[command(hide = true)]
     Serve {
         /// Restrict all paths to this directory (defaults to $HOME)
@@ -277,7 +275,6 @@ pub enum Commands {
         #[arg(short = 'n', long)]
         dry_run: bool,
 
-        /// Hidden test mode for simulation
         #[arg(long, hide = true, value_parser = parse_test_mode)]
         test_mode: Option<TestMode>,
     },

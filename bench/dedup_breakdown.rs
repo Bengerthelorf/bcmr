@@ -1,6 +1,3 @@
-//! In-process breakdown of a dedup PUT (no SSH, no network) so local
-//! protocol/CAS/hash cost is isolated from link latency.
-
 use bcmr::core::serve_client::ServeClient;
 use std::time::Instant;
 
