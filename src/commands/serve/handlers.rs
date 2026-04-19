@@ -40,9 +40,16 @@ pub(super) async fn handle_list(path: &str) -> Result<Message> {
                 .to_string_lossy()
                 .into_owned();
             let meta = entry.metadata()?;
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
             out.push(ListEntry {
                 path: rel,
                 size: meta.len(),
+                mtime,
                 is_dir: meta.is_dir(),
             });
         }

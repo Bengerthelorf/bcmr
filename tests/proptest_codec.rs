@@ -10,11 +10,14 @@ fn arb_hash() -> impl Strategy<Value = [u8; 32]> {
 }
 
 fn arb_list_entry() -> impl Strategy<Value = ListEntry> {
-    (arb_string(), any::<u64>(), any::<bool>()).prop_map(|(path, size, is_dir)| ListEntry {
-        path,
-        size,
-        is_dir,
-    })
+    (arb_string(), any::<u64>(), any::<i64>(), any::<bool>()).prop_map(
+        |(path, size, mtime, is_dir)| ListEntry {
+            path,
+            size,
+            mtime,
+            is_dir,
+        },
+    )
 }
 
 fn arb_message() -> impl Strategy<Value = Message> {

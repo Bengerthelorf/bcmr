@@ -133,11 +133,11 @@ async fn collect_both(
             emit_scanning_done(entries.len());
             entries
         } else {
-            let size = remote_size(rp, serve).await?;
+            let (size, mtime, _) = remote_stat_full(rp, serve).await?;
             vec![Entry {
                 rel_path: src_name.clone(),
                 size,
-                mtime: 0,
+                mtime,
                 is_dir: false,
             }]
         }
@@ -171,11 +171,11 @@ async fn collect_both(
             emit_scanning_done(entries.len());
             entries
         } else {
-            let entry = match remote_size(&rdest_sub, serve).await {
-                Ok(size) => vec![Entry {
+            let entry = match remote_stat_full(&rdest_sub, serve).await {
+                Ok((size, mtime, _)) => vec![Entry {
                     rel_path: src_name.clone(),
                     size,
-                    mtime: 0,
+                    mtime,
                     is_dir: false,
                 }],
                 Err(_) => Vec::new(),
@@ -220,13 +220,16 @@ async fn remote_is_dir(
     Ok(info.is_dir)
 }
 
-async fn remote_size(rp: &RemotePath, serve: &mut Option<ServeClient>) -> Result<u64, BcmrError> {
+async fn remote_stat_full(
+    rp: &RemotePath,
+    serve: &mut Option<ServeClient>,
+) -> Result<(u64, i64, bool), BcmrError> {
     if let Some(ref mut client) = serve {
-        let (size, _, _) = client.stat(&rp.path).await?;
-        return Ok(size);
+        let (size, mtime, is_dir) = client.stat(&rp.path).await?;
+        return Ok((size, mtime as i64, is_dir));
     }
     let info = remote::remote_stat(rp).await?;
-    Ok(info.size)
+    Ok((info.size, 0, info.is_dir))
 }
 
 async fn collect_remote_entries(
@@ -241,7 +244,7 @@ async fn collect_remote_entries(
                     .map(|e| Entry {
                         rel_path: e.path,
                         size: e.size,
-                        mtime: 0,
+                        mtime: e.mtime,
                         is_dir: e.is_dir,
                     })
                     .collect());

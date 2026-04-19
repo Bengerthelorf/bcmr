@@ -171,16 +171,19 @@ fn test_list_response_multiple_entries_roundtrip() {
             ListEntry {
                 path: "/home/user/a.txt".to_string(),
                 size: 1024,
+                mtime: 1700000000,
                 is_dir: false,
             },
             ListEntry {
                 path: "/home/user/subdir".to_string(),
                 size: 0,
+                mtime: 0,
                 is_dir: true,
             },
             ListEntry {
                 path: "/home/user/b.bin".to_string(),
                 size: 999_999,
+                mtime: -1,
                 is_dir: false,
             },
         ],
