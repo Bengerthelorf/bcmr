@@ -480,6 +480,10 @@ mod tests {
         assert!(Session::deserialize(&buf).is_none());
     }
 
+    // Non-UTF-8 byte roundtrip: only the Unix path_to_raw_bytes path is
+    // lossless. The Windows fallback goes through String::from_utf8_lossy
+    // and replaces invalid bytes with U+FFFD by design.
+    #[cfg(unix)]
     proptest::proptest! {
         #[test]
         fn session_serde_roundtrip_preserves_fields(
@@ -510,7 +514,9 @@ mod tests {
             proptest::prop_assert_eq!(back.block_hashes, block_hashes);
             proptest::prop_assert_eq!(back.src_hash, src_hash_opt);
         }
+    }
 
+    proptest::proptest! {
         #[test]
         fn session_deserialize_never_panics(
             bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..512),
