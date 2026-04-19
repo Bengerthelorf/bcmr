@@ -352,7 +352,6 @@ async fn serve_pool_pipelined_get_n4_succeeds() {
     pool.close().await.unwrap();
 }
 
-/// N=1 degenerate pool must behave identically to a single ServeClient.
 #[tokio::test]
 async fn serve_pool_n1_degenerate_behaves_like_single_client() {
     let dir = tempfile::tempdir().unwrap();

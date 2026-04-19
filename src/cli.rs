@@ -12,9 +12,7 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    /// Output results as JSON (for programmatic / AI-agent consumption).
-    /// On copy/move/remove: detaches to background and writes progress to a log file.
-    /// Use `bcmr status` to query progress.
+    /// Output results as JSON; copy/move/remove detach to background (query with `bcmr status`)
     #[arg(long, global = true)]
     pub json: bool,
 
@@ -108,40 +106,26 @@ pub struct CopyMoveArgs {
     #[arg(long, default_value_t = false)]
     pub sync: bool,
 
-    /// Number of parallel local file copies (default: CPU count, capped at 8).
-    /// For remote transfers, see --parallel on the Copy subcommand.
+    /// Parallel local file copies (default: CPU count, capped at 8)
     #[arg(short = 'j', long = "jobs")]
     pub jobs: Option<usize>,
 
-    /// Wire compression for the serve protocol. Modes: auto (default,
-    /// LZ4+Zstd advertised, Zstd chosen when both sides speak it, with
-    /// per-block auto-skip on incompressible data), zstd, lz4, none.
+    /// Wire compression: auto, zstd, lz4, none
     #[arg(long, default_value = "auto")]
     pub compress: String,
 
-    /// Fast remote mode: client opts out of server-side BLAKE3 on GET
-    /// and accepts hash:None in the Ok response. On Linux the server
-    /// also uses splice(2) for the file→stdout path. Use only when the
-    /// caller verifies integrity another way (e.g. -V which re-hashes
-    /// the dst client-side).
+    /// Skip server-side BLAKE3 on GET (caller verifies another way, e.g. -V)
     #[arg(long, default_value_t = false)]
     pub fast: bool,
 
-    /// Data-plane transport. `ssh` (default) carries data over the SSH
-    /// channel alongside auth. `direct` uses SSH only for rendezvous,
-    /// then opens a dedicated TCP socket for data with AES-256-GCM
-    /// framing — bypasses SSH's single-stream cipher ceiling on fast
-    /// networks. Fails hard if the server doesn't advertise
-    /// CAP_DIRECT_TCP (v0.5.20+).
+    /// Data-plane transport: ssh (default) or direct (AES-256-GCM TCP)
     #[arg(long, value_enum, default_value_t = DirectMode::Ssh)]
     pub direct: DirectMode,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum DirectMode {
-    /// Default: data over the same SSH channel as auth.
     Ssh,
-    /// Data plane over a dedicated AES-256-GCM-framed TCP socket.
     Direct,
 }
 
@@ -152,8 +136,7 @@ pub enum Commands {
         /// Shell to initialize (bash, zsh, fish)
         shell: Shell,
 
-        /// Command prefix (default: no prefix if empty).
-        /// Acts as a "base" for aliases.
+        /// Command prefix (base for aliases; empty = no prefix)
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         cmd: Option<String>,
 
@@ -179,23 +162,15 @@ pub enum Commands {
         #[command(flatten)]
         args: CopyMoveArgs,
 
-        /// Use Copy-on-Write (reflink) if supported
-        /// Modes: force, auto (default), disable
+        /// Copy-on-Write (reflink): force, auto, disable
         #[arg(long, num_args = 0..=1, default_missing_value = "auto")]
         reflink: Option<String>,
 
-        /// Control sparse file creation
-        /// Modes: force, auto (default), disable
+        /// Sparse file creation: force, auto, disable
         #[arg(long, num_args = 0..=1, default_missing_value = "auto")]
         sparse: Option<String>,
 
-        /// Number of parallel connections. On the bcmr serve fast path,
-        /// opens N SSH sessions and stripes files round-robin across
-        /// them — each session has its own cipher stream so this scales
-        /// near-linearly until NIC/disk saturate. On the legacy SCP
-        /// fallback path, the same flag controls parallel per-file SCP
-        /// workers. Default: `scp.parallel_transfers` from config
-        /// (4 out of the box), applied to both transports.
+        /// Number of parallel connections (default from scp.parallel_transfers)
         #[arg(short = 'P', long)]
         parallel: Option<usize>,
     },
@@ -227,18 +202,10 @@ pub enum Commands {
     /// Run as a remote helper (called via SSH, not directly by users)
     #[command(hide = true)]
     Serve {
-        /// Restrict all paths to this directory (canonicalized). Any
-        /// client path that doesn't resolve under this prefix is
-        /// rejected. Defaults to the invoking user's home directory;
-        /// pass `--root /` to explicitly allow full filesystem access
-        /// (only safe for throwaway/root accounts).
+        /// Restrict all paths to this directory (defaults to $HOME)
         #[arg(long)]
         root: Option<PathBuf>,
-        /// Listen on a TCP address instead of stdin/stdout. Dev/test
-        /// only until rendezvous + auth land — binding to anything
-        /// other than a loopback address is unsafe (no peer auth yet).
-        /// Format: `127.0.0.1:0` (any port) or `host:port`. Prints
-        /// `LISTENING <bound-addr>\n` to stdout on bind.
+        /// Listen on a TCP address instead of stdin/stdout (loopback only)
         #[arg(long, value_name = "ADDR")]
         listen: Option<String>,
     },
@@ -255,8 +222,7 @@ pub enum Commands {
 
     /// Compare source and destination without making changes
     Check {
-        /// Source and destination directories
-        /// Last argument is the destination
+        /// Source files and destination (last argument is the destination)
         #[arg(required = true, num_args = 2..)]
         paths: Vec<PathBuf>,
 

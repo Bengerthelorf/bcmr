@@ -1,6 +1,4 @@
 #![cfg(unix)]
-// bcmr serve is invoked over SSH; OpenSSH-on-Windows is different enough
-// that we don't claim Windows as a serve target.
 
 mod common;
 
@@ -17,9 +15,6 @@ async fn serve_handshake() {
     client.close().await.unwrap();
 }
 
-/// Security regression: PUT outside the `--root` jail must be rejected.
-/// `connect_local` uses `--root /`, so this test explicitly spawns a narrower
-/// root.
 #[tokio::test]
 async fn serve_root_jail_rejects_escape() {
     let jail = tempfile::tempdir().unwrap();
@@ -72,8 +67,6 @@ async fn serve_root_jail_rejects_escape() {
     let _ = child.wait().await;
 }
 
-/// Security regression: PUT must refuse data beyond the declared size, else
-/// a malicious client could declare size=1 and send TBs.
 #[tokio::test]
 async fn serve_put_size_bound_rejects_oversized() {
     let dir = tempfile::tempdir().unwrap();

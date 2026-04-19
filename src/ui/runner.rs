@@ -82,18 +82,12 @@ impl ProgressRunner {
         bail!("{}", msg);
     }
 
-    /// Emits the error terminal event without returning an Err, so the caller
-    /// can re-raise the original error while the log file still gets a
-    /// terminal "error" line.
     pub fn finish_with_error(self, msg: &str) {
         self.ticker_handle.abort();
         let _ = self.progress.lock().finish_err(msg);
     }
 }
 
-/// Tokio's `JoinHandle` detaches on drop; without aborting, two ticker tasks
-/// could paint the same progress bar at once if the handler spawns a second
-/// runner (e.g. serve fast path errors and we fall back to legacy SSH).
 impl Drop for ProgressRunner {
     fn drop(&mut self) {
         self.ticker_handle.abort();

@@ -40,15 +40,8 @@ pub struct Config {
     pub update_check: UpdateCheck,
 }
 
-/// Cross-transport settings for remote operations. Pan-remote knobs
-/// live here; `scp`-specific knobs stay on ScpConfig.
 #[derive(Debug, Deserialize, Clone)]
 pub struct TransferConfig {
-    /// When the `bcmr serve` fast path is unavailable and we fall back
-    /// to legacy SSH-per-file transfer, print a stderr warning. Silent
-    /// fallback costs users ~10× wall time with no visible reason; set
-    /// to false for scripted mixed-fleet rollouts where the noise
-    /// outweighs the signal.
     #[serde(default = "default_fallback_warning")]
     pub fallback_warning: bool,
 }
@@ -68,12 +61,8 @@ impl Default for TransferConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum UpdateCheck {
-    /// Check GitHub each run, print "update available" notice at end.
     Notify,
-    /// Same network check, no print.
     Quiet,
-    /// No network. Default — bcmr is a local-first tool and shouldn't
-    /// hit the network for a local `cp`.
     #[default]
     Off,
 }

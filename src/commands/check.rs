@@ -31,7 +31,6 @@ pub async fn run(
         ));
     }
 
-    // One connection services stat + list for every source.
     let remote_host = if let Some(ref rd) = remote_dest {
         Some(rd.ssh_target())
     } else if any_remote_source {
@@ -233,8 +232,7 @@ async fn collect_remote_entries(
                     .collect());
             }
             Err(_) => {
-                // Serve list can fail on huge dirs (frame size limit).
-                // SSH find has no such limit — drop and fall through.
+                // Serve list caps at the frame size; SSH find has no limit.
                 *serve = None;
             }
         }

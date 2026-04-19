@@ -2,9 +2,6 @@ use serde::Serialize;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// `Interrupted` means the process died after the descriptor was
-/// written but before any terminal event reached the log (crash,
-/// SIGKILL, OOM).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum JobState {
@@ -58,8 +55,6 @@ pub struct JobInfo {
     pub log: String,
 }
 
-/// The descriptor line (first line, pid+job_id only) has no `type`
-/// field, so it maps to the "no event yet" branch below.
 pub fn classify_job(latest_line: &str, pid_alive: bool) -> JobState {
     let v: serde_json::Value = match serde_json::from_str(latest_line) {
         Ok(v) => v,

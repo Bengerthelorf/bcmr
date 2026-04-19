@@ -1,5 +1,6 @@
 pub mod cas;
 pub mod checksum;
+pub mod cleanup;
 pub mod compress;
 pub mod error;
 pub mod framing;

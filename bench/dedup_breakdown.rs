@@ -1,11 +1,5 @@
-//! Breakdown of where time goes in a dedup PUT. Runs in-process
-//! against bcmr serve over a pipe (no SSH, no network) so the numbers
-//! isolate protocol/CAS/hash cost from network latency.
-//!
-//! Reality-check vs Experiment 11: if the AI's claim is right that 13 s
-//! for a 64 MiB warm-cache dedup PUT should really be ~1 s, we should
-//! see the bulk of time go to network (absent here) rather than to
-//! local work.
+//! In-process breakdown of a dedup PUT (no SSH, no network) so local
+//! protocol/CAS/hash cost is isolated from link latency.
 
 use bcmr::core::serve_client::ServeClient;
 use std::time::Instant;
@@ -20,7 +14,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dst1 = dir.path().join("dst1.bin");
     let dst2 = dir.path().join("dst2.bin");
 
-    // 64 MiB pseudo-random to match Experiment 11.
     let size: usize = 64 * 1024 * 1024;
     let mut data = vec![0u8; size];
     let mut x: u64 = 0xdeadbeefcafebabe;
@@ -89,9 +82,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!();
     println!("=== For reference: cost components ===");
-    // Time to read + hash 64 MiB client-side (done twice per put: for
-    // HaveBlocks and then again for streaming). We don't stream in
-    // run 2 but we still re-hash in run 2's dedup path — let's see.
     let t0 = Instant::now();
     use blake3::Hasher;
     let mut h = Hasher::new();

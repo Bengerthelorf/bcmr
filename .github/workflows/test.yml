@@ -34,10 +34,10 @@ jobs:
         run: cargo check --verbose
 
       - name: Run all unit tests
-        run: cargo test --verbose
+        run: cargo test --verbose --features test-support
 
       - name: Clippy (deny warnings)
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --features test-support -- -D warnings
 
       - name: Formatting check
         run: cargo fmt --check

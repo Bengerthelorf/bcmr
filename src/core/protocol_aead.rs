@@ -1,8 +1,7 @@
 // Wire: [4B LE (ct + tag)][ciphertext][16B Poly1305 tag].
-// Nonce = direction byte || per-direction u64 counter (never on the wire).
-// The direction byte disambiguates the two counters-from-zero streams that
-// share this session key; any drop/reorder/tamper desyncs counters so the
-// next decrypt fails.
+// Nonce = direction byte || per-direction u64 counter (never on the wire);
+// direction byte disambiguates the two counters-from-zero streams sharing
+// one session key.
 
 #![allow(dead_code)]
 
@@ -102,8 +101,7 @@ where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut len_buf = [0u8; 4];
-    // Distinguish clean EOF (0 bytes) from a half-read length prefix
-    // (1-3 bytes then close) — the latter is a protocol error.
+    // 0 bytes = clean EOF; 1-3 bytes then close = protocol error.
     let first = reader.read(&mut len_buf[..1]).await?;
     if first == 0 {
         return Ok(None);

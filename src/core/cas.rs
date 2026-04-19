@@ -1,12 +1,24 @@
-//! Content-addressed store at `~/.local/share/bcmr/cas/<aa>/<bb>/<rest>.blk`.
-//! Two-level prefix caps directory fan-out at ~65k entries. LRU eviction
-//! uses filesystem mtime; every read/write touches it so hot blobs stay warm.
+//! Content-addressed store at `~/.local/share/bcmr/cas/<aa>/<bb>/<rest>.blk`,
+//! mtime-LRU on every access.
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{OnceLock, RwLock};
 use std::time::SystemTime;
 
+// Env read once: glibc's getenv lock contended on dedup-heavy paths.
+static CACHED_ROOT: OnceLock<PathBuf> = OnceLock::new();
+static ROOT_OVERRIDE: RwLock<Option<PathBuf>> = RwLock::new(None);
+
 pub fn cas_root() -> PathBuf {
+    if let Some(p) = ROOT_OVERRIDE.read().unwrap().as_ref() {
+        return p.clone();
+    }
+    CACHED_ROOT.get_or_init(compute_root).clone()
+}
+
+fn compute_root() -> PathBuf {
     if let Ok(custom) = std::env::var("BCMR_CAS_DIR") {
         return PathBuf::from(custom);
     }
@@ -17,16 +29,13 @@ pub fn cas_root() -> PathBuf {
         .join("cas")
 }
 
-fn hex32(h: &[u8; 32]) -> String {
-    let mut s = String::with_capacity(64);
-    for b in h {
-        s.push_str(&format!("{:02x}", b));
-    }
-    s
+#[cfg(test)]
+pub fn set_root_override(p: Option<PathBuf>) {
+    *ROOT_OVERRIDE.write().unwrap() = p;
 }
 
 fn path_for(hash: &[u8; 32]) -> PathBuf {
-    let hex = hex32(hash);
+    let hex = blake3::Hash::from_bytes(*hash).to_hex();
     cas_root()
         .join(&hex[0..2])
         .join(&hex[2..4])
@@ -45,8 +54,6 @@ pub fn read(hash: &[u8; 32]) -> io::Result<Vec<u8>> {
     Ok(data)
 }
 
-/// Atomically write `data` to the slot derived from `hash`. No-op if the slot
-/// exists; the hash itself is not verified — callers just computed it.
 pub fn write(hash: &[u8; 32], data: &[u8]) -> io::Result<()> {
     let dst = path_for(hash);
     if dst.exists() {
@@ -57,13 +64,28 @@ pub fn write(hash: &[u8; 32], data: &[u8]) -> io::Result<()> {
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = dst.with_extension("blk.tmp");
+    let tmp = unique_tmp_path(&dst);
     std::fs::write(&tmp, data)?;
-    std::fs::rename(&tmp, &dst)?;
-    Ok(())
+    match std::fs::rename(&tmp, &dst) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            if dst.exists() {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
-/// `BCMR_CAS_CAP_MB=0` disables the cap; default 1024 (= 1 GiB).
+fn unique_tmp_path(dst: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    dst.with_extension(format!("blk.tmp.{}.{}", std::process::id(), n))
+}
+
+/// `BCMR_CAS_CAP_MB=0` disables the cap; default 1024.
 pub fn cap_bytes() -> Option<u64> {
     let raw = std::env::var("BCMR_CAS_CAP_MB").ok();
     let mb: u64 = match raw.as_deref().and_then(|s| s.parse().ok()) {
@@ -74,7 +96,6 @@ pub fn cap_bytes() -> Option<u64> {
     Some(mb * 1024 * 1024)
 }
 
-/// Evict oldest-mtime blobs until total is under `cap`. Returns bytes freed.
 pub fn evict_to_cap(cap: u64) -> io::Result<u64> {
     let root = cas_root();
     if !root.exists() {
@@ -137,8 +158,8 @@ mod tests {
     use super::*;
 
     fn unique_hash() -> [u8; 32] {
-        // Counter is the real uniqueness guarantee — macOS clock
-        // resolution is coarser than nanoseconds so time alone collides.
+        // macOS clock resolution is coarser than nanoseconds — counter
+        // guarantees uniqueness.
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -166,7 +187,7 @@ mod tests {
         write(&h, &payload).unwrap();
         assert!(has(&h));
         assert_eq!(read(&h).unwrap(), payload);
-        std::env::remove_var("BCMR_CAS_DIR");
+        clear_root();
     }
 
     #[test]
@@ -176,7 +197,7 @@ mod tests {
         let h = unique_hash();
         write(&h, b"hello").unwrap();
         write(&h, b"hello").unwrap();
-        std::env::remove_var("BCMR_CAS_DIR");
+        clear_root();
     }
 
     #[test]
@@ -185,14 +206,13 @@ mod tests {
         let _tmp = isolated_cas();
         let h = [0xab; 32];
         assert!(!has(&h));
-        std::env::remove_var("BCMR_CAS_DIR");
+        clear_root();
     }
 
-    // Tests that share env vars must serialize via CAS_DIR_LOCK because
-    // std::env::set_var races across threads.
+    // Serialized via CAS_DIR_LOCK: the root override is process-wide.
     fn isolated_cas() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("BCMR_CAS_DIR", tmp.path());
+        set_root_override(Some(tmp.path().to_path_buf()));
         tmp
     }
 
@@ -200,6 +220,10 @@ mod tests {
 
     fn lock_cas() -> std::sync::MutexGuard<'static, ()> {
         CAS_DIR_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn clear_root() {
+        set_root_override(None);
     }
 
     #[test]
@@ -229,7 +253,7 @@ mod tests {
         assert!(!has(&h_mid));
         assert!(has(&h_new), "newest blob should survive eviction");
 
-        std::env::remove_var("BCMR_CAS_DIR");
+        clear_root();
     }
 
     #[test]
@@ -243,7 +267,7 @@ mod tests {
         assert_eq!(freed, 0);
         assert!(has(&h));
 
-        std::env::remove_var("BCMR_CAS_DIR");
+        clear_root();
     }
 
     #[test]
@@ -258,6 +282,44 @@ mod tests {
             Some(v) => std::env::set_var("BCMR_CAS_CAP_MB", v),
             None => std::env::remove_var("BCMR_CAS_CAP_MB"),
         }
+    }
+
+    #[test]
+    fn concurrent_put_same_hash_all_succeed() {
+        let _g = lock_cas();
+        let _tmp = isolated_cas();
+
+        let h = unique_hash();
+        let payload = vec![0x7cu8; 8 * 1024];
+        let payload = std::sync::Arc::new(payload);
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let p = payload.clone();
+            handles.push(std::thread::spawn(move || write(&h, &p)));
+        }
+        for h in handles {
+            h.join().unwrap().unwrap();
+        }
+        assert!(has(&h));
+        assert_eq!(&*read(&h).unwrap(), &*payload);
+
+        let parent = path_for(&h).parent().unwrap().to_path_buf();
+        let orphans: Vec<_> = std::fs::read_dir(&parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name();
+                name.to_string_lossy().contains("blk.tmp")
+            })
+            .collect();
+        assert!(
+            orphans.is_empty(),
+            "orphan tmp files left behind: {:?}",
+            orphans
+        );
+
+        clear_root();
     }
 
     #[test]
@@ -283,6 +345,6 @@ mod tests {
         assert!(has(&h_a), "recently-read blob should win the LRU");
         assert!(!has(&h_b));
 
-        std::env::remove_var("BCMR_CAS_DIR");
+        clear_root();
     }
 }

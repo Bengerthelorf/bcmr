@@ -1,0 +1,24 @@
+[package]
+name = "bcmr-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.bcmr]
+path = ".."
+
+# Nightly-only: run with `cargo +nightly fuzz run decode_message`.
+# See fuzz/README.md.
+
+[[bin]]
+name = "decode_message"
+path = "fuzz_targets/decode_message.rs"
+test = false
+doc = false
+bench = false

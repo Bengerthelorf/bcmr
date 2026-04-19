@@ -1,6 +1,5 @@
-//! Framing wrapper over `protocol::{read,write}_message` with an optional
-//! AEAD envelope. Created Plain for the cleartext Hello/Welcome; flipped
-//! to Aead after both peers agree on CAP_AEAD.
+//! Framing wrapper over `protocol::{read,write}_message`, optionally AEAD.
+//! Starts Plain; flipped to Aead once both peers agree on CAP_AEAD.
 
 use std::sync::Arc;
 
@@ -19,12 +18,9 @@ pub struct AeadState {
     recv_counter: u64,
 }
 
-// Aead variant holds ~576 B key schedule; one Framing per session so the
-// variant-size asymmetry is not a hot-path cost.
-#[allow(clippy::large_enum_variant)]
 pub enum Framing {
     Plain,
-    Aead(AeadState),
+    Aead(Box<AeadState>),
 }
 
 impl Framing {
@@ -32,23 +28,22 @@ impl Framing {
         Framing::Plain
     }
 
-    /// `send_dir` is this peer's transmit direction; `recv_dir` the opposite.
     pub fn aead_from_key(
         key_bytes: &[u8; 32],
         send_dir: Direction,
         recv_dir: Direction,
     ) -> Result<Self, BcmrError> {
         let key = protocol_aead::key_from_bytes(key_bytes)?;
-        Ok(Framing::Aead(AeadState {
+        Ok(Framing::Aead(Box::new(AeadState {
             key,
             send_dir,
             recv_dir,
             send_counter: 0,
             recv_counter: 0,
-        }))
+        })))
     }
 
-    #[allow(dead_code)] // splice-gate on Linux only
+    #[cfg(target_os = "linux")]
     pub fn is_aead(&self) -> bool {
         matches!(self, Framing::Aead(_))
     }
@@ -91,8 +86,8 @@ impl Framing {
     }
 }
 
-/// Split-half of a Framing so the pipelined writer task and the reader task
-/// can each hold their own direction's counter without sharing a `&mut`.
+/// Split-half of a Framing so writer and reader tasks each own their
+/// direction's counter without sharing a `&mut`.
 pub enum SendHalf {
     Plain,
     Aead {
@@ -115,7 +110,6 @@ pub fn plain_halves() -> (SendHalf, RecvHalf) {
     (SendHalf::Plain, RecvHalf::Plain)
 }
 
-/// Key lives behind Arc so each half can move into its own task.
 pub fn aead_halves(
     key_bytes: &[u8; 32],
     send_dir: Direction,

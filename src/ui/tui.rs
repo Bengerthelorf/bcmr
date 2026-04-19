@@ -313,7 +313,6 @@ impl TuiProgress {
 
             let num_width = if self.data.parallel_total >= 10 { 2 } else { 1 };
             let worker_bar_width = 20usize.min(box_width.saturating_sub(30));
-            // "│ " (2) + "[N] " (num_width+3) + " [" (2) + "] " (2) + "100%" (4) + " xx.xx MiB/s" (13) + " │" (2)
             let fixed_chars = num_width + 26;
             let name_max = box_width
                 .saturating_sub(worker_bar_width + fixed_chars)
@@ -572,7 +571,6 @@ impl ProgressRenderer for TuiProgress {
             return Ok(());
         }
 
-        // Signal handler already cleaned up raw mode if we got here via SIGTSTP.
         let was_suspended = self.suspended.load(Ordering::SeqCst);
 
         let _ = self.redraw();

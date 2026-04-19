@@ -90,8 +90,6 @@ async fn serve_listen_tcp_handshake_and_put() {
     let _ = child.wait().await;
 }
 
-/// Regression guard: `--listen` (TCP transport) must mask CAP_DIRECT_TCP out
-/// of its Welcome to prevent recursive rendezvous.
 #[tokio::test]
 async fn serve_listen_does_not_offer_direct_tcp_cap() {
     use bcmr::core::protocol::{

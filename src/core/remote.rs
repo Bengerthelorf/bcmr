@@ -187,10 +187,6 @@ async fn check_resume_state(
     })
 }
 
-// ControlMaster reuses one TCP connection for all SSH commands to the same
-// host. First connection may prompt for a password; subsequent ones
-// piggyback on the master socket.
-
 fn control_path(target: &str) -> String {
     let dir = std::env::temp_dir().join("bcmr-ssh");
     let _ = std::fs::create_dir_all(&dir);
@@ -231,9 +227,8 @@ fn ssh_base_args(target: &str) -> Vec<String> {
     args
 }
 
-/// Each worker gets its own ControlPath so N workers run as N independent
-/// TCP streams with N cipher contexts — the default shared ControlMaster
-/// would serialize them on one. mscp demonstrated ~6x speedup at N=8.
+/// Per-worker ControlPath: the shared ControlMaster would serialize N
+/// workers onto one cipher context, defeating the parallelism.
 fn ssh_base_args_for_worker(target: &str, worker_id: usize) -> Vec<String> {
     let dir = std::env::temp_dir().join("bcmr-ssh");
     let _ = std::fs::create_dir_all(&dir);
@@ -374,8 +369,6 @@ pub async fn remote_stat(remote: &RemotePath) -> Result<RemoteFileInfo, BcmrErro
     let stdout = String::from_utf8_lossy(&output.stdout);
     let line = stdout.trim();
 
-    // Linux: "regular file 12345" / "directory 4096"
-    // macOS: "Regular File 12345" / "Directory 4096"
     let is_dir = line.to_lowercase().starts_with("directory");
     let size: u64 = line
         .rsplit_once(' ')
@@ -456,19 +449,22 @@ pub async fn remote_list_files(remote: &RemotePath) -> Result<Vec<(String, u64, 
     Ok(entries)
 }
 
-#[allow(clippy::too_many_arguments)]
+pub struct TransferCallbacks<'a> {
+    pub on_progress: &'a (dyn Fn(u64) + Send + Sync),
+    pub on_skip: &'a (dyn Fn(u64) + Send + Sync),
+    pub on_new_file: &'a (dyn Fn(&str, u64) + Send + Sync),
+}
+
 pub async fn download_file(
     remote: &RemotePath,
     local_dst: &Path,
-    progress_callback: &impl Fn(u64),
-    skip_callback: &impl Fn(u64),
-    on_new_file: &impl Fn(&str, u64),
+    cb: TransferCallbacks<'_>,
     file_size: u64,
     opts: &RemoteTransferOptions,
     worker_id: Option<usize>,
 ) -> Result<(), BcmrError> {
     let file_name = remote.path.rsplit('/').next().unwrap_or(&remote.path);
-    on_new_file(file_name, file_size);
+    (cb.on_new_file)(file_name, file_size);
 
     if let Some(parent) = local_dst.parent() {
         if !parent.exists() {
@@ -503,12 +499,12 @@ pub async fn download_file(
     .await?;
 
     if decision.skip_entirely {
-        skip_callback(file_size);
+        (cb.on_skip)(file_size);
         return Ok(());
     }
 
     if decision.skip_bytes > 0 {
-        skip_callback(decision.skip_bytes);
+        (cb.on_skip)(decision.skip_bytes);
     }
 
     let ssh_cmd = if decision.use_append_mode {
@@ -550,7 +546,7 @@ pub async fn download_file(
                 break;
             }
             dst_file.write_all(&buffer[..n]).await?;
-            progress_callback(n as u64);
+            (cb.on_progress)(n as u64);
         }
         Ok(())
     }
@@ -648,9 +644,7 @@ pub async fn remote_file_hash(
 pub async fn upload_file(
     local_src: &Path,
     remote: &RemotePath,
-    progress_callback: &impl Fn(u64),
-    skip_callback: &impl Fn(u64),
-    on_new_file: &impl Fn(&str, u64),
+    cb: TransferCallbacks<'_>,
     opts: &RemoteTransferOptions,
     worker_id: Option<usize>,
 ) -> Result<(), BcmrError> {
@@ -660,7 +654,7 @@ pub async fn upload_file(
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    on_new_file(&file_name, file_size);
+    (cb.on_new_file)(&file_name, file_size);
 
     if let Some(parent) = remote.path.rsplit_once('/') {
         if !parent.0.is_empty() {
@@ -708,12 +702,12 @@ pub async fn upload_file(
     .await?;
 
     if decision.skip_entirely {
-        skip_callback(file_size);
+        (cb.on_skip)(file_size);
         return Ok(());
     }
 
     if decision.skip_bytes > 0 {
-        skip_callback(decision.skip_bytes);
+        (cb.on_skip)(decision.skip_bytes);
     }
 
     let cat_op = if decision.use_append_mode { ">>" } else { ">" };
@@ -746,7 +740,7 @@ pub async fn upload_file(
                 break;
             }
             stdin.write_all(&buffer[..n]).await?;
-            progress_callback(n as u64);
+            (cb.on_progress)(n as u64);
         }
         Ok(())
     }
@@ -819,7 +813,6 @@ async fn preserve_remote_attrs(local_src: &Path, remote: &RemotePath) -> Result<
 
     let mtime_ts = unix_to_touch_ts(mtime_secs as i64);
     let atime_ts = unix_to_touch_ts(atime_secs as i64);
-    // -a/-m set atime and mtime independently; plain -t would set both.
     let cmd = format!(
         "TZ=UTC touch -m -t '{}' '{}'; TZ=UTC touch -a -t '{}' '{}'; chmod {:o} '{}'",
         mtime_ts,
@@ -917,7 +910,7 @@ fn unix_to_touch_ts(secs: i64) -> String {
     let minutes = (rem % 3600) / 60;
     let seconds = rem % 60;
 
-    // Howard Hinnant's civil-from-days algorithm.
+    // Howard Hinnant civil-from-days.
     let z = days as i32 + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
     let doe = (z - era * 146097) as u32;
@@ -938,9 +931,7 @@ fn unix_to_touch_ts(secs: i64) -> String {
 pub async fn download_directory(
     remote: &RemotePath,
     local_dst: &Path,
-    progress_callback: &impl Fn(u64),
-    skip_callback: &impl Fn(u64),
-    on_new_file: &impl Fn(&str, u64),
+    cb: TransferCallbacks<'_>,
     excludes: &[regex::Regex],
     opts: &RemoteTransferOptions,
 ) -> Result<(), BcmrError> {
@@ -975,9 +966,11 @@ pub async fn download_directory(
         download_file(
             &file_remote,
             &local_file,
-            progress_callback,
-            skip_callback,
-            on_new_file,
+            TransferCallbacks {
+                on_progress: cb.on_progress,
+                on_skip: cb.on_skip,
+                on_new_file: cb.on_new_file,
+            },
             *size,
             opts,
             None,
@@ -1033,9 +1026,7 @@ pub async fn ensure_remote_tree(local_src: &Path, remote: &RemotePath) -> Result
 pub async fn upload_directory(
     local_src: &Path,
     remote: &RemotePath,
-    progress_callback: &impl Fn(u64),
-    skip_callback: &impl Fn(u64),
-    on_new_file: &impl Fn(&str, u64),
+    cb: TransferCallbacks<'_>,
     excludes: &[regex::Regex],
     opts: &RemoteTransferOptions,
 ) -> Result<(), BcmrError> {
@@ -1096,9 +1087,11 @@ pub async fn upload_directory(
         upload_file(
             local_path,
             &file_remote,
-            progress_callback,
-            skip_callback,
-            on_new_file,
+            TransferCallbacks {
+                on_progress: cb.on_progress,
+                on_skip: cb.on_skip,
+                on_new_file: cb.on_new_file,
+            },
             opts,
             None,
         )

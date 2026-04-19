@@ -18,7 +18,7 @@ async fn serve_open_direct_channel_reply_is_well_formed() {
     use tokio::net::TcpStream;
 
     // Tight rendezvous timeout so the per-channel listener doesn't pin the
-    // child for the full 30 s default.
+    // child for the full default.
     let ServeChild {
         mut child,
         mut stdin,
@@ -143,8 +143,6 @@ async fn serve_direct_tcp_put_get_roundtrip() {
     assert_eq!(checksum::calculate_hash(&remote_dst).unwrap(), src_hash);
 }
 
-/// Regression guard against a DoS: a squatter that connects first with a
-/// bogus AuthHello must NOT consume the rendezvous listener.
 #[tokio::test]
 async fn serve_direct_tcp_squatter_does_not_starve_real_client() {
     use bcmr::core::protocol::{
@@ -177,18 +175,26 @@ async fn serve_direct_tcp_squatter_does_not_starve_real_client() {
     };
 
     let squatter = TcpStream::connect(&addr).await.unwrap();
-    let (_sr, mut sw) = squatter.into_split();
+    let (mut sr, mut sw) = squatter.into_split();
+    let _ = read_message(&mut sr).await.unwrap();
     write_message(&mut sw, &Message::AuthHello { mac: [0xAAu8; 32] })
         .await
         .unwrap();
     drop(sw);
 
-    // Mirror the real bcmr client flow: close SSH stdin once the rendezvous
-    // has handed off, then run the TCP handshake.
     let real = TcpStream::connect(&addr).await.unwrap();
     drop(ssh_stdin);
     let (mut rr, mut rw) = real.into_split();
-    let good_mac = *blake3::keyed_hash(&key, b"bcmr-direct-v1").as_bytes();
+    let nonce = match read_message(&mut rr).await.unwrap().unwrap() {
+        Message::AuthChallenge { nonce } => nonce,
+        other => panic!("expected AuthChallenge, got {other:?}"),
+    };
+    let good_mac = {
+        let mut input = Vec::with_capacity(b"bcmr-direct-v1".len() + 32);
+        input.extend_from_slice(b"bcmr-direct-v1");
+        input.extend_from_slice(&nonce);
+        *blake3::keyed_hash(&key, &input).as_bytes()
+    };
     write_message(&mut rw, &Message::AuthHello { mac: good_mac })
         .await
         .unwrap();
@@ -211,8 +217,6 @@ async fn serve_direct_tcp_squatter_does_not_starve_real_client() {
     let _ = child.wait().await;
 }
 
-/// Downgrade-attack guard: a rendezvous-authenticated peer that does NOT
-/// advertise CAP_AEAD must be rejected on the direct-TCP channel.
 #[tokio::test]
 async fn serve_direct_tcp_refuses_session_without_aead() {
     use bcmr::core::protocol::{
@@ -246,7 +250,16 @@ async fn serve_direct_tcp_refuses_session_without_aead() {
 
     let stream = TcpStream::connect(&addr).await.unwrap();
     let (mut rdr, mut wtr) = stream.into_split();
-    let mac = *blake3::keyed_hash(&session_key, b"bcmr-direct-v1").as_bytes();
+    let nonce = match read_message(&mut rdr).await.unwrap().unwrap() {
+        Message::AuthChallenge { nonce } => nonce,
+        other => panic!("expected AuthChallenge, got {other:?}"),
+    };
+    let mac = {
+        let mut input = Vec::with_capacity(b"bcmr-direct-v1".len() + 32);
+        input.extend_from_slice(b"bcmr-direct-v1");
+        input.extend_from_slice(&nonce);
+        *blake3::keyed_hash(&session_key, &input).as_bytes()
+    };
     write_message(&mut wtr, &Message::AuthHello { mac })
         .await
         .unwrap();
@@ -274,9 +287,6 @@ async fn serve_direct_tcp_refuses_session_without_aead() {
     let _ = child.wait().await;
 }
 
-/// The SSH transport has no session key to derive an AEAD key from, so it
-/// must mask CAP_AEAD off; otherwise clients would attempt AEAD framing that
-/// the data plane can't honor.
 #[tokio::test]
 async fn serve_ssh_transport_does_not_offer_cap_aead() {
     use bcmr::core::protocol::{read_message, write_message, CAP_AEAD, PROTOCOL_VERSION};
@@ -310,9 +320,6 @@ async fn serve_ssh_transport_does_not_offer_cap_aead() {
     let _ = child.wait().await;
 }
 
-/// Exercises the split SendHalf / RecvHalf framing over direct-TCP: the
-/// writer task owns the send counter + TCP write half, the reader task owns
-/// the recv counter + TCP read half.
 #[tokio::test]
 async fn serve_direct_tcp_pipelined_put_many_files_succeeds() {
     let dir = tempfile::tempdir().unwrap();
@@ -363,8 +370,6 @@ async fn serve_direct_tcp_pipelined_put_many_files_succeeds() {
     client.close().await.unwrap();
 }
 
-/// Regression guard: the AEAD recv counter must advance correctly across the
-/// demultiplexed Data*/Ok stream during pipelined GET.
 #[tokio::test]
 async fn serve_direct_tcp_pipelined_get_many_files_succeeds() {
     let dir = tempfile::tempdir().unwrap();
@@ -407,9 +412,6 @@ async fn serve_direct_tcp_pipelined_get_many_files_succeeds() {
     }
 }
 
-/// Regression guard: the pool layer must be transport-agnostic — every
-/// bucket flips to its own AEAD state and striped scatter/gather still works
-/// across four concurrent rendezvous sessions.
 #[tokio::test]
 async fn serve_direct_tcp_pool_striped_put_n4_succeeds() {
     let dir = tempfile::tempdir().unwrap();
@@ -521,9 +523,6 @@ async fn serve_direct_tcp_striped_get_single_large_file() {
     assert_eq!(std::fs::metadata(&dst).unwrap().len(), src_size);
 }
 
-/// I1 regression guard: without the Truncate preamble before the chunk
-/// fanout, a smaller new src would only overwrite the prefix and the old
-/// dst's tail bytes would survive past the new end.
 #[tokio::test]
 async fn serve_direct_tcp_striped_put_truncates_existing_dst() {
     let dir = tempfile::tempdir().unwrap();
@@ -552,8 +551,6 @@ async fn serve_direct_tcp_striped_put_truncates_existing_dst() {
     );
 }
 
-/// M4 regression guard: the fanout skips empty ranges, so without the
-/// Truncate preamble a zero-byte src would leave the dst non-existent.
 #[tokio::test]
 async fn serve_direct_tcp_striped_put_zero_byte_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -579,9 +576,6 @@ async fn serve_direct_tcp_striped_put_zero_byte_file() {
     );
 }
 
-/// Regression guard: buckets that end up with a zero-byte share on a
-/// tiny-file stripe must be skipped, not sent as a degenerate
-/// PutChunked{length=0} frame.
 #[tokio::test]
 async fn serve_direct_tcp_striped_put_tiny_file_skips_empty_buckets() {
     let dir = tempfile::tempdir().unwrap();

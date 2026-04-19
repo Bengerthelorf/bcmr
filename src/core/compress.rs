@@ -1,6 +1,5 @@
-//! Wire compression with per-block auto-skip: if compressed output is within
-//! 5% of the original, the block is sent raw so the receiver skips the
-//! decompression pass on incompressible data.
+//! Wire compression with per-block auto-skip: blocks within 5% of raw are
+//! sent uncompressed.
 
 use crate::core::protocol::{CompressionAlgo, Message};
 

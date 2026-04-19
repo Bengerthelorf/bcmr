@@ -1,49 +1,48 @@
-use crate::cli::{Commands, SparseMode, TestMode};
+use crate::cli::Commands;
 use crate::core::checksum;
+use crate::core::cleanup::{self, CleanupRegistry};
 use crate::core::error::BcmrError;
 use crate::core::traversal;
 use crate::ui::display::{print_dry_run, ActionType};
 
-use once_cell::sync::Lazy;
-use parking_lot::Mutex as ParkingMutex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::fs::{self, File};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
+use tokio::fs;
 
-static CLEANUP_PATHS: Lazy<ParkingMutex<Vec<PathBuf>>> =
-    Lazy::new(|| ParkingMutex::new(Vec::new()));
+mod file_copy;
+mod overwrite;
+mod pipeline_batch;
 
-fn register_cleanup(path: &Path) {
-    CLEANUP_PATHS.lock().push(path.to_path_buf());
-}
+pub use overwrite::{check_overwrites, get_total_size, FileToOverwrite};
+pub use pipeline_batch::{pipeline_copy, PipelineCallbacks};
 
-fn unregister_cleanup(path: &Path) {
-    CLEANUP_PATHS.lock().retain(|p| p != path);
-}
+use file_copy::{copy_file, CopyFileOptions};
+use overwrite::{check_overwrite, determine_dry_run_action, is_normal_write};
 
 pub fn cleanup_partial_files() {
-    let paths: Vec<PathBuf> = CLEANUP_PATHS.lock().drain(..).collect();
-    for path in paths {
-        let _ = std::fs::remove_file(&path);
-    }
+    cleanup::global().drain_and_remove();
 }
 
 pub(crate) struct TempFileGuard {
+    registry: &'static CleanupRegistry,
     path: PathBuf,
     active: bool,
 }
 
 impl TempFileGuard {
     pub(crate) fn new(path: PathBuf) -> Self {
-        register_cleanup(&path);
-        Self { path, active: true }
+        let registry = cleanup::global();
+        registry.register(&path);
+        Self {
+            registry,
+            path,
+            active: true,
+        }
     }
 
     pub(crate) fn disarm(&mut self) {
         self.active = false;
-        unregister_cleanup(&self.path);
+        self.registry.unregister(&self.path);
     }
 }
 
@@ -51,267 +50,9 @@ impl Drop for TempFileGuard {
     fn drop(&mut self) {
         if self.active {
             let _ = std::fs::remove_file(&self.path);
-            unregister_cleanup(&self.path);
+            self.registry.unregister(&self.path);
         }
     }
-}
-
-fn temp_path_for(dst: &Path) -> PathBuf {
-    let name = dst.file_name().unwrap_or_default().to_string_lossy();
-    dst.with_file_name(format!(".{}.bcmr.tmp", name))
-}
-
-#[cfg(target_os = "linux")]
-async fn try_copy_file_range(
-    src: &Path,
-    dst: &Path,
-    file_size: u64,
-    callback: &impl Fn(u64),
-) -> Option<Result<(), BcmrError>> {
-    use std::os::unix::io::AsRawFd;
-
-    let src_file = std::fs::File::open(src).ok()?;
-    let dst_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(dst)
-        .ok()?;
-
-    let src_fd = src_file.as_raw_fd();
-    let dst_fd = dst_file.as_raw_fd();
-
-    if file_size > 0 {
-        // Best-effort preallocation; ENOTSUP on some filesystems is fine.
-        unsafe {
-            let _ = libc::fallocate(dst_fd, 0, 0, file_size as libc::off_t);
-        }
-    }
-
-    const CHUNK: usize = 4 * 1024 * 1024;
-    let mut remaining = file_size;
-
-    while remaining > 0 {
-        let to_copy = (remaining as usize).min(CHUNK);
-        let sfd = src_fd;
-        let dfd = dst_fd;
-        let result = tokio::task::spawn_blocking(move || {
-            let ret = unsafe {
-                libc::copy_file_range(
-                    sfd,
-                    std::ptr::null_mut(),
-                    dfd,
-                    std::ptr::null_mut(),
-                    to_copy,
-                    0,
-                )
-            };
-            if ret < 0 {
-                Err(std::io::Error::last_os_error())
-            } else {
-                Ok(ret)
-            }
-        })
-        .await
-        .ok()?;
-
-        match result {
-            Err(err) => {
-                let errno = err.raw_os_error().unwrap_or(0);
-                if errno == libc::ENOSYS
-                    || errno == libc::EXDEV
-                    || errno == libc::EINVAL
-                    || errno == libc::EOPNOTSUPP
-                {
-                    drop(dst_file);
-                    let _ = std::fs::remove_file(dst);
-                    return None;
-                }
-                return Some(Err(BcmrError::Io(err)));
-            }
-            Ok(0) => break,
-            Ok(n) => {
-                let n = n as u64;
-                remaining -= n;
-                callback(n);
-            }
-        }
-    }
-
-    Some(Ok(()))
-}
-
-pub struct FileToOverwrite {
-    pub path: PathBuf,
-    pub is_dir: bool,
-}
-
-pub async fn check_overwrites(
-    sources: &[PathBuf],
-    dst: &Path,
-    recursive: bool,
-    _cli: &Commands,
-    excludes: &[regex::Regex],
-) -> std::result::Result<Vec<FileToOverwrite>, BcmrError> {
-    let mut files_to_overwrite = Vec::new();
-
-    let dst_is_dir = dst.exists() && dst.is_dir();
-
-    for src in sources {
-        if traversal::is_excluded(src, excludes) {
-            continue;
-        }
-
-        if src.is_file() {
-            let dst_path = if dst_is_dir {
-                dst.join(src.file_name().ok_or_else(|| {
-                    BcmrError::InvalidInput("Invalid source file name".to_string())
-                })?)
-            } else {
-                dst.to_path_buf()
-            };
-
-            if dst_path.exists() && !traversal::is_excluded(&dst_path, excludes) {
-                files_to_overwrite.push(FileToOverwrite {
-                    path: dst_path,
-                    is_dir: false,
-                });
-            }
-        } else if recursive && src.is_dir() {
-            let src_name = src.file_name().ok_or_else(|| {
-                BcmrError::InvalidInput("Invalid source directory name".to_string())
-            })?;
-            let new_dst = if dst_is_dir {
-                dst.join(src_name)
-            } else {
-                dst.to_path_buf()
-            };
-
-            if new_dst.exists() {
-                for entry in traversal::walk(src, true, false, 1, excludes) {
-                    let entry = entry?;
-                    let path = entry.path();
-
-                    let relative_path = path.strip_prefix(src)?;
-                    let target_path = new_dst.join(relative_path);
-
-                    if target_path.exists() {
-                        files_to_overwrite.push(FileToOverwrite {
-                            path: target_path,
-                            is_dir: path.is_dir(),
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(files_to_overwrite)
-}
-
-fn get_total_size_sync(
-    sources: Vec<PathBuf>,
-    recursive: bool,
-    excludes: Vec<regex::Regex>,
-) -> std::result::Result<u64, BcmrError> {
-    let mut total_size = 0;
-
-    for src in sources {
-        if traversal::is_excluded(&src, &excludes) {
-            continue;
-        }
-
-        if src.is_file() {
-            total_size += src.metadata()?.len();
-        } else if src.is_dir() {
-            if recursive {
-                for entry in traversal::walk(&src, true, false, 1, &excludes) {
-                    let entry = entry?;
-                    let path = entry.path();
-                    if path.is_file() {
-                        total_size += entry.metadata()?.len();
-                    }
-                }
-            } else {
-                return Err(BcmrError::InvalidInput(format!(
-                    "Source '{}' is a directory. Use -r flag for recursive copy.",
-                    src.display()
-                )));
-            }
-        } else {
-            return Err(BcmrError::SourceNotFound(src));
-        }
-    }
-
-    Ok(total_size)
-}
-
-pub async fn get_total_size(
-    sources: &[PathBuf],
-    recursive: bool,
-    _cli: &Commands,
-    excludes: &[regex::Regex],
-) -> std::result::Result<u64, BcmrError> {
-    let sources = sources.to_vec();
-    let excludes = excludes.to_vec();
-
-    tokio::task::spawn_blocking(move || get_total_size_sync(sources, recursive, excludes)).await?
-}
-
-fn is_normal_write(cli: &Commands) -> bool {
-    !cli.is_resume() && !cli.is_append() && !cli.is_strict()
-}
-
-async fn check_overwrite(dst: &Path, cli: &Commands) -> std::result::Result<(), BcmrError> {
-    if !dst.exists() {
-        return Ok(());
-    }
-    if !cli.is_force() && is_normal_write(cli) {
-        return Err(BcmrError::TargetExists(dst.to_path_buf()));
-    }
-    if cli.is_force() && !is_normal_write(cli) {
-        fs::remove_file(dst).await?;
-    }
-    Ok(())
-}
-
-fn determine_dry_run_action(
-    src: &Path,
-    dst: &Path,
-    cli: &Commands,
-) -> std::result::Result<ActionType, BcmrError> {
-    if !dst.exists() {
-        return Ok(ActionType::Add);
-    }
-    let src_meta = src.metadata()?;
-    let dst_meta = dst.metadata()?;
-    let src_len = src_meta.len();
-    let dst_len = dst_meta.len();
-
-    if cli.is_strict() || cli.is_append() {
-        if dst_len == src_len {
-            return Ok(ActionType::Skip);
-        } else if dst_len < src_len {
-            return Ok(ActionType::Append);
-        }
-        return Ok(ActionType::Overwrite);
-    }
-
-    if cli.is_resume() {
-        let src_mtime = src_meta.modified()?;
-        let dst_mtime = dst_meta.modified()?;
-        if src_mtime != dst_mtime {
-            return Ok(ActionType::Overwrite);
-        }
-        if dst_len == src_len {
-            return Ok(ActionType::Skip);
-        } else if dst_len < src_len {
-            return Ok(ActionType::Append);
-        }
-        return Ok(ActionType::Overwrite);
-    }
-
-    Ok(ActionType::Overwrite)
 }
 
 pub enum PlanEntry {
@@ -325,9 +66,7 @@ pub struct CopyPlan {
     pub overwrites: Vec<FileToOverwrite>,
 }
 
-/// Walk sources and emit PlanEntry items via callback.
-/// Shared between plan_copy (collects) and pipeline_copy (streams).
-fn scan_sources(
+pub(super) fn scan_sources(
     sources: &[PathBuf],
     dst: &Path,
     recursive: bool,
@@ -503,8 +242,7 @@ where
         on_new_file: Arc::new(on_new_file),
     };
 
-    // Directories must exist before concurrent file copies into them,
-    // so take them sequentially in the plan's DFS order.
+    // Directories must exist before concurrent file copies into them.
     for entry in &plan.entries {
         if let PlanEntry::CreateDir { dst, .. } = entry {
             if !dst.exists() {
@@ -556,10 +294,11 @@ where
     Ok(())
 }
 
-#[allow(clippy::type_complexity)]
+type OnNewFileFn = Arc<dyn Fn(&str, u64) + Send + Sync>;
+
 pub struct ProgressCallback<F> {
-    callback: F,
-    on_new_file: Arc<dyn Fn(&str, u64) + Send + Sync>,
+    pub(super) callback: F,
+    pub(super) on_new_file: OnNewFileFn,
 }
 
 impl<F: Clone> Clone for ProgressCallback<F> {
@@ -759,460 +498,7 @@ pub(crate) async fn preserve_attributes(
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    copy_xattrs(src, dst)?;
-
-    Ok(())
-}
-
-/// Best-effort xattr copy. ENOTSUP (vfat/exFAT) and per-name EPERM
-/// (e.g. `com.apple.rootless`, SELinux `security.*`) are soft failures,
-/// matching `cp -p`.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn copy_xattrs(src: &Path, dst: &Path) -> std::result::Result<(), BcmrError> {
-    let names = match xattr::list(src) {
-        Ok(n) => n,
-        Err(e) if is_unsupported(&e) => return Ok(()),
-        Err(e) => return Err(BcmrError::Io(e)),
-    };
-    for name in names {
-        let value = match xattr::get(src, &name) {
-            Ok(Some(v)) => v,
-            Ok(None) => continue,
-            Err(e) if is_unsupported(&e) => continue,
-            Err(_) => continue,
-        };
-        let _ = xattr::set(dst, &name, &value);
-    }
-    Ok(())
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn is_unsupported(e: &std::io::Error) -> bool {
-    // 95 = ENOTSUP on Linux, 45 = ENOTSUP on macOS.
-    matches!(e.raw_os_error(), Some(95) | Some(45))
-}
-
-struct CopyFileOptions {
-    transfer: crate::core::remote::TransferOptions,
-    sync: bool,
-    reflink_arg: Option<String>,
-    sparse_arg: Option<String>,
-    test_mode: TestMode,
-}
-
-impl CopyFileOptions {
-    fn from_cli(cli: &Commands, test_mode: TestMode) -> Self {
-        Self {
-            transfer: crate::core::remote::TransferOptions {
-                preserve: cli.is_preserve(),
-                verify: cli.is_verify(),
-                resume: cli.is_resume(),
-                strict: cli.is_strict(),
-                append: cli.is_append(),
-            },
-            sync: cli.is_sync(),
-            reflink_arg: cli.get_reflink_mode(),
-            sparse_arg: cli.get_sparse_mode(),
-            test_mode,
-        }
-    }
-}
-
-fn resolve_reflink_mode(arg: &Option<String>) -> (bool, bool) {
-    let mode_str = arg
-        .as_deref()
-        .unwrap_or(&crate::config::CONFIG.copy.reflink);
-    match mode_str.to_lowercase().as_str() {
-        "force" => (true, true),
-        "disable" | "never" => (false, false),
-        _ => (true, false),
-    }
-}
-
-fn resolve_sparse_mode(arg: &Option<String>) -> SparseMode {
-    let mode_str = arg.as_deref().unwrap_or(&crate::config::CONFIG.copy.sparse);
-    match mode_str.to_lowercase().as_str() {
-        "force" => SparseMode::Always,
-        "disable" | "never" => SparseMode::Never,
-        _ => SparseMode::Auto,
-    }
-}
-
-struct FinalizeCtx<'a> {
-    write_target: &'a Path,
-    dst: &'a Path,
-    src: &'a Path,
-    use_atomic: bool,
-    guard: &'a mut Option<TempFileGuard>,
-    sync: bool,
-    preserve: bool,
-    verify: bool,
-    inline_src_hash: Option<blake3::Hash>,
-}
-
-impl<'a> FinalizeCtx<'a> {
-    async fn run(self, dst_file: fs::File) -> std::result::Result<(), BcmrError> {
-        super::copy_strategies::finalize(
-            dst_file,
-            self.write_target,
-            self.dst,
-            self.src,
-            self.use_atomic,
-            self.guard,
-            self.sync,
-            self.preserve,
-            self.verify,
-            self.inline_src_hash,
-        )
-        .await
-    }
-}
-
-async fn copy_file<F>(
-    src: &Path,
-    dst: &Path,
-    opts: CopyFileOptions,
-    callback: &ProgressCallback<F>,
-) -> std::result::Result<(), BcmrError>
-where
-    F: Fn(u64) + Send + Sync + Clone + 'static,
-{
-    let CopyFileOptions {
-        transfer,
-        sync,
-        ref reflink_arg,
-        ref sparse_arg,
-        test_mode,
-    } = opts;
-    let crate::core::remote::TransferOptions {
-        preserve,
-        verify,
-        resume,
-        strict,
-        append,
-    } = transfer;
-
-    let file_size = src.metadata()?.len();
-    let file_name = src
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    callback.on_new_file.as_ref()(&file_name, file_size);
-
-    let (try_reflink, fail_on_error) = resolve_reflink_mode(reflink_arg);
-    let sparse_mode = resolve_sparse_mode(sparse_arg);
-
-    if let Some(parent) = dst.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent).await?;
-        }
-    }
-
-    let use_atomic = !resume && !append && !strict;
-    let write_target;
-    let mut guard: Option<TempFileGuard> = None;
-
-    if use_atomic {
-        let temp = temp_path_for(dst);
-        if temp.exists() {
-            let _ = fs::remove_file(&temp).await;
-        }
-        guard = Some(TempFileGuard::new(temp.clone()));
-        write_target = temp;
-    } else {
-        write_target = dst.to_path_buf();
-    }
-
-    if super::copy_strategies::try_reflink(
-        src,
-        &write_target,
-        file_size,
-        try_reflink,
-        fail_on_error,
-        &sparse_mode,
-        &callback.callback,
-    )
-    .await?
-    {
-        let ctx = FinalizeCtx {
-            write_target: &write_target,
-            dst,
-            src,
-            use_atomic,
-            guard: &mut guard,
-            sync,
-            preserve,
-            verify,
-            inline_src_hash: None,
-        };
-        return ctx.run(fs::File::open(&write_target).await?).await;
-    }
-
-    #[cfg(target_os = "linux")]
-    if use_atomic && matches!(test_mode, TestMode::None) && matches!(sparse_mode, SparseMode::Never)
-    {
-        match try_copy_file_range(src, &write_target, file_size, &callback.callback).await {
-            Some(Ok(())) => {
-                let ctx = FinalizeCtx {
-                    write_target: &write_target,
-                    dst,
-                    src,
-                    use_atomic,
-                    guard: &mut guard,
-                    sync,
-                    preserve,
-                    verify,
-                    inline_src_hash: None,
-                };
-                return ctx.run(fs::File::open(&write_target).await?).await;
-            }
-            Some(Err(e)) => return Err(e),
-            None => {}
-        }
-    }
-
-    let resume_state = crate::core::resume::resolve(
-        src,
-        dst,
-        file_size,
-        resume,
-        strict,
-        append,
-        &callback.callback,
-    )
-    .await?;
-
-    if resume_state.already_complete {
-        return Ok(());
-    }
-
-    let start_offset = resume_state.start_offset;
-    let loaded_session = resume_state.loaded_session;
-
-    let mut file_flags = fs::OpenOptions::new();
-    file_flags.write(true);
-    if start_offset > 0 {
-        file_flags.create(true);
-    } else {
-        file_flags.create(true).truncate(true);
-    }
-
-    let mut src_file = File::open(src).await?;
-    let mut dst_file = file_flags.open(&write_target).await?;
-
-    if start_offset > 0 {
-        src_file.seek(SeekFrom::Start(start_offset)).await?;
-        dst_file.seek(SeekFrom::Start(start_offset)).await?;
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::io::AsRawFd;
-        let remaining = file_size.saturating_sub(start_offset);
-        if remaining > 0 {
-            let fd = dst_file.as_raw_fd();
-            unsafe {
-                let _ =
-                    libc::fallocate(fd, 0, start_offset as libc::off_t, remaining as libc::off_t);
-            }
-        }
-    }
-
-    let mut session = super::copy_strategies::create_session(
-        src,
-        dst,
-        file_size,
-        start_offset,
-        resume,
-        append,
-        strict,
-        &loaded_session,
-    );
-
-    let inline_src_hash = match test_mode {
-        TestMode::Delay(ms) => {
-            let mut buffer = vec![0u8; crate::core::session::COPY_BLOCK_SIZE as usize];
-            loop {
-                let n = src_file.read(&mut buffer).await?;
-                if n == 0 {
-                    break;
-                }
-                dst_file.write_all(&buffer[..n]).await?;
-                (callback.callback)(n as u64);
-                tokio::time::sleep(Duration::from_millis(ms)).await;
-            }
-            None
-        }
-        TestMode::SpeedLimit(bps) => {
-            let mut buffer = vec![0u8; crate::core::session::COPY_BLOCK_SIZE as usize];
-            let chunk_size = bps.min(buffer.len() as u64);
-            let mut start_time = Instant::now();
-            loop {
-                let n = src_file.read(&mut buffer[..chunk_size as usize]).await?;
-                if n == 0 {
-                    break;
-                }
-                dst_file.write_all(&buffer[..n]).await?;
-                let elapsed = start_time.elapsed();
-                let target = Duration::from_secs_f64(n as f64 / bps as f64);
-                if elapsed < target {
-                    tokio::time::sleep(target - elapsed).await;
-                    start_time = Instant::now();
-                }
-                (callback.callback)(n as u64);
-            }
-            None
-        }
-        TestMode::None => {
-            // src hash is needed for -V and for sessions that will outlive
-            // this run (resume/strict/append).
-            let need_src_hash = verify || session.is_some();
-            super::copy_strategies::streaming_copy(
-                &mut src_file,
-                &mut dst_file,
-                &mut session,
-                &sparse_mode,
-                start_offset,
-                need_src_hash,
-                &callback.callback,
-            )
-            .await?
-        }
-    };
-
-    let ctx = FinalizeCtx {
-        write_target: &write_target,
-        dst,
-        src,
-        use_atomic,
-        guard: &mut guard,
-        sync,
-        preserve,
-        verify,
-        inline_src_hash,
-    };
-    ctx.run(dst_file).await
-}
-
-enum ScanMessage {
-    Entry(PlanEntry),
-    Done,
-}
-
-type BoxCallback = Box<dyn Fn(u64) + Send + Sync>;
-type BoxFileCallback = Box<dyn Fn(&str, u64) + Send + Sync>;
-type BoxNotify = Box<dyn Fn() + Send + Sync>;
-
-pub struct PipelineCallbacks<F: Fn(u64) + Send + Sync> {
-    pub on_progress: F,
-    pub on_new_file: BoxFileCallback,
-    pub on_total_update: BoxCallback,
-    pub on_scan_complete: BoxNotify,
-    pub on_file_found: BoxCallback,
-}
-
-pub async fn pipeline_copy<F>(
-    sources: &[PathBuf],
-    dst: &Path,
-    cli: &Commands,
-    excludes: &[regex::Regex],
-    cb: PipelineCallbacks<F>,
-) -> std::result::Result<(), BcmrError>
-where
-    F: Fn(u64) + Send + Sync + Clone + 'static,
-{
-    let test_mode = cli.get_test_mode();
-    let recursive = cli.is_recursive();
-    let jobs = cli.local_jobs();
-    let verbose = cli.is_verbose();
-    let callback = ProgressCallback {
-        callback: cb.on_progress,
-        on_new_file: Arc::from(cb.on_new_file),
-    };
-    let on_total_update = cb.on_total_update;
-    let on_scan_complete = cb.on_scan_complete;
-    let on_file_found = cb.on_file_found;
-
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<ScanMessage>(256);
-
-    let sources = sources.to_vec();
-    let dst = dst.to_path_buf();
-    let excludes = excludes.to_vec();
-    let scanner = tokio::task::spawn_blocking(move || {
-        let mut total_size = 0u64;
-        let mut files_found = 0u64;
-
-        let result = scan_sources(&sources, &dst, recursive, &excludes, |entry, size| {
-            total_size += size;
-            if size > 0 {
-                files_found += 1;
-                on_total_update(total_size);
-                on_file_found(files_found);
-            }
-            if tx.blocking_send(ScanMessage::Entry(entry)).is_err() {
-                return Ok(());
-            }
-            Ok(())
-        });
-
-        let _ = tx.blocking_send(ScanMessage::Done);
-        result
-    });
-
-    let mut dir_entries: Vec<(PathBuf, PathBuf)> = Vec::new();
-    let mut in_flight = tokio::task::JoinSet::new();
-
-    while let Some(msg) = rx.recv().await {
-        match msg {
-            ScanMessage::Entry(entry) => match entry {
-                PlanEntry::CreateDir { ref src, ref dst } => {
-                    if !dst.exists() {
-                        fs::create_dir_all(dst).await?;
-                    }
-                    dir_entries.push((src.clone(), dst.clone()));
-                }
-                PlanEntry::CopyFile { ref src, ref dst } => {
-                    check_overwrite(dst, cli).await?;
-
-                    while in_flight.len() >= jobs {
-                        match in_flight.join_next().await {
-                            Some(res) => res??,
-                            None => break,
-                        }
-                    }
-
-                    let src = src.clone();
-                    let dst = dst.clone();
-                    let opts = CopyFileOptions::from_cli(cli, test_mode.clone());
-                    let cb = callback.clone();
-                    in_flight.spawn(async move {
-                        copy_file(&src, &dst, opts, &cb).await?;
-                        if verbose {
-                            eprintln!("'{}' -> '{}'", src.display(), dst.display());
-                        }
-                        Ok::<(), BcmrError>(())
-                    });
-                }
-            },
-            ScanMessage::Done => {
-                on_scan_complete();
-                break;
-            }
-        }
-    }
-
-    while let Some(res) = in_flight.join_next().await {
-        res??;
-    }
-
-    scanner.await??;
-
-    if cli.is_preserve() {
-        for (src, dst) in dir_entries.iter().rev() {
-            preserve_attributes(src, dst).await?;
-        }
-    }
+    file_copy::copy_xattrs(src, dst)?;
 
     Ok(())
 }
@@ -1222,8 +508,6 @@ pub(crate) async fn verify_copy(
     dst: &Path,
     inline_src_hash: Option<blake3::Hash>,
 ) -> std::result::Result<(), BcmrError> {
-    // With an inline src hash we only re-read the dst (reflink and
-    // copy_file_range don't get inline hashes, so those re-read both).
     let src_hash_str = if let Some(h) = inline_src_hash {
         h.to_hex().to_string()
     } else {

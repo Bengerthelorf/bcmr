@@ -1,5 +1,4 @@
-// Each integration test is its own binary, so `dead_code` warnings would
-// fire for items used only by other test files.
+// Each integration test is its own binary; items shared only with other files trip dead_code.
 #![allow(dead_code)]
 
 use std::fs;
@@ -42,7 +41,6 @@ pub fn spawn_serve_with_env(root: &str, env: &[(&str, &str)]) -> ServeChild {
     }
 }
 
-/// Deterministic pseudo-random bytes (LCG) so hash collisions are detectable.
 pub fn create_file(path: &Path, size: usize) {
     let mut file = fs::File::create(path).unwrap();
     let mut state: u64 = 0xdeadbeef_cafebabe;
@@ -67,8 +65,7 @@ pub fn bytes_to_hex(hash: &[u8; 32]) -> String {
     hash.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-/// Serialises tests that mutate `BCMR_CAS_CAP_MB` so unrelated concurrent
-/// PUTs don't inherit a capped-vs-uncapped env at spawn time.
+/// Serialises tests that mutate `BCMR_CAS_CAP_MB`; shared-env race otherwise.
 pub fn cas_test_lock() -> std::sync::MutexGuard<'static, ()> {
     use std::sync::{Mutex, OnceLock};
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();

@@ -7,45 +7,45 @@ use tokio::fs;
 
 use super::copy::TempFileGuard;
 
-#[allow(clippy::too_many_arguments)]
-pub async fn finalize(
-    dst_file: tokio::fs::File,
-    write_target: &Path,
-    dst: &Path,
-    src: &Path,
-    use_atomic: bool,
-    guard: &mut Option<TempFileGuard>,
-    sync: bool,
-    preserve: bool,
-    verify: bool,
-    inline_src_hash: Option<blake3::Hash>,
-) -> Result<(), BcmrError> {
-    if sync {
+pub struct FinalizeParams<'a> {
+    pub write_target: &'a Path,
+    pub dst: &'a Path,
+    pub src: &'a Path,
+    pub use_atomic: bool,
+    pub guard: &'a mut Option<TempFileGuard>,
+    pub sync: bool,
+    pub preserve: bool,
+    pub verify: bool,
+    pub inline_src_hash: Option<blake3::Hash>,
+}
+
+pub async fn finalize(dst_file: tokio::fs::File, p: FinalizeParams<'_>) -> Result<(), BcmrError> {
+    if p.sync {
         durable_io::durable_sync_async(&dst_file).await?;
     }
     drop(dst_file);
 
-    if use_atomic {
-        fs::rename(write_target, dst).await?;
-        if sync {
-            if let Some(parent) = dst.parent() {
+    if p.use_atomic {
+        fs::rename(p.write_target, p.dst).await?;
+        if p.sync {
+            if let Some(parent) = p.dst.parent() {
                 durable_io::fsync_dir_async(parent).await;
             }
         }
-        if let Some(ref mut g) = guard {
+        if let Some(ref mut g) = p.guard {
             g.disarm();
         }
     }
 
-    if preserve {
-        super::copy::preserve_attributes(src, dst).await?;
+    if p.preserve {
+        super::copy::preserve_attributes(p.src, p.dst).await?;
     }
 
-    if verify {
-        super::copy::verify_copy(src, dst, inline_src_hash).await?;
+    if p.verify {
+        super::copy::verify_copy(p.src, p.dst, p.inline_src_hash).await?;
     }
 
-    Session::remove(src, dst);
+    Session::remove(p.src, p.dst);
     Ok(())
 }
 
@@ -84,22 +84,28 @@ pub async fn try_reflink(
     }
 }
 
-/// Gate session creation on explicit intent (-C / -s / -a). A session
-/// costs per-block hash + checkpoint fdatasync + session-file save;
-/// creating one implicitly for large files showed up as a ~2x gap vs
-/// `cp` on one-shot copies.
-#[allow(clippy::too_many_arguments)]
+#[derive(Clone, Copy)]
+pub struct SessionIntent {
+    pub resume: bool,
+    pub append: bool,
+    pub strict: bool,
+}
+
+impl SessionIntent {
+    fn any(&self) -> bool {
+        self.resume || self.append || self.strict
+    }
+}
+
 pub fn create_session(
     src: &Path,
     dst: &Path,
     file_size: u64,
     start_offset: u64,
-    resume: bool,
-    append: bool,
-    strict: bool,
+    intent: SessionIntent,
     loaded_session: &Option<Session>,
 ) -> Option<Session> {
-    if !(resume || append || strict) {
+    if !intent.any() {
         return None;
     }
 
@@ -125,15 +131,6 @@ pub fn create_session(
     Some(s)
 }
 
-/// Returns the inline source hash if the full file was copied (start_offset == 0).
-///
-/// `need_src_hash` is tri-state: -V needs it, resume sessions store it
-/// to detect source-changed-between-runs, everything else skips (BLAKE3
-/// at ~1 GB/s would otherwise double wall time on large streaming copies).
-///
-/// One spawn_blocking owns the whole loop — tokio's async fs dispatches
-/// a blocking task per read/write, which cost us ~1024 bounces per 2 GB
-/// and ~6x throughput on Linux NVMe.
 pub async fn streaming_copy(
     src_file: &mut tokio::fs::File,
     dst_file: &mut tokio::fs::File,
@@ -166,7 +163,6 @@ pub async fn streaming_copy(
     Ok(hash)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn streaming_copy_sync(
     mut src_file: std::fs::File,
     mut dst_file: std::fs::File,
@@ -183,9 +179,6 @@ fn streaming_copy_sync(
     let mut buffer = vec![0u8; COPY_BLOCK_SIZE as usize];
     let mut pending_hole = 0u64;
     let mut src_hasher = need_src_hash.then(blake3::Hasher::new);
-    // Per-block hashes exist only to populate the session. With no
-    // session (one-shot copy, no -C/-s/-a), skip entirely — the BLAKE3
-    // pass was the largest remaining gap vs `cp`.
     let mut block_hasher = session.as_ref().map(|_| blake3::Hasher::new());
     let mut bytes_in_block = 0u64;
     let mut blocks_since_checkpoint = 0u32;
@@ -246,7 +239,6 @@ fn streaming_copy_sync(
             if blocks_since_checkpoint >= CHECKPOINT_INTERVAL_BLOCKS {
                 // Crash-safety invariant: every block in the session is
                 // physically on disk before the session file records it.
-                // No session → no reader of that promise → skip fsync.
                 if let Some(ref s) = session {
                     durable_io::durable_sync(&dst_file)?;
                     let _ = s.save();
@@ -256,19 +248,19 @@ fn streaming_copy_sync(
                 #[cfg(target_os = "linux")]
                 {
                     use std::os::unix::io::AsRawFd;
-                    let pos = src_file.stream_position().unwrap_or(0);
-                    let evict_end = pos as libc::off_t;
+                    let src_end = src_file.stream_position().unwrap_or(0) as libc::off_t;
+                    let dst_end = dst_file.stream_position().unwrap_or(0) as libc::off_t;
                     unsafe {
                         libc::posix_fadvise(
                             src_file.as_raw_fd(),
                             0,
-                            evict_end,
+                            src_end,
                             libc::POSIX_FADV_DONTNEED,
                         );
                         libc::posix_fadvise(
                             dst_file.as_raw_fd(),
                             0,
-                            evict_end,
+                            dst_end,
                             libc::POSIX_FADV_DONTNEED,
                         );
                     }

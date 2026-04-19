@@ -1,9 +1,8 @@
 use std::io;
 use std::path::Path;
 
-/// On macOS `fsync()` only reaches the drive's write cache; `F_FULLFSYNC`
-/// forces a controller-level flush, matching SQLite/RocksDB/Postgres. On
-/// Linux `fdatasync()` is sufficient on ext4 `data=ordered` and XFS.
+/// macOS `fsync()` only reaches the drive cache; `F_FULLFSYNC` forces a
+/// controller-level flush.
 #[cfg(target_os = "macos")]
 pub fn durable_sync(file: &std::fs::File) -> io::Result<()> {
     use std::os::unix::io::AsRawFd;
@@ -27,8 +26,7 @@ pub async fn durable_sync_async(file: &tokio::fs::File) -> io::Result<()> {
         .map_err(io::Error::other)?
 }
 
-/// Best-effort fsync of a directory. Required after rename() on XFS and other
-/// filesystems without ext4's `auto_da_alloc` heuristic.
+/// Required after rename() on XFS; ext4's `auto_da_alloc` is the exception.
 pub fn fsync_dir(dir: &Path) {
     if let Ok(d) = std::fs::File::open(dir) {
         let _ = durable_sync(&d);

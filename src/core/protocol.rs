@@ -30,33 +30,23 @@ const TYPE_RESUME_RESPONSE: u8 = 0x88;
 const TYPE_DATA_COMPRESSED: u8 = 0x89;
 const TYPE_MISSING_BLOCKS: u8 = 0x8a;
 const TYPE_DIRECT_READY: u8 = 0x8b;
+const TYPE_AUTH_CHALLENGE: u8 = 0x8c;
 
-/// Content-addressed dedup: PUT first exchanges block hashes, only missing
+/// Content-addressed dedup: PUT exchanges block hashes first, only missing
 /// blocks go on the wire.
 pub const CAP_DEDUP: u8 = 0x04;
 
-/// Client opts out of server-side BLAKE3 hashing (Ok reply carries no
-/// digest). On Linux the server additionally uses splice(2) for the
-/// file→stdout path. Client must verify integrity itself if it wants to.
+/// Skip server-side BLAKE3 on PUT/GET; client verifies if it wants to.
 pub const CAP_FAST: u8 = 0x08;
 
-/// Per-file fsync after PUT/GET. Opt-in because a 10000-file batch otherwise
-/// pays ~10-20s of fdatasync barrier latency on NVMe. Server fsyncs in
-/// handle_put; client fsyncs the GET dst.
+/// Per-file fsync after PUT/GET.
 pub const CAP_SYNC: u8 = 0x10;
 
-/// Direct-TCP transport. Rejected on either side that doesn't set it, so
-/// old clients/servers never attempt the rendezvous path.
 pub const CAP_DIRECT_TCP: u8 = 0x20;
 
-/// AES-256-GCM on every post-Welcome message on the direct-TCP data plane.
-/// Server masks this off on transports without a session key (SSH control,
-/// raw listen). Hello/Welcome itself is always plain.
+/// AES-256-GCM on every post-Welcome message. Hello/Welcome stays plain.
 pub const CAP_AEAD: u8 = 0x40;
 
-/// Caps is an optional trailing byte after the version. A peer that doesn't
-/// understand caps sends a shorter Hello/Welcome; decoders treat absence
-/// as "no caps supported" for automatic v1↔v2 fallback.
 pub const CAP_LZ4: u8 = 0x01;
 pub const CAP_ZSTD: u8 = 0x02;
 
@@ -84,8 +74,6 @@ impl CompressionAlgo {
         }
     }
 
-    /// Zstd wins if both offer it (better ratio on file content); LZ4 is
-    /// the fallback when one side lacks zstd.
     pub fn negotiate(local: u8, remote: u8) -> Self {
         let both = local & remote;
         if both & CAP_ZSTD != 0 {
@@ -141,8 +129,7 @@ pub enum Message {
     AuthHello {
         mac: [u8; 32],
     },
-    /// One slice of a striped PUT. Server reply `Ok { hash: None }`;
-    /// integrity comes from the AEAD per-frame MAC.
+    /// One slice of a striped PUT; integrity comes from the AEAD per-frame MAC.
     PutChunked {
         path: String,
         offset: u64,
@@ -153,9 +140,8 @@ pub enum Message {
         offset: u64,
         length: u64,
     },
-    /// Preamble to a striped PUT: create-or-truncate to exactly `size`.
-    /// Handles "new src smaller than existing dst" and zero-byte src,
-    /// which the chunk fanout can't cover.
+    /// Preamble to a striped PUT: create-or-truncate dst to exactly `size`.
+    /// Covers "new src smaller than existing dst" and zero-byte src.
     Truncate {
         path: String,
         size: u64,
@@ -174,14 +160,11 @@ pub enum Message {
     Data {
         payload: Vec<u8>,
     },
-    /// `algo` matches `CompressionAlgo::to_byte`; seeing this without a
-    /// negotiated compression cap is a protocol error.
     DataCompressed {
         algo: u8,
         original_size: u32,
         payload: Vec<u8>,
     },
-    /// Block hashes in source order; last entry may be a shorter tail block.
     HaveBlocks {
         block_size: u32,
         hashes: Vec<[u8; 32]>,
@@ -208,6 +191,11 @@ pub enum Message {
     DirectChannelReady {
         addr: String,
         session_key: [u8; 32],
+    },
+    /// Binds the AuthHello MAC to a fresh nonce, blocking replay of a
+    /// captured AuthHello into the rendezvous slot.
+    AuthChallenge {
+        nonce: [u8; 32],
     },
 }
 
@@ -264,7 +252,7 @@ fn write_list_entry(buf: &mut Vec<u8>, entry: &ListEntry) {
     write_u8(buf, entry.is_dir as u8);
 }
 
-/// Frame layout: `[4 LE payload_len][1 type][payload...]`.
+/// Frame: `[4 LE payload_len][1 type][payload...]`.
 pub fn encode_message(msg: &Message) -> Vec<u8> {
     let mut payload = Vec::new();
 
@@ -390,6 +378,10 @@ pub fn encode_message(msg: &Message) -> Vec<u8> {
             write_string(&mut payload, addr);
             payload.extend_from_slice(session_key);
         }
+        Message::AuthChallenge { nonce } => {
+            write_u8(&mut payload, TYPE_AUTH_CHALLENGE);
+            payload.extend_from_slice(nonce);
+        }
         Message::PutChunked {
             path,
             offset,
@@ -508,7 +500,6 @@ impl<'a> Cursor<'a> {
     }
 }
 
-/// `None` on empty input, truncated frames, or unknown/malformed messages.
 pub fn decode_message(data: &[u8]) -> Option<Message> {
     if data.is_empty() {
         return None;
@@ -614,6 +605,9 @@ pub fn decode_message(data: &[u8]) -> Option<Message> {
             addr: p.read_string()?,
             session_key: p.read_fixed::<32>()?,
         },
+        TYPE_AUTH_CHALLENGE => Message::AuthChallenge {
+            nonce: p.read_fixed::<32>()?,
+        },
         TYPE_PUT_CHUNKED => Message::PutChunked {
             path: p.read_string()?,
             offset: p.read_u64_le()?,
@@ -638,9 +632,7 @@ pub async fn write_message<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     msg: &Message,
 ) -> io::Result<()> {
-    // DirectChannelReady carries a session key; Zeroizing scrubs the
-    // plaintext from the heap after the write (defense-in-depth on top of
-    // the authenticated SSH channel the frame travels through).
+    // DirectChannelReady carries a session key; Zeroizing scrubs the heap.
     if matches!(msg, Message::DirectChannelReady { .. }) {
         let frame = zeroize::Zeroizing::new(encode_message(msg));
         writer.write_all(&frame).await
@@ -650,7 +642,6 @@ pub async fn write_message<W: AsyncWriteExt + Unpin>(
     }
 }
 
-/// `Ok(None)` on clean EOF (zero bytes read for the length prefix).
 pub async fn read_message<R: AsyncReadExt + Unpin>(reader: &mut R) -> io::Result<Option<Message>> {
     let mut len_buf = [0u8; 4];
     match reader.read_exact(&mut len_buf).await {

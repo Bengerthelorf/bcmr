@@ -167,8 +167,7 @@ where
                 return Ok(());
             }
 
-            // rename(2) ignores excludes, so with excludes we must
-            // fall back to copy-then-remove to honour them.
+            // rename(2) ignores excludes; copy-then-remove honours them.
             copy::copy_path(
                 src,
                 dst,

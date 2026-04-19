@@ -107,17 +107,48 @@ async fn ssh(target: &str, cmd: &str) -> Result<String> {
 }
 
 async fn scp_to(target: &str, local: &std::path::Path, remote_path: &str) -> Result<()> {
-    let dest = format!("{}:{}", target, remote_path);
-    let status = Command::new("scp")
-        .args(["-o", "BatchMode=yes"])
-        .arg(local)
-        .arg(&dest)
-        .status()
-        .await?;
+    // sftp instead of scp: pre-OpenSSH-9 scp is CVE-2019-6111 territory.
+    use tokio::io::AsyncWriteExt;
+    let mut child = Command::new("sftp")
+        .args(["-o", "BatchMode=yes", "-b", "-", target])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("sftp stdin unavailable"))?;
+    let cmd = format!(
+        "put {} {}\n",
+        sftp_quote(&local.to_string_lossy())?,
+        sftp_quote(remote_path)?
+    );
+    stdin.write_all(cmd.as_bytes()).await?;
+    drop(stdin);
+    let status = child.wait().await?;
     if !status.success() {
-        bail!("scp failed: {} -> {}", local.display(), dest);
+        bail!(
+            "sftp put failed: {} -> {}:{}",
+            local.display(),
+            target,
+            remote_path
+        );
     }
     Ok(())
+}
+
+fn sftp_quote(s: &str) -> Result<String> {
+    if s.chars().any(|c| c == '\n' || c == '"') {
+        bail!(
+            "sftp path contains forbidden character (newline or quote): {:?}",
+            s
+        );
+    }
+    if s.chars().any(char::is_whitespace) {
+        Ok(format!("\"{}\"", s))
+    } else {
+        Ok(s.to_string())
+    }
 }
 
 fn parse_uname(info: &str) -> Result<(&str, &str)> {
@@ -140,7 +171,6 @@ fn parse_uname(info: &str) -> Result<(&str, &str)> {
 }
 
 fn release_asset_name(os: &str, arch: &str) -> Result<String> {
-    // Must match the asset names uploaded by the release workflow.
     let name = match (os, arch) {
         ("linux", "x86_64") => "bcmr-x86_64-linux.tar.gz",
         ("linux", "aarch64") => "bcmr-aarch64-linux.tar.gz",

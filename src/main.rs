@@ -91,11 +91,6 @@ fn first_display_name(paths: &[std::path::PathBuf]) -> Option<String> {
     })
 }
 
-/// In JSON mode, create a ProgressRunner with `scanning=true` so the ticker
-/// emits heartbeat events to the log while the plan/check phase runs. Long
-/// scans on slow filesystems (NFS, HPC, many files) would otherwise leave
-/// the log with only the parent-written descriptor line, making the job
-/// look frozen.
 fn start_scanning_runner(
     args: &Commands,
     operation: &str,
@@ -192,8 +187,6 @@ async fn handle_copy_command(args: &Commands) -> Result<()> {
 
     if needs_overwrite_prompt || args.is_dry_run() {
         let first_display = first_display_name(sources);
-        // Dry-run in JSON mode emits nothing to the log; starting an
-        // early runner there would leak its ticker task.
         let early = if !args.is_dry_run() {
             start_scanning_runner(args, "Copying", first_display.as_deref())?
         } else {
@@ -330,9 +323,6 @@ async fn handle_move_command(args: &Commands) -> Result<()> {
         None
     };
 
-    // Err before runner construction must go through this closure so
-    // the early scanning runner (if any) emits a terminal error event
-    // to the log before we propagate.
     let bail_early = |early: Option<ProgressRunner>, e: anyhow::Error| -> Result<()> {
         if let Some(r) = early {
             r.finish_with_error(&e.to_string());
@@ -640,7 +630,7 @@ complete -F _bcmr_with_remote bcmr
 complete -c bcmr -n '__fish_seen_subcommand_from copy move; and string match -q "*:*" -- (commandline -ct)' -f -a '(bcmr __complete-remote (commandline -ct) 2>/dev/null)'
 "#
         }
-        Shell::PowerShell => "", // handled via injection into clap-generated script
+        Shell::PowerShell => "",
         _ => "",
     }
 }
@@ -667,8 +657,6 @@ fn background_update_check(command: &Commands) -> Option<mpsc::Receiver<Option<S
     Some(rx)
 }
 
-/// For --json copy/move/remove: detach to background, write progress to log.
-/// Returns true if this process should exit (parent after fork).
 fn maybe_detach(cli: &cli::Cli) -> Result<bool> {
     let is_operation = matches!(
         cli.command,
@@ -691,7 +679,6 @@ fn maybe_detach(cli: &cli::Cli) -> Result<bool> {
 
     let exe = std::env::current_exe()?;
     let original_args: Vec<String> = std::env::args().skip(1).collect();
-    // --_bg is a global flag; must come before the subcommand.
     let mut args = vec!["--_bg".to_string(), job_id.clone()];
     args.extend(original_args);
 

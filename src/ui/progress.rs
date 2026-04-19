@@ -8,8 +8,6 @@ pub trait ProgressRenderer: Send {
     fn inc_current(&mut self, delta: u64);
     fn finish(&mut self) -> io::Result<()>;
 
-    /// JSON renderers override to emit an explicit error event so bg consumers
-    /// can distinguish failed jobs from successful ones.
     fn finish_err(&mut self, _msg: &str) -> io::Result<()> {
         self.finish()
     }

@@ -6,12 +6,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::io as durable_io;
 
 const SESSION_MAGIC: &[u8; 4] = b"BCMR";
-const SESSION_VERSION: u8 = 1;
+const SESSION_VERSION: u8 = 2;
 const BLOCK_SIZE: u64 = 4 * 1024 * 1024;
 const SESSION_MAX_AGE_SECS: u64 = 7 * 24 * 3600;
 
-/// Persistent session state for crash-safe resume. `block_hashes` enables
-/// tail-block verification; `src_{size,mtime,inode}` validate source identity.
 #[derive(Debug)]
 pub struct Session {
     pub src_path: PathBuf,
@@ -82,7 +80,6 @@ impl Session {
         self.src_size == src_size && self.src_mtime == src_mtime && self.src_inode == src_inode
     }
 
-    /// Atomic write → fsync → rename.
     pub fn save(&self) -> io::Result<()> {
         let dir = session_dir();
         fs::create_dir_all(&dir)?;
@@ -121,9 +118,8 @@ impl Session {
         }
     }
 
-    /// Walks backward from the last recorded block, returning the offset
-    /// immediately after the last block whose hash still matches the dst.
-    /// O(1) in the common case (tail block only).
+    /// Offset immediately after the last block whose hash still matches dst,
+    /// walking backward from the tail.
     pub fn find_resume_offset(&self, dst: &Path) -> u64 {
         use std::io::Read;
 
@@ -177,11 +173,11 @@ impl Session {
         buf.extend_from_slice(SESSION_MAGIC);
         buf.push(SESSION_VERSION);
 
-        let src_bytes = self.src_path.to_string_lossy().into_owned().into_bytes();
+        let src_bytes = path_to_raw_bytes(&self.src_path);
         buf.extend_from_slice(&(src_bytes.len() as u32).to_le_bytes());
         buf.extend_from_slice(&src_bytes);
 
-        let dst_bytes = self.dst_path.to_string_lossy().into_owned().into_bytes();
+        let dst_bytes = path_to_raw_bytes(&self.dst_path);
         buf.extend_from_slice(&(dst_bytes.len() as u32).to_le_bytes());
         buf.extend_from_slice(&dst_bytes);
 
@@ -209,7 +205,6 @@ impl Session {
         buf.extend_from_slice(&self.created_at.to_le_bytes());
         buf.extend_from_slice(&self.updated_at.to_le_bytes());
 
-        // Trailing BLAKE3[..8] detects bad sectors / partial writes.
         let checksum = blake3::hash(&buf);
         buf.extend_from_slice(&checksum.as_bytes()[..8]);
 
@@ -240,11 +235,11 @@ impl Session {
 
         let src_len = r.read_u32()? as usize;
         let src_bytes = r.read_bytes(src_len)?;
-        let src_path = PathBuf::from(String::from_utf8_lossy(src_bytes).into_owned());
+        let src_path = raw_bytes_to_path(src_bytes);
 
         let dst_len = r.read_u32()? as usize;
         let dst_bytes = r.read_bytes(dst_len)?;
-        let dst_path = PathBuf::from(String::from_utf8_lossy(dst_bytes).into_owned());
+        let dst_path = raw_bytes_to_path(dst_bytes);
 
         let src_size = r.read_u64()?;
         let src_mtime = r.read_u64()?;
@@ -287,6 +282,29 @@ impl Session {
             updated_at,
         })
     }
+}
+
+#[cfg(unix)]
+fn path_to_raw_bytes(p: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    p.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(unix)]
+fn raw_bytes_to_path(bytes: &[u8]) -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    PathBuf::from(OsString::from_vec(bytes.to_vec()))
+}
+
+#[cfg(not(unix))]
+fn path_to_raw_bytes(p: &Path) -> Vec<u8> {
+    p.to_string_lossy().into_owned().into_bytes()
+}
+
+#[cfg(not(unix))]
+fn raw_bytes_to_path(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
 }
 
 fn session_dir() -> PathBuf {
@@ -341,7 +359,6 @@ impl<'a> Reader<'a> {
 
 pub const COPY_BLOCK_SIZE: u64 = BLOCK_SIZE;
 
-/// 16 blocks = 64 MiB. Ablation: ~4% overhead on Linux, ~16% on macOS.
 pub const CHECKPOINT_INTERVAL_BLOCKS: u32 = 16;
 
 #[cfg(test)]
@@ -406,6 +423,79 @@ mod tests {
         session.add_block([2; 32], BLOCK_SIZE);
         assert_eq!(*session.last_block_hash().unwrap(), [2; 32]);
         assert_eq!(session.last_block_offset(), BLOCK_SIZE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_non_utf8_path_roundtrip() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        let raw = vec![b'/', 0xff, 0xfe, 0x80, b'a'];
+        let path = PathBuf::from(OsString::from_vec(raw.clone()));
+        let session = Session::new(&path, &path, 42, 1700000000, 7);
+        let data = session.serialize();
+        let restored = Session::deserialize(&data).unwrap();
+        assert_eq!(path_to_raw_bytes(&restored.src_path), raw);
+        assert_eq!(path_to_raw_bytes(&restored.dst_path), raw);
+    }
+
+    #[test]
+    fn test_v1_session_rejected() {
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(SESSION_MAGIC);
+        buf.push(1);
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        for _ in 0..4 {
+            buf.extend_from_slice(&0u64.to_le_bytes());
+        }
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.push(0);
+        for _ in 0..2 {
+            buf.extend_from_slice(&0u64.to_le_bytes());
+        }
+        let cs = blake3::hash(&buf);
+        buf.extend_from_slice(&cs.as_bytes()[..8]);
+        assert!(Session::deserialize(&buf).is_none());
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn session_serde_roundtrip_preserves_fields(
+            src_raw in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..64),
+            dst_raw in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..64),
+            size: u64,
+            mtime: u64,
+            inode: u64,
+            written: u64,
+            block_hashes in proptest::collection::vec(proptest::array::uniform32(proptest::prelude::any::<u8>()), 0..8),
+            src_hash_opt in proptest::option::of(proptest::array::uniform32(proptest::prelude::any::<u8>())),
+        ) {
+            let src = raw_bytes_to_path(&src_raw);
+            let dst = raw_bytes_to_path(&dst_raw);
+            let mut s = Session::new(&src, &dst, size, mtime, inode);
+            s.bytes_written = written;
+            for h in &block_hashes { s.block_hashes.push(*h); }
+            if let Some(h) = src_hash_opt { s.set_src_hash(h); }
+
+            let bytes = s.serialize();
+            let back = Session::deserialize(&bytes).expect("self-produced payload must decode");
+            proptest::prop_assert_eq!(path_to_raw_bytes(&back.src_path), src_raw);
+            proptest::prop_assert_eq!(path_to_raw_bytes(&back.dst_path), dst_raw);
+            proptest::prop_assert_eq!(back.src_size, size);
+            proptest::prop_assert_eq!(back.src_mtime, mtime);
+            proptest::prop_assert_eq!(back.src_inode, inode);
+            proptest::prop_assert_eq!(back.bytes_written, written);
+            proptest::prop_assert_eq!(back.block_hashes, block_hashes);
+            proptest::prop_assert_eq!(back.src_hash, src_hash_opt);
+        }
+
+        #[test]
+        fn session_deserialize_never_panics(
+            bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..512),
+        ) {
+            let _ = Session::deserialize(&bytes);
+        }
     }
 
     #[test]

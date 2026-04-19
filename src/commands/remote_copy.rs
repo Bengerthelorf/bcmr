@@ -39,9 +39,6 @@ const COMPRESSED_EXTENSIONS: &[&str] = &[
     "docx", "xlsx", "pptx", "dmg", "iso", "whl", "egg",
 ];
 
-/// Below this size the per-pool-member rendezvous handshake cost
-/// outweighs a striped stream's throughput win. 64 MiB is the knee
-/// on typical LAN links.
 const STRIPING_MIN_FILE_SIZE: u64 = 64 * 1024 * 1024;
 
 fn should_compress(items: &[TransferItem]) -> bool {
@@ -134,9 +131,11 @@ async fn run_parallel_transfers(
                 remote::upload_file(
                     &item.local_path,
                     &item.remote,
-                    &progress_cb,
-                    &skip_cb,
-                    &noop_file_cb,
+                    remote::TransferCallbacks {
+                        on_progress: &progress_cb,
+                        on_skip: &skip_cb,
+                        on_new_file: &noop_file_cb,
+                    },
                     &task_opts,
                     Some(slot),
                 )
@@ -145,9 +144,11 @@ async fn run_parallel_transfers(
                 remote::download_file(
                     &item.remote,
                     &item.local_path,
-                    &progress_cb,
-                    &skip_cb,
-                    &noop_file_cb,
+                    remote::TransferCallbacks {
+                        on_progress: &progress_cb,
+                        on_skip: &skip_cb,
+                        on_new_file: &noop_file_cb,
+                    },
                     item.size,
                     &task_opts,
                     Some(slot),
@@ -277,14 +278,9 @@ pub async fn handle_remote_copy(
     };
     remote::validate_ssh_connection(&check_target).await?;
 
-    // `scp.parallel_transfers` is the legacy config key; it now also
-    // controls the serve-pool size. Default 4: beats scp under normal
-    // load, stays inside sshd's default MaxStartups headroom.
     let parallel = args.get_parallel().unwrap_or(CONFIG.scp.parallel_transfers);
     let serve_parallel = parallel.max(1);
 
-    // Falls back to legacy SSH if remote has no bcmr, or if serve's
-    // --root jail (default $HOME) rejects a path like /tmp/foo.
     let ssh_target = check_target.ssh_target();
     let serve_result = if let Some(ref rdest) = remote_dest {
         handle_serve_upload(args, sources, rdest, &ssh_target, excludes, serve_parallel).await
@@ -295,13 +291,9 @@ pub async fn handle_remote_copy(
     match serve_result {
         Ok(()) => return Ok(()),
         Err(e) => {
-            // Silent fallback costs users 5-10× throughput on many-file
-            // batches; warn loudly unless they opted out.
             let msg = e.to_string();
             let is_dry_run_redirect = msg.contains("dry-run fallback");
             if !is_dry_run_redirect && CONFIG.transfer.fallback_warning {
-                // Leading '\n' keeps the warning off the last TUI line
-                // that may still be on the terminal.
                 eprintln!(
                     "\nbcmr: serve fast path unavailable ({msg}).\n\
                      bcmr: falling back to legacy SSH (per-file scp \
@@ -413,9 +405,11 @@ async fn handle_remote_upload(
                 remote::upload_file(
                     src,
                     &file_remote,
-                    &runner.inc_callback(),
-                    &runner.skip_callback(),
-                    &runner.file_callback(),
+                    remote::TransferCallbacks {
+                        on_progress: &runner.inc_callback(),
+                        on_skip: &runner.skip_callback(),
+                        on_new_file: &runner.file_callback(),
+                    },
                     &opts,
                     None,
                 )
@@ -425,9 +419,11 @@ async fn handle_remote_upload(
                 remote::upload_directory(
                     src,
                     &dir_remote,
-                    &runner.inc_callback(),
-                    &runner.skip_callback(),
-                    &runner.file_callback(),
+                    remote::TransferCallbacks {
+                        on_progress: &runner.inc_callback(),
+                        on_skip: &runner.skip_callback(),
+                        on_new_file: &runner.file_callback(),
+                    },
                     &excludes,
                     &opts,
                 )
@@ -597,7 +593,15 @@ async fn handle_remote_download(
                     tokio::fs::create_dir_all(&local_dir).await?;
                 }
                 remote::download_directory(
-                    rsrc, &local_dir, &inc, &skip, &file_cb, &excludes, &opts,
+                    rsrc,
+                    &local_dir,
+                    remote::TransferCallbacks {
+                        on_progress: &inc,
+                        on_skip: &skip,
+                        on_new_file: &file_cb,
+                    },
+                    &excludes,
+                    &opts,
                 )
                 .await?;
             } else {
@@ -609,9 +613,11 @@ async fn handle_remote_download(
                 remote::download_file(
                     rsrc,
                     &local_path,
-                    &inc,
-                    &skip,
-                    &file_cb,
+                    remote::TransferCallbacks {
+                        on_progress: &inc,
+                        on_skip: &skip,
+                        on_new_file: &file_cb,
+                    },
                     info.size,
                     &opts,
                     None,
@@ -624,11 +630,6 @@ async fn handle_remote_download(
     runner.finish_ok()
 }
 
-/// Upload via bcmr serve protocol. Err if serve is unavailable.
-///
-/// `parallel` = SSH connections opened by the pool; each has its own
-/// cipher stream, so throughput scales near-linearly on multi-core
-/// until NIC/disk saturate.
 async fn handle_serve_upload(
     args: &Commands,
     sources: &[PathBuf],
@@ -689,10 +690,6 @@ async fn handle_serve_upload(
             let size = src.metadata()?.len();
             (runner.file_callback())(&src.file_name().unwrap_or_default().to_string_lossy(), size);
 
-            // Striping requires direct-TCP (AEAD per-frame MAC gives
-            // chunk-level integrity without a whole-file hash). Skipped
-            // for --verify and dedup since those need a server-side
-            // hash we can't assemble across chunks.
             let use_stripe = args.use_direct_tcp()
                 && pool.len() > 1
                 && size >= STRIPING_MIN_FILE_SIZE
@@ -738,8 +735,6 @@ async fn serve_upload_dir(
     let remote_dir = format!("{}/{}", remote_base.path, dir_name);
     pool.mkdir(&remote_dir).await?;
 
-    // Two-pass: mkdir all subdirs sequentially (parents before
-    // children), then striped-pipeline all file PUTs through the pool.
     let mut files_to_put: Vec<FileTransfer> = Vec::new();
     for entry in crate::core::traversal::walk(local_dir, true, false, 1, excludes) {
         let entry = entry?;
@@ -757,9 +752,6 @@ async fn serve_upload_dir(
         }
     }
 
-    // The pool's striped PUT moves files into per-bucket writer tasks,
-    // so snapshot local paths before handing over when --verify needs
-    // them post-transfer.
     let verify_inputs: Option<Vec<PathBuf>> =
         verify.then(|| files_to_put.iter().map(|f| f.local.clone()).collect());
 
@@ -789,10 +781,6 @@ async fn serve_upload_dir(
     Ok(())
 }
 
-/// Download via bcmr serve protocol. Err if serve is unavailable.
-///
-/// `parallel` = SSH connections in the pool; N>1 stripes files round-
-/// robin across connections for N× crypto throughput.
 async fn handle_serve_download(
     args: &Commands,
     sources: &[PathBuf],
@@ -889,10 +877,6 @@ async fn handle_serve_download(
         .lock()
         .set_operation_type("Downloading (serve)");
 
-    // Directories go serially (parents before children); files split
-    // into "big" (striped, one at a time, whole pool) and "normal"
-    // (pipelined batch). Stripe gate matches PUT: direct-TCP, pool>1,
-    // file above knee, no --verify.
     let use_stripe = args.use_direct_tcp() && pool.len() > 1 && !args.is_verify();
     let mut big_files: Vec<(String, PathBuf, u64)> = Vec::new();
     let mut files_to_get: Vec<FileTransfer> = Vec::new();

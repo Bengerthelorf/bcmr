@@ -1,13 +1,11 @@
-//! Single-core AEAD throughput at 4 MiB chunks (the Data-frame size).
-//! Run: `cargo run --release --example crypto_probe`
-//! Compare against SSH loopback throughput to size the Path B ceiling.
+//! Single-core AEAD encrypt/decrypt/roundtrip throughput at 4 MiB chunks.
 
 use ring::aead::{self, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, CHACHA20_POLY1305};
 use ring::rand::{SecureRandom, SystemRandom};
 use std::time::Instant;
 
-const CHUNK_SIZE: usize = 4 * 1024 * 1024; // matches bcmr serve's DATA frame size
-const TOTAL_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB total work per measurement
+const CHUNK_SIZE: usize = 4 * 1024 * 1024;
+const TOTAL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const N_CHUNKS: usize = (TOTAL_BYTES as usize) / CHUNK_SIZE;
 
 struct Result {
@@ -24,14 +22,9 @@ fn bench(algo_name: &'static str, algo: &'static aead::Algorithm) -> Result {
     let enc_key = LessSafeKey::new(UnboundKey::new(algo, &key_bytes).expect("key"));
     let dec_key = LessSafeKey::new(UnboundKey::new(algo, &key_bytes).expect("key"));
 
-    // Fresh buffer per chunk so we're not benchmarking cache behavior
-    // on the same 4 MiB buffer. Fill with pseudo-random content that
-    // AES-NI / AVX can't shortcut.
     let mut plain = vec![0u8; CHUNK_SIZE];
     rng.fill(&mut plain).expect("rng fill");
 
-    // The ring AEAD API appends the 16-byte tag to the buffer, so we
-    // pre-allocate with room.
     let mut ct_buf = Vec::with_capacity(CHUNK_SIZE + aead::MAX_TAG_LEN);
     let mut nonce_counter = 0u64;
 
@@ -50,9 +43,8 @@ fn bench(algo_name: &'static str, algo: &'static aead::Algorithm) -> Result {
     let ct_sample = ct_buf.clone();
 
     let mut work_buf = Vec::with_capacity(CHUNK_SIZE + aead::MAX_TAG_LEN);
-    // Decrypt N times using the SAME valid ciphertext/nonce pair —
-    // otherwise we'd have to re-encrypt in the loop, which measures
-    // encrypt not decrypt.
+    // Reuse the same valid ciphertext+nonce so the decrypt loop doesn't
+    // accidentally measure re-encryption.
     let nonce_reuse_counter = nonce_counter - 1;
     let t0 = Instant::now();
     for _ in 0..N_CHUNKS {
@@ -131,16 +123,4 @@ fn main() {
             r.name, r.encrypt_gbps, r.decrypt_gbps, r.roundtrip_gbps
         );
     }
-
-    println!();
-    println!("Interpretation:");
-    println!("  Path B single-stream ceiling ≈ roundtrip column (server encrypts,");
-    println!("  client decrypts; they're disjoint cores in practice so server-");
-    println!("  encrypt-only is the real ceiling for server-bound workloads).");
-    println!();
-    println!("  Compare against SSH loopback throughput:");
-    println!("    dd if=/dev/zero bs=1M count=4096 | ssh localhost 'cat > /dev/null'");
-    println!();
-    println!("  Decision rule: Path B ships only if encrypt-GB/s ≥ 1.5× SSH loopback.");
-    println!("  Otherwise we stay on Path A (parallel SSH) and close the Path B branch.");
 }

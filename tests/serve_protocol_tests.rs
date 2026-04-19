@@ -332,7 +332,6 @@ fn test_open_direct_channel_roundtrip() {
 
 #[test]
 fn test_auth_hello_roundtrip() {
-    // Distinct-from-0/ff pattern so a "forgot to copy" bug would show up.
     let mut mac = [0u8; 32];
     for (i, b) in mac.iter_mut().enumerate() {
         *b = (i * 7 + 3) as u8;
@@ -365,8 +364,6 @@ fn test_direct_ready_addr_empty_string() {
     assert_eq!(roundtrip(msg.clone()), msg);
 }
 
-/// Regression guard: a decoder that accepted 31 bytes for a MAC would corrupt
-/// the stream. Build a frame with type + 31 bytes (needs 32).
 #[test]
 fn test_auth_hello_truncated_payload_returns_none() {
     let mut payload = vec![0x0cu8];

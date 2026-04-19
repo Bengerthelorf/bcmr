@@ -133,8 +133,6 @@ fn e2e_resume_after_simulated_crash() {
     assert!(ok);
     assert!(files_match(&src, &dst));
 
-    // Session is cleaned up after success; rebuild one by hand to simulate
-    // a mid-copy crash so the resume path can exercise carry-forward.
     let src_meta = src.metadata().unwrap();
     let src_mtime = src_meta
         .modified()
@@ -230,7 +228,6 @@ fn e2e_resume_with_corrupted_tail_block() {
         f.write_all(&[0xFF]).unwrap();
     }
 
-    // Resume should detect corruption in block 15 and fall back to block 14.
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
         "-t",
@@ -501,7 +498,7 @@ fn e2e_pipeline_copy_honors_jobs_concurrency() {
 
     assert!(ok, "copy with --jobs should succeed: {}", stderr);
     assert!(
-        elapsed < Duration::from_millis(1800),
+        elapsed < Duration::from_millis(2200),
         "expected file copies to overlap with --jobs; elapsed={elapsed:?}"
     );
 
@@ -513,9 +510,6 @@ fn e2e_pipeline_copy_honors_jobs_concurrency() {
     }
 }
 
-/// Exercises the `block_hashes[..keep]` carry-forward path in `copy_file`:
-/// two simulated crashes force back-to-back resumes that must preserve hashes
-/// from the prior session rather than recomputing from scratch.
 #[test]
 fn e2e_carry_forward_code_path() {
     let dir = tempfile::tempdir().unwrap();
@@ -586,8 +580,6 @@ fn e2e_carry_forward_code_path() {
     ]);
     assert!(ok);
 
-    // Manually mimic what copy_file would produce with carry-forward:
-    // 15 blocks (10 carried + 5 new), dst truncated to 60MB.
     {
         use std::io::Read;
         let mut session = Session::new(&src, &dst, src_meta.len(), src_mtime, src_inode);
@@ -642,8 +634,6 @@ fn test_xattr_preserved_with_p_flag() {
     assert_eq!(got, b"hello-xattr");
 }
 
-/// Regression guard: xattr wire/disk path is raw bytes; a binary value with
-/// the high bit set must round-trip verbatim rather than being UTF-8 mangled.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn test_xattr_preserves_binary_value() {

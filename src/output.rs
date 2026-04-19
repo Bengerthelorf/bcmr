@@ -84,7 +84,6 @@ impl CommandOutput {
         serde_json::to_string(self).expect("CommandOutput must be serializable")
     }
 
-    /// Exit code: 0 = success/in-sync, 1 = check found diffs, 2 = error.
     pub fn exit_code(&self) -> i32 {
         match self {
             CommandOutput::Check(r) => {

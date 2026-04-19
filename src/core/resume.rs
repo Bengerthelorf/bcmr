@@ -34,7 +34,7 @@ pub async fn resolve(
     }
 
     let dst_len = dst.metadata()?.len();
-    let loaded_session = load_and_validate_session(src, dst, file_size)?;
+    let mut loaded_session = load_and_validate_session(src, dst, file_size)?;
 
     let decision = if strict {
         resolve_strict(src, dst, file_size, dst_len).await?
@@ -65,13 +65,17 @@ pub async fn resolve(
         Decision::Resume => {}
     }
 
-    let start_offset = if let Some(ref session) = loaded_session {
-        let verified = session.find_resume_offset(dst);
-        if verified > 0 {
-            verified
-        } else {
-            0
-        }
+    // find_resume_offset does blocking disk I/O — offloaded so `-r --jobs N`
+    // doesn't starve the runtime.
+    let start_offset = if let Some(session) = loaded_session.take() {
+        let dst_pb = dst.to_path_buf();
+        let (verified, session) = tokio::task::spawn_blocking(move || {
+            let v = session.find_resume_offset(&dst_pb);
+            (v, session)
+        })
+        .await?;
+        loaded_session = Some(session);
+        verified
     } else {
         dst_len
     };

@@ -1,19 +1,10 @@
-//! Standalone compression probe. Compile with:
-//!   rustc --edition 2021 -O bench/compress_probe.rs -L target/release/deps \
-//!         --extern lz4_flex --extern zstd -o /tmp/compress_probe
-//! Or use the helper script bench/run_compress_probe.sh.
-//!
-//! Measures: compression ratio, encode throughput, decode throughput for
-//! LZ4 and Zstd-1/3/9 on three realistic block contents:
-//!   - incompressible: /dev/urandom bytes
-//!   - text-like: repeating dictionary with noise (mimics logs, source)
-//!   - mixed: half source-like, half random (mimics typical file mix)
+//! Compression ratio + encode/decode throughput for LZ4 and Zstd-1/3/9 on
+//! random, text-like, and mixed 4 MiB blocks.
 
 use std::time::Instant;
 
 fn gen_random(n: usize) -> Vec<u8> {
     let mut buf = vec![0u8; n];
-    // Simple LCG for reproducibility; quality irrelevant, just want high entropy.
     let mut x: u64 = 0xdeadbeefcafebabe;
     for b in buf.iter_mut() {
         x = x
@@ -25,7 +16,6 @@ fn gen_random(n: usize) -> Vec<u8> {
 }
 
 fn gen_text_like(n: usize) -> Vec<u8> {
-    // Pool of words/tokens typical in source code and logs.
     let tokens: &[&[u8]] = &[
         b"function ",
         b"const ",
@@ -84,7 +74,6 @@ fn bench_once(name: &'static str, data: &[u8]) -> Vec<Result> {
     let iters_mb = (256 * 1024 * 1024 / n).max(1);
     let mut out = Vec::new();
 
-    // LZ4 (frame)
     {
         let encoded: Vec<u8> = lz4_flex::compress_prepend_size(data);
         let ratio = encoded.len() as f64 / n as f64;
@@ -145,7 +134,6 @@ fn bench_once(name: &'static str, data: &[u8]) -> Vec<Result> {
 }
 
 fn main() {
-    // 4 MiB per block matches bcmr's COPY_BLOCK_SIZE.
     const BLOCK: usize = 4 * 1024 * 1024;
     let mut rows = Vec::new();
     rows.extend(bench_once("random", &gen_random(BLOCK)));

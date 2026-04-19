@@ -21,10 +21,10 @@ pub async fn spawn_remote(ssh_target: &str) -> Result<SshSpawn, BcmrError> {
     .await
 }
 
+#[cfg(any(test, feature = "test-support"))]
 #[allow(dead_code)]
 pub async fn spawn_local(bcmr_path: &std::path::Path) -> Result<SshSpawn, BcmrError> {
-    // `--root /` lets integration tests write under tempdirs outside the
-    // default `$HOME` jail.
+    // `--root /` escapes the default `$HOME` jail for integration tests.
     let child = Command::new(bcmr_path)
         .args(["serve", "--root", "/"])
         .stdin(std::process::Stdio::piped())
@@ -36,16 +36,12 @@ pub async fn spawn_local(bcmr_path: &std::path::Path) -> Result<SshSpawn, BcmrEr
 }
 
 async fn spawn(args: &[&str]) -> Result<SshSpawn, BcmrError> {
-    // OpenSSH diagnostics would interleave with protocol stdout. Set
-    // BCMR_DEBUG_SSH_STDERR=1 to surface remote bcmr stderr.
+    // BCMR_DEBUG_SSH_STDERR=1 surfaces remote bcmr stderr.
     let stderr_dest = if std::env::var("BCMR_DEBUG_SSH_STDERR").is_ok_and(|v| v == "1") {
         std::process::Stdio::inherit()
     } else {
         std::process::Stdio::null()
     };
-    // kill_on_drop: a dropped-not-closed ServeClient must not leak its
-    // ssh. Direct-TCP clients hold the Child through the data session,
-    // so drop only fires at end-of-client.
     let child = Command::new("ssh")
         .args(args)
         .stdin(std::process::Stdio::piped())
