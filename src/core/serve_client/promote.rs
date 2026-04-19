@@ -7,6 +7,8 @@ use crate::core::transport::ssh as ssh_transport;
 
 use super::{ServeClient, Transport};
 
+const DIRECT_TCP_DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn auth_hello_mac(session_key: &[u8; 32], nonce: &[u8; 32]) -> blake3::Hash {
     let mut input = [0u8; AUTH_HELLO_TAG.len() + 32];
     input[..AUTH_HELLO_TAG.len()].copy_from_slice(AUTH_HELLO_TAG);
@@ -100,9 +102,14 @@ impl ServeClient {
             }
         };
 
-        let stream = match tokio::net::TcpStream::connect(&addr).await {
-            Ok(s) => s,
-            Err(e) => {
+        let stream = match tokio::time::timeout(
+            DIRECT_TCP_DIAL_TIMEOUT,
+            tokio::net::TcpStream::connect(&addr),
+        )
+        .await
+        {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
                 let mut msg = format!(
                     "direct-TCP dial to {addr} failed: {e}. The server bound its \
                      rendezvous listener on the interface where SSH arrived, but \
@@ -118,6 +125,12 @@ impl ServeClient {
                     }
                 }
                 return Err(BcmrError::InvalidInput(msg));
+            }
+            Err(_) => {
+                return Err(BcmrError::InvalidInput(format!(
+                    "direct-TCP dial to {addr} timed out after {}s",
+                    DIRECT_TCP_DIAL_TIMEOUT.as_secs()
+                )));
             }
         };
         let (tcp_reader, tcp_writer) = stream.into_split();
