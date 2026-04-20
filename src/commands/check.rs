@@ -269,37 +269,6 @@ async fn collect_remote_entries(
         .collect())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn entry(path: &str) -> Entry {
-        Entry {
-            rel_path: path.into(),
-            size: 0,
-            mtime: 0,
-            is_dir: false,
-        }
-    }
-
-    #[test]
-    fn filter_entries_matches_local_traversal_semantics() {
-        let excludes = vec![regex::Regex::new(r"\.log$").unwrap()];
-        let out = filter_entries(
-            vec![entry("a/b.txt"), entry("a/c.log"), entry("d.LOG")],
-            &excludes,
-        );
-        let paths: Vec<_> = out.iter().map(|e| e.rel_path.as_str()).collect();
-        assert_eq!(paths, vec!["a/b.txt", "d.LOG"]);
-    }
-
-    #[test]
-    fn filter_entries_noop_without_rules() {
-        let out = filter_entries(vec![entry("x"), entry("y")], &[]);
-        assert_eq!(out.len(), 2);
-    }
-}
-
 fn filter_entries(entries: Vec<Entry>, excludes: &[regex::Regex]) -> Vec<Entry> {
     if excludes.is_empty() {
         return entries;
@@ -439,5 +408,36 @@ fn build_result(
         summary,
         error: None,
         error_kind: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(path: &str) -> Entry {
+        Entry {
+            rel_path: path.into(),
+            size: 0,
+            mtime: 0,
+            is_dir: false,
+        }
+    }
+
+    #[test]
+    fn filter_entries_matches_local_traversal_semantics() {
+        let excludes = vec![regex::Regex::new(r"\.log$").unwrap()];
+        let out = filter_entries(
+            vec![entry("a/b.txt"), entry("a/c.log"), entry("d.LOG")],
+            &excludes,
+        );
+        let paths: Vec<_> = out.iter().map(|e| e.rel_path.as_str()).collect();
+        assert_eq!(paths, vec!["a/b.txt", "d.LOG"]);
+    }
+
+    #[test]
+    fn filter_entries_noop_without_rules() {
+        let out = filter_entries(vec![entry("x"), entry("y")], &[]);
+        assert_eq!(out.len(), 2);
     }
 }
