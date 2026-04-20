@@ -95,6 +95,64 @@ round-trip, client streams only what's missing across the whole
 tree) would be the natural follow-up to Experiment 11. Saves $N - 1$
 extra round-trips for $N$ files.
 
+## Content-Defined Chunking for CAS (FastCDC)
+
+`CAP_DEDUP` today chunks at fixed 4 MiB boundaries + BLAKE3 per
+block (see
+[Experiment 11](/ablation/wire-protocol#experiment-11-content-addressed-dedup-for-repeat-put)
+and `src/core/serve_client/ops.rs:319`). That's optimal for
+"re-upload the exact same artifact" — the measured 32 % win on
+that experiment — but a single-byte insertion partway through a
+file shifts every subsequent block boundary and evicts the whole
+tail from the CAS hit set.
+
+FastCDC-style chunking replaces the fixed boundary with a
+lightweight gear rolling hash that picks boundaries based on
+content, targeting the same ~4 MiB average. A mid-file insert
+only displaces the chunks around it; everything after the next
+CDC boundary still matches the previous upload. This is **not**
+rsync-style byte-precise delta-sync (see
+[Non-Goal: Rolling-Checksum Delta-Sync](/ablation/no-rolling-checksum))
+— the wire unit stays a whole chunk of ~4 MiB, matched whole,
+hashed with BLAKE3. Only the boundary rule changes.
+
+**Protocol change required.** The "wire format unchanged"
+intuition this proposal sometimes comes with is wrong:
+
+- `Message::HaveBlocks { block_size: u32, hashes: Vec<[u8; 32]> }`
+  today carries a single block size for all hashes; CDC needs
+  per-chunk length (and offset) on the wire. Either extend the
+  message or introduce a variant under a new cap bit
+  (`CAP_DEDUP_CDC`) so the fixed-block path stays interoperable
+  with older peers.
+- Server reconstruction currently derives each block's file
+  offset from `idx * block_size`; with variable chunks the offset
+  has to come from the wire.
+- Post-upload CAS lookup by hash is unchanged (CAS is keyed by
+  hash alone, not offset).
+
+**Measure before shipping.** CAS's one measured workload is
+identical 64 MiB re-upload. CDC's *additional* win over fixed
+blocks materialises only on re-uploads where content was modified
+in place — SQL dumps patched mid-file, ML checkpoints with
+rewritten weights, VM images after an in-place patch. We have no
+data that these dominate bcmr users' actual traffic. Reasonable
+experiment shape:
+
+1. Feature-flag a gear-hash chunker (e.g. the `fastcdc` crate)
+   behind an env var; emit the variable-chunk message when set.
+2. On a workload with real mid-file deltas (a repeated SQL dump
+   across schema migrations, or a synthetic "insert 64 KiB at
+   byte offset 512 MiB in a 2 GiB file"), compare CAS hit rate
+   and wire bytes saved vs fixed blocks.
+3. If hit-rate gain is material on a representative workload,
+   plan a protocol bump; otherwise park indefinitely.
+
+Conservative implementation estimate: 1–2 weeks (chunker
+integration, protocol variant, server offset handling, test
+matrix for small files / all-zero inputs / boundary-aligned
+edits). Add a few days up front for the measurement gate.
+
 ## Closing the 1 GiB Single-File Gap to scp
 
 After [Experiment 18](/ablation/wire-protocol#experiment-18-client-side-request-pipelining)
