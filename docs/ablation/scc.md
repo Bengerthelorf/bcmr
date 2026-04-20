@@ -1,8 +1,12 @@
-# Streaming Checkpoint Copy
+---
+title: Streaming Checkpoint Copy
+section: internals
+order: 2
+---
 
 bcmr implements a **Streaming Checkpoint Copy (SCC)** algorithm that unifies three capabilities no existing `cp`-class tool provides together: inline integrity hashing at zero extra I/O, crash-safe resumable state, and constant-time resume verification.
 
-::: info Note
+:::callout[Note]{kind="info"}
 SCC applies to the buffered read/write copy path. When reflink (CoW) or `copy_file_range` succeeds, bcmr uses those kernel fast paths instead — these bypass userspace entirely, so inline hashing is not available. Verification with `-V` in those cases falls back to a separate hash pass.
 :::
 
@@ -151,7 +155,7 @@ On Linux, BLAKE3 at 5.4 GB/s exceeds NVMe peak (~3.5 GB/s). Inline hashing is tr
 
 On macOS, BLAKE3 at ~1 GB/s is comparable to SSD speed, so warm-cache tests show 8--56% overhead. In cold-cache (real-world) scenarios, disk latency dominates and the overhead shrinks toward the Linux numbers.
 
-::: warning
+:::callout{kind="warn"}
 This conclusion is later revisited on the [Local Multi-File Performance](/ablation/local-perf) page (Experiment 10): the "free hash" claim was correct for *single* hashes but the streaming path actually hashed every byte twice (source + per-block), and the second hash isn't needed when nothing reads it.
 :::
 
@@ -212,7 +216,7 @@ Tail-block verification is constant at ~5 ms (macOS) / ~1.8 ms (Linux) regardles
 
 Differences are within noise. `F_FULLFSYNC` provides **correct durability guarantees** at no measurable performance cost. SQLite, RocksDB, and PostgreSQL all use `F_FULLFSYNC` on macOS.
 
-::: warning
+:::callout{kind="warn"}
 This conclusion was for the single-file case. The [Local Multi-File Performance](/ablation/local-perf) page (Experiment 7) shows that *per-file* `F_FULLFSYNC` on the parent directory becomes catastrophic on many-small-files workloads, where the cost scales with file count rather than file size.
 :::
 

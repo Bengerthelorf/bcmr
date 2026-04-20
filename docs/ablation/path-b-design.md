@@ -1,4 +1,8 @@
-# Direct-TCP Transport Design
+---
+title: Direct-TCP Transport Design
+section: internals
+order: 5
+---
 
 Branch: `path-b/direct-tcp`. Not on `main`. Will merge when the design
 is reviewed and an end-to-end benchmark justifies it.

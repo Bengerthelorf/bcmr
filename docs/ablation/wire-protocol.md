@@ -1,6 +1,10 @@
-# Wire Protocol & Remote Transfers
+---
+title: Wire Protocol & Remote Transfers
+section: internals
+order: 4
+---
 
-::: info Test peers
+:::callout[Test peers]{kind="info"}
 The cross-host measurements on this page use three SSH peers,
 referred to by codename throughout. Network paths and CPUs are
 described where relevant; identifying details are intentionally
@@ -186,7 +190,7 @@ SSH) it grows.
 **Correctness check**: SHA-256 of source matches both destinations
 across the two runs.
 
-::: info CAS Eviction
+:::callout[CAS Eviction]{kind="info"}
 Today the CAS grows monotonically. Manual cleanup with
 `rm -rf ~/.local/share/bcmr/cas` works but is easy to forget. A
 size-capped LRU is on the [Open Questions](/ablation/open-questions)

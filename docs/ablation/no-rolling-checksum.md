@@ -1,4 +1,8 @@
-# Non-Goal: Rolling-Checksum Delta-Sync
+---
+title: 'Non-Goal: Rolling-Checksum Delta-Sync'
+section: internals
+order: 6
+---
 
 rsync's signature feature is rolling-checksum byte-precise delta-sync:
 Adler-32 as a weak sliding-window hash, MD5 as the strong match, and a

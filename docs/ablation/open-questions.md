@@ -1,4 +1,8 @@
-# Open Questions
+---
+title: Open Questions
+section: internals
+order: 7
+---
 
 These are investigations that surfaced during the v0.5.7 / v0.5.8
 work but were intentionally deferred. Each needs design before

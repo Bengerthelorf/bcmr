@@ -1,4 +1,8 @@
-# Internals
+---
+title: Internals
+section: internals
+order: 1
+---
 
 These pages document the design decisions inside bcmr that aren't
 visible from the CLI surface — the measurements behind the shipped

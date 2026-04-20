@@ -1,6 +1,10 @@
-# Local Multi-File Performance
+---
+title: Local Multi-File Performance
+section: internals
+order: 3
+---
 
-::: info Test hardware
+:::callout[Test hardware]{kind="info"}
 Two reference machines surface in the experiments below; the same
 codenames are used on the [Wire Protocol](/ablation/wire-protocol)
 page.
