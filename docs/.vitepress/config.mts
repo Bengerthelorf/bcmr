@@ -63,6 +63,8 @@ export default withMermaid(defineConfig({
                 { text: 'Streaming Checkpoint Copy', link: '/ablation/scc' },
                 { text: 'Local Multi-File Performance', link: '/ablation/local-perf' },
                 { text: 'Wire Protocol & Remote', link: '/ablation/wire-protocol' },
+                { text: 'Path B: Direct-TCP + AEAD', link: '/ablation/path-b-design' },
+                { text: 'Non-Goal: Rolling-Checksum', link: '/ablation/no-rolling-checksum' },
                 { text: 'Open Questions', link: '/ablation/open-questions' },
               ],
             },

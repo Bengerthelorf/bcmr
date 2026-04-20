@@ -53,8 +53,11 @@ documents that serve a different primary audience:
   is the two-paragraph summary of the serve vs legacy split, aimed
   at a user deciding which mode their transfer will pick.
 - [SECURITY.md](https://github.com/Bengerthelorf/bcmr/blob/main/SECURITY.md)
-  describes the threat model for the direct-TCP data plane (what
-  AES-256-GCM buys you, what session-key rotation covers).
+  lists which internal components are in-scope for vulnerability
+  reports (direct-TCP data plane, rendezvous auth, session file
+  format, CAS). The threat-model discussion for AEAD framing and
+  session keys lives on the
+  [Path B](/ablation/path-b-design) page above.
 
 ## Cross-Cutting Summary
 
