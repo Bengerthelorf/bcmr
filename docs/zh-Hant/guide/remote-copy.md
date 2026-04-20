@@ -150,7 +150,7 @@ bcmr copy --fast -V user@host:/big.bin ./local.bin
 
 ::: warning 限制
 - 無法直接在兩個遠端主機之間複製 — 請使用本機作為中轉
-- Serve 協定暫不支援斷點續傳（`-C`），需續傳時使用傳統模式（`-P 1`）
+- Serve 快路徑的斷點續傳（`-C`）：單檔案上傳已原生支援；遞迴目錄上傳和所有下載在指定 `--resume/--strict/--append` 時自動回退到傳統模式
 :::
 
 ## 路徑偵測

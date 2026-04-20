@@ -22,6 +22,7 @@ pub(super) fn transfer_options_from_cli(cli: &Commands) -> remote::TransferOptio
         resume: cli.is_resume(),
         strict: cli.is_strict(),
         append: cli.is_append(),
+        sync: cli.is_sync(),
     }
 }
 
@@ -299,12 +300,18 @@ pub async fn handle_remote_copy(
             let is_resume_redirect = msg.contains("not yet supported, fallback to legacy")
                 || msg.contains("not supported, fallback to legacy");
             if !is_dry_run_redirect && !is_resume_redirect && CONFIG.transfer.fallback_warning {
+                let sync_caveat = if args.is_sync() && is_upload {
+                    "\n                     bcmr: --sync on legacy uploads is best-effort \
+                     (scp does not guarantee remote fsync)."
+                } else {
+                    ""
+                };
                 eprintln!(
                     "\nbcmr: serve fast path unavailable ({msg}).\n\
                      bcmr: falling back to legacy SSH (per-file scp \
                      workers) — slower by ~5-10× on many-file batches.\n\
                      bcmr: set `transfer.fallback_warning = false` in \
-                     ~/.config/bcmr/config.toml to silence this."
+                     ~/.config/bcmr/config.toml to silence this.{sync_caveat}"
                 );
             }
         }

@@ -153,7 +153,7 @@ bcmr copy --fast -V user@host:/big.bin ./local.bin
 
 ::: warning 限制
 - 无法直接在两个远程主机之间复制 — 请使用本地作为中转
-- Serve 协议暂不支持断点续传（`-C`），需续传时使用传统模式（`-P 1`）
+- Serve 快路径的断点续传（`-C`）：单文件上传已原生支持；递归目录上传和所有下载在指定 `--resume/--strict/--append` 时自动回退到传统模式
 :::
 
 ## 路径检测

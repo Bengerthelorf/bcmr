@@ -117,6 +117,7 @@ pub struct TransferOptions {
     pub resume: bool,
     pub strict: bool,
     pub append: bool,
+    pub sync: bool,
 }
 
 pub type RemoteTransferOptions = TransferOptions;
