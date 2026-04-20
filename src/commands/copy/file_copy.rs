@@ -119,7 +119,6 @@ fn is_unsupported(e: &std::io::Error) -> bool {
 
 pub(super) struct CopyFileOptions {
     transfer: crate::core::remote::TransferOptions,
-    sync: bool,
     reflink_arg: Option<String>,
     sparse_arg: Option<String>,
     test_mode: TestMode,
@@ -134,8 +133,8 @@ impl CopyFileOptions {
                 resume: cli.is_resume(),
                 strict: cli.is_strict(),
                 append: cli.is_append(),
+                sync: cli.is_sync(),
             },
-            sync: cli.is_sync(),
             reflink_arg: cli.get_reflink_mode(),
             sparse_arg: cli.get_sparse_mode(),
             test_mode,
@@ -183,7 +182,6 @@ where
 {
     let CopyFileOptions {
         transfer,
-        sync,
         ref reflink_arg,
         ref sparse_arg,
         test_mode,
@@ -194,6 +192,7 @@ where
         resume,
         strict,
         append,
+        sync,
     } = transfer;
 
     let file_size = src.metadata()?.len();

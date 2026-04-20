@@ -129,6 +129,12 @@ pub async fn download_file(
         )));
     }
 
+    if opts.sync {
+        dst_file.flush().await?;
+        crate::core::io::durable_sync_async(&dst_file).await?;
+    }
+    drop(dst_file);
+
     if opts.verify {
         let local_path = local_dst.to_path_buf();
         let local_hash =

@@ -178,7 +178,7 @@ server-side integrity verification.
 
 ::: warning Limitations
 - Cannot copy between two remote hosts directly — use a local intermediary
-- Resume (`-C`) is not yet available for serve-based remote transfers (use legacy mode with `-P 1`)
+- Resume (`-C`) on serve fast path: single-file uploads are supported natively. Recursive directory uploads and downloads with `--resume/--strict/--append` fall back to legacy mode automatically.
 :::
 
 ## Path Detection

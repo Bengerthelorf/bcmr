@@ -129,7 +129,7 @@ async fn collect_both(
     let src_entries = if let Some(ref rp) = remote_src {
         if src_is_dir {
             emit_scanning(&rp.display());
-            let entries = collect_remote_entries(rp, serve).await?;
+            let entries = filter_entries(collect_remote_entries(rp, serve).await?, excludes);
             emit_scanning_done(entries.len());
             entries
         } else {
@@ -165,9 +165,12 @@ async fn collect_both(
         };
         emit_scanning(&rdest_sub.display());
         if src_is_dir {
-            let entries = collect_remote_entries(&rdest_sub, serve)
-                .await
-                .unwrap_or_default();
+            let entries = filter_entries(
+                collect_remote_entries(&rdest_sub, serve)
+                    .await
+                    .unwrap_or_default(),
+                excludes,
+            );
             emit_scanning_done(entries.len());
             entries
         } else {
@@ -264,6 +267,47 @@ async fn collect_remote_entries(
             is_dir,
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(path: &str) -> Entry {
+        Entry {
+            rel_path: path.into(),
+            size: 0,
+            mtime: 0,
+            is_dir: false,
+        }
+    }
+
+    #[test]
+    fn filter_entries_matches_local_traversal_semantics() {
+        let excludes = vec![regex::Regex::new(r"\.log$").unwrap()];
+        let out = filter_entries(
+            vec![entry("a/b.txt"), entry("a/c.log"), entry("d.LOG")],
+            &excludes,
+        );
+        let paths: Vec<_> = out.iter().map(|e| e.rel_path.as_str()).collect();
+        assert_eq!(paths, vec!["a/b.txt", "d.LOG"]);
+    }
+
+    #[test]
+    fn filter_entries_noop_without_rules() {
+        let out = filter_entries(vec![entry("x"), entry("y")], &[]);
+        assert_eq!(out.len(), 2);
+    }
+}
+
+fn filter_entries(entries: Vec<Entry>, excludes: &[regex::Regex]) -> Vec<Entry> {
+    if excludes.is_empty() {
+        return entries;
+    }
+    entries
+        .into_iter()
+        .filter(|e| !excludes.iter().any(|r| r.is_match(&e.rel_path)))
+        .collect()
 }
 
 fn collect_local_entries(root: &Path, excludes: &[regex::Regex]) -> Result<Vec<Entry>, BcmrError> {
