@@ -3,7 +3,7 @@ layout: home
 hero:
   name: BCMR
   text: Better Copy Move Remove
-  tagline: A modern, safe CLI tool for file operations — with progress display, resume, verification, remote copy via SSH, and JSON output for AI agents.
+  tagline: A modern cp, mv, and scp — with BLAKE3 integrity built in, crash-safe resume, and one CLI for local and SSH transfers.
   image:
     src: /images/demo.gif
     alt: BCMR Demo

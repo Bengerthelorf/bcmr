@@ -3,7 +3,7 @@ layout: home
 hero:
   name: BCMR
   text: 更好的复制、移动、删除
-  tagline: 现代化、安全的文件操作 CLI 工具 — 支持进度显示、断点续传、完整性校验、SSH 远程复制和 AI Agent JSON 输出。
+  tagline: 更现代的 cp / mv / scp — 每次复制自带 BLAKE3 完整性校验、崩溃后可续传、本地和 SSH 远程共用一个命令。
   image:
     src: /images/demo.gif
     alt: BCMR 演示

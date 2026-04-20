@@ -28,14 +28,19 @@
 
 ---
 
-## 项目定位
+## bcmr 做的事，`cp` 和 `scp` 都不做
 
-bcmr 是 **`cp` / `mv` / `rm` / `scp` 的现代替代**，**不是 rsync 的替代**。具体来说：
+**默认自带可信的完整性校验。** 每次复制都在 write 过程中流式跑 BLAKE3，而不是额外再扫一遍。`--verify` 会升级为完整的 2-pass 校验；即使不加，resume 时也有 O(1) 尾块验证。`cp` 和 `scp` 根本不 hash；`rsync --checksum` 是可选项且会重扫整个文件。
 
-- **单文件复制**（本地或 SSH 远程）：对比 cp 和 scp 有优势 — inline BLAKE3 完整性校验、$\mathcal{O}(1)$ resume 校验、原子化崩溃安全写入、线路层 Zstd/LZ4 压缩。
-- **多文件复制** (`bcmr copy -r`)：在"很多小文件"场景下与 cp/rsync 持平或更快（已测量）；单个大文件场景下比 cp 慢约 1.6 倍。
-- **它不是什么**：delta-sync 工具。bcmr 的内容寻址去重按 **整块 4 MiB** 匹配 — 对"重复上传同一个 artifact"可靠，对"100 GB 文件里只改了 3 MB"毫无用处。rsync 的 rolling-checksum 解决后者，我们不解决。
-- **对标 `rsync -a` 的元数据完整性**：部分支持。mode、mtime、xattr 已保留；ACL、BSD 文件标志位、硬链接图谱尚未。
+**开箱即用的崩溃安全续传。** `bcmr copy` 被打断（Ctrl-C、笔记本合盖、网络掉线）后，同一条命令再跑一次就能续上 — 工具会找到 session 文件，重新验证尾块，然后接着之前的位置继续。不需要 `--partial --append-verify` 这种组合咒语；只要能证明安全，续传就是默认行为。
+
+**本地和 SSH，共用同一个 CLI。** `bcmr copy a.txt /b/` 和 `bcmr copy a.txt user@host:/b/` 是完全相同的命令、相同的参数 — 不需要在 `cp` / `scp` / `rsync` 之间切上下文。双端都装了 bcmr 时走自有协议 over SSH（可选 AES-256-GCM direct-TCP 数据面，绕开 SSH 单流加密瓶颈）；否则自动回退到 scp。
+
+**为人和 AI Agent 同时设计。** `--json` 会脱离终端转入后台，NDJSON 进度写入 `~/.local/share/bcmr/jobs/<id>.jsonl`；`bcmr status <id>` 将状态分类为 `scanning` / `running` / `done` / `failed` / `interrupted`。进度输出结构化、可被程序消费，也不会因终端关闭而丢失。
+
+### 什么时候应该用 `rsync`
+
+bcmr 不是 delta-sync 引擎。如果你在 100 GB 文件里只改了 3 MB 而希望只传那 3 MB，用 `rsync --inplace` — 它的 rolling checksum 做字节级 delta。bcmr 的内容寻址去重按整块 4 MiB 匹配，适合"重传整个 artifact"的场景。bcmr 目前也不保留 ACL、BSD 文件标志位、硬链接图谱（`rsync -a` 覆盖这些）；mode、mtime、xattr 是覆盖的。
 
 相关测量见 [技术内幕](https://app.snaix.homes/bcmr/ablation/) 页面。
 
