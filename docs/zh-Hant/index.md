@@ -19,25 +19,28 @@ hero:
       link: https://github.com/Bengerthelorf/bcmr
 
 features:
-  - icon: "\U0001F4CA"
-    title: 進度顯示
-    details: 精美的 TUI 介面，支援漸變進度條、傳輸速度、ETA 和逐檔案進度追蹤。也提供純文字模式。
-  - icon: "\U0001F504"
-    title: 斷點續傳與校驗
-    details: 支援透過 mtime、檔案大小或 BLAKE3 雜湊校驗續傳中斷的傳輸。複製後可驗證檔案完整性。
-  - icon: "\U0001F310"
-    title: 遠端複製 (SSH)
-    details: 透過 SSH 並行傳輸、智慧壓縮、逐 worker 進度顯示。無需額外工具。
-  - icon: "\u26A1"
+  - icon: ✅
+    title: 預設完整性校驗
+    details: "每次複製都在 write 過程中串流跑 BLAKE3。--verify 升級為完整的 2-pass 校驗 —— 不是 rsync --checksum 那樣的可選重掃。"
+  - icon: 🔄
+    title: 崩潰安全續傳
+    details: "被打斷後同一條命令再跑一次就能續上 —— session 檔案、尾塊校驗、從停下的位置繼續。不需要 --partial --append-verify 組合咒語。"
+  - icon: 🔗
+    title: 本機 SSH 同一 CLI
+    details: "bcmr copy a.txt /b/ 和 bcmr copy a.txt user@host:/b/ 是同一條命令、同一套 flag。不需要在 cp/scp/rsync 之間切上下文。"
+  - icon: 🔐
+    title: Direct-TCP 快速通道
+    details: "可選的 AES-256-GCM over 直連 TCP 資料面，繞開 SSH 單流加密瓶頸。金鑰仍由 SSH 控制通道協商，身分驗證不變。"
+  - icon: ⚡
     title: 預設高效能
-    details: Reflink (寫時複製)、Linux copy_file_range、稀疏檔案偵測、流水線掃描+複製即時啟動。
-  - icon: "\U0001F6E1\uFE0F"
-    title: 安全操作
-    details: 乾跑預覽、覆寫提示、正規表達式排除、透過暫存檔案+重新命名實現原子寫入。
-  - icon: "\U0001F916"
-    title: AI Agent 友好
-    details: "--json 輸出 NDJSON 串流進度和結構化結果。check 命令比較來源與目標差異。專為程式化使用設計。"
-  - icon: "\U0001F3A8"
-    title: 完全可設定
-    details: 自訂顏色漸變、進度條字元、邊框樣式，以及 reflink/sparse 預設值，均透過 TOML 設定。
+    details: Reflink（寫時複製）、Linux copy_file_range、稀疏檔案偵測、掃描+複製流水線即時啟動。
+  - icon: 🛡️
+    title: 預設安全
+    details: "透過暫存檔案+重新命名的原子寫入、持久 fsync（macOS 用 F_FULLFSYNC）、乾跑預覽、正規表達式排除。"
+  - icon: 🤖
+    title: 為人和 Agent 同時設計
+    details: "TUI 即時進度與 ETA 供人閱讀。--json 脫離終端轉入後台，串流寫 NDJSON；bcmr status <id> 回傳狀態機。不怕關終端。"
+  - icon: 🗜️
+    title: 線路壓縮與去重
+    details: "握手時協商每塊 LZ4/Zstd（原始碼類文字 ~5×），加上 ≥ 16 MiB 重傳的內容定址去重。"
 ---
