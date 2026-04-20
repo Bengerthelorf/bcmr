@@ -66,7 +66,7 @@ their own separate engineering effort, none cheaper than this one.
 
 ## What bcmr ships instead
 
-bcmr ships [content-addressed 4 MiB block dedup](/ablation/wire-protocol#content-addressed-dedup)
+bcmr ships [content-addressed 4 MiB block dedup](/ablation/wire-protocol#experiment-11-content-addressed-dedup-for-repeat-put)
 for repeat uploads. It's a different point in the design space —
 whole-block matches, no sliding window, no rolling hash — and it
 happens to be cheap enough in 2026 to turn on unconditionally for
