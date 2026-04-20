@@ -1,8 +1,9 @@
 # Internals
 
 These pages document the design decisions inside bcmr that aren't
-visible from the CLI surface, with measurements from real workloads.
-The structure mirrors the layers of the tool:
+visible from the CLI surface — the measurements behind the shipped
+ones, the work designed but not shipped, and the explicit non-goals
+we've decided against. The structure mirrors the layers of the tool:
 
 - **[Streaming Checkpoint Copy](/ablation/scc)** is the algorithm at
   the heart of every single-file copy: 4 MiB blocks, inline BLAKE3,
@@ -23,16 +24,46 @@ The structure mirrors the layers of the tool:
   (LZ4 + Zstd-3 with auto-skip), and the content-addressed dedup
   for repeat PUTs.
 
+- **[Path B: Direct-TCP + AEAD Data Plane](/ablation/path-b-design)**
+  is the design of the optional direct-TCP data plane that bypasses
+  SSH's single-stream crypto ceiling using AES-256-GCM over a
+  rendezvous-established TCP connection.
+
+- **[Non-Goal: Rolling-Checksum Delta-Sync](/ablation/no-rolling-checksum)**
+  explains why bcmr will not implement rsync's signature feature.
+  Three pieces: the 1996 trade-off has flipped, the workloads that
+  need byte-precise delta already moved to CDC-based tools, and the
+  engineering cost doesn't convert us into an rsync replacement
+  afterward.
+
 - **[Open Questions](/ablation/open-questions)** lists work that's
   designed but not shipped: `splice(2)` zero-copy, `io_uring` reads,
   CAS LRU eviction, and the failed pipelined-hashing experiment.
 
+## See Also (design discussion in context)
+
+Not every design rationale lives under Internals — some is in
+documents that serve a different primary audience:
+
+- [README — What bcmr does that `cp` and `scp` don't](https://github.com/Bengerthelorf/bcmr#what-bcmr-does-that-cp-and-scp-dont)
+  is the user-facing capability narrative (integrity defaults, resume
+  semantics, unified local/SSH CLI, JSON for agents) that this
+  Internals section measures and justifies.
+- [Remote Copy guide — How It Works](/guide/remote-copy#how-it-works)
+  is the two-paragraph summary of the serve vs legacy split, aimed
+  at a user deciding which mode their transfer will pick.
+- [SECURITY.md](https://github.com/Bengerthelorf/bcmr/blob/main/SECURITY.md)
+  describes the threat model for the direct-TCP data plane (what
+  AES-256-GCM buys you, what session-key rotation covers).
+
 ## Cross-Cutting Summary
 
-Every row below has its own experiment with measured numbers; click
-through to the relevant page for the table. Every number here is
-from a **specific workload** — the benefit column notes the
-conditions so the row can't be lifted context-free.
+Most rows below have their own experiment with measured numbers;
+click through to the relevant page for the table. Every number
+here is from a **specific workload** — the benefit column notes
+the conditions so the row can't be lifted context-free. Rows
+marked *non-goal* are design decisions without a measurement
+(the reasoning lives on the linked page).
 
 | Decision | Lives on | Measured benefit (workload) |
 |----------|----------|------------------|
@@ -50,3 +81,4 @@ conditions so the row can't be lifted context-free.
 | `CAP_DEDUP` repeat PUT | [Wire](/ablation/wire-protocol#experiment-11-content-addressed-dedup-for-repeat-put) | 32 % faster (18.9 → 12.9 s) on 64 MiB re-upload, ~10 MB/s WAN; savings match the bytes not sent |
 | `CAP_FAST` GET | [Wire](/ablation/wire-protocol#experiment-14-cap-fast-real-numbers) | **Mixed.** 1.07× on WAN (network-bound); **0.78× (i.e. slower) on Linux loopback** due to pipe-size + spawn_blocking issues documented in the experiment |
 | CAS LRU cap | [Wire](/ablation/wire-protocol#experiment-15-cas-lru-eviction-under-load) | Holds CAS ≤ cap under 3× 24 MiB repeat uploads (unit-test-sized; intended to prove bound, not speedup) |
+| No rolling-checksum delta-sync | [Non-Goal](/ablation/no-rolling-checksum) | *non-goal* — reach for rsync / restic / borg / OCI when byte-precise delta is genuinely required |

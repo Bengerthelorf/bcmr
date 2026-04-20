@@ -42,7 +42,7 @@
 
 bcmr 不是 delta-sync 引擎。如果你在 100 GB 文件里只改了 3 MB 而希望只传那 3 MB，用 `rsync --inplace` — 它的 rolling checksum 做字节级 delta。bcmr 的内容寻址去重按整块 4 MiB 匹配，适合"重传整个 artifact"的场景。bcmr 目前也不保留 ACL、BSD 文件标志位、硬链接图谱（`rsync -a` 覆盖这些）；mode、mtime、xattr 是覆盖的。
 
-相关测量见 [技术内幕](https://app.snaix.homes/bcmr/ablation/) 页面。
+完整的 rolling-checksum 非目标论证见 [Internals — Non-Goal: Rolling-Checksum Delta-Sync](https://app.snaix.homes/bcmr/ablation/no-rolling-checksum)。能力描述背后的测量见 [技术内幕索引](https://app.snaix.homes/bcmr/ablation/)。
 
 ---
 

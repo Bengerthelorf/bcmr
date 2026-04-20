@@ -67,8 +67,10 @@ whole artifacts. bcmr also doesn't yet preserve ACLs, BSD flags,
 or hardlink graphs that `rsync -a` captures — mode, mtime, and
 xattrs are covered.
 
-See the [Internals](https://app.snaix.homes/bcmr/ablation/) page
-for the measurements behind these claims.
+The [Internals — Non-Goal: Rolling-Checksum Delta-Sync](https://app.snaix.homes/bcmr/ablation/no-rolling-checksum)
+page has the full reasoning for why delta-sync isn't on the
+roadmap. For the measurements behind the capability claims above,
+see the [Internals](https://app.snaix.homes/bcmr/ablation/) index.
 
 ---
 
