@@ -28,25 +28,44 @@ Installation, shell integration, CLI reference, configuration, and more.
 
 ---
 
-## Scope
+## What bcmr does that `cp` and `scp` don't
 
-bcmr is a **modern `cp` / `mv` / `rm` / `scp` replacement**, not an
-`rsync` replacement. Concretely:
+**Integrity you can trust, by default.** Every copy streams through
+BLAKE3 during the write, not as a separate post-pass. `--verify`
+promotes this to a full 2-pass checksum round-trip; without it you
+still get O(1) tail-block verification on resume. `cp` and `scp`
+don't hash at all; `rsync --checksum` is opt-in and rescans the
+whole file.
 
-- **Single-file copy** (local or over SSH): has advantages over cp
-  and scp — inline BLAKE3 integrity, $\mathcal{O}(1)$ resume
-  verification, atomic crash-safe writes, wire-level Zstd/LZ4.
-- **Many-file copy** (`bcmr copy -r`): on many-small-files workloads
-  it's competitive with or faster than both cp and rsync (measured);
-  on single large files it's within ~1.6× of cp.
-- **What it is not**: a delta-sync tool. bcmr's content-addressed
-  dedup matches **whole 4 MiB blocks** only — reliable for
-  "re-upload the same artifact", useless for "the 3 MB of a 100 GB
-  file that changed". rsync's rolling-checksum handles the latter;
-  we don't.
-- **Preservation parity with `rsync -a`**: partial. Mode, mtime, and
-  xattrs are preserved; ACLs, BSD flags, and hardlink graphs are
-  not yet.
+**Crash-safe resume out of the box.** Interrupt a `bcmr copy`
+(Ctrl-C, laptop closes, network drops) and run the same command
+again — it finds the session file, re-verifies the tail block, and
+picks up where it stopped. No `--partial --append-verify`
+incantation; safe resume is the default when the tool can prove
+it's safe.
+
+**One CLI, local or SSH.** `bcmr copy a.txt /b/` and
+`bcmr copy a.txt user@host:/b/` are the same command with the same
+flags — no `cp` / `scp` / `rsync` context switch. When both sides
+have bcmr it runs a native protocol over SSH (optionally with an
+AES-256-GCM direct-TCP data plane that bypasses SSH's single-stream
+crypto ceiling); otherwise it falls back to scp transparently.
+
+**Built for humans and agents.** `--json` detaches to a background
+job writing NDJSON to `~/.local/share/bcmr/jobs/<id>.jsonl`;
+`bcmr status <id>` classifies state as `scanning` / `running` /
+`done` / `failed` / `interrupted`. Progress is structured,
+machine-parseable, and survives terminal close.
+
+### When to reach for `rsync` instead
+
+bcmr isn't a delta-sync engine. If you re-upload 3 MB of a 100 GB
+file and want only those 3 MB on the wire, use `rsync --inplace` —
+its rolling checksum does byte-level delta. bcmr's content-addressed
+dedup matches whole 4 MiB blocks and pays off when you re-upload
+whole artifacts. bcmr also doesn't yet preserve ACLs, BSD flags,
+or hardlink graphs that `rsync -a` captures — mode, mtime, and
+xattrs are covered.
 
 See the [Internals](https://app.snaix.homes/bcmr/ablation/) page
 for the measurements behind these claims.
