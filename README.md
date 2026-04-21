@@ -98,7 +98,7 @@ brew install Bengerthelorf/tap/bcmr
 ### Install Script
 
 ```bash
-curl -fsSL https://app.snaix.homes/bcmr/install | bash
+curl -fsSL https://app.snaix.homes/bcmr/install.sh | bash
 ```
 
 ### Cargo
