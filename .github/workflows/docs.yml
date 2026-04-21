@@ -1,16 +1,13 @@
 name: Trigger snaix.homes deploy
 
-# Docs (Markdown under /docs) now live in the central snaix.homes site via a
-# submodule. Pushing content changes here just pings the site's Cloudflare
-# Pages deploy hook; the site's build does the rest (submodule refresh +
-# Astro build). Store the hook URL in the repo's Secrets as
-# SNAIX_DOCS_DEPLOY_HOOK.
-
 on:
   push:
     branches: [main]
     paths:
       - 'docs/**'
+      - 'commands/**'
+  release:
+    types: [published]
   workflow_dispatch:
 
 jobs:
