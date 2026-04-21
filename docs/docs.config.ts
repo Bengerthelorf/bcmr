@@ -2,7 +2,7 @@ export default {
   slug: 'bcmr',
   install: {
     macos:   { name: 'macOS',   cmd: 'brew install Bengerthelorf/tap/bcmr',            note: 'homebrew; universal binary — arm64 + x86_64' },
-    linux:   { name: 'Linux',   cmd: 'curl -fsSL app.snaix.homes/bcmr/install | bash', note: 'debian, ubuntu, arch, alpine, fedora · musl static' },
+    linux:   { name: 'Linux',   cmd: 'curl -fsSL app.snaix.homes/bcmr/install.sh | bash', note: 'debian, ubuntu, arch, alpine, fedora · musl static' },
     windows: { name: 'Windows', cmd: 'scoop install bcmr',                             note: 'or winget install Bengerthelorf.bcmr' },
     source:  { name: 'source',  cmd: 'cargo install bcmr --locked',                    note: 'builds from crates.io · rust 1.78+' },
   },
