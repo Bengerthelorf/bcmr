@@ -67,10 +67,10 @@ whole artifacts. bcmr also doesn't yet preserve ACLs, BSD flags,
 or hardlink graphs that `rsync -a` captures — mode, mtime, and
 xattrs are covered.
 
-The [Internals — Non-Goal: Rolling-Checksum Delta-Sync](https://app.snaix.homes/bcmr/ablation/no-rolling-checksum)
+The [Internals — Non-Goal: Rolling-Checksum Delta-Sync](https://app.snaix.homes/bcmr/internals/no-rolling-checksum)
 page has the full reasoning for why delta-sync isn't on the
 roadmap. For the measurements behind the capability claims above,
-see the [Internals](https://app.snaix.homes/bcmr/ablation/) index.
+see the [Internals](https://app.snaix.homes/bcmr/internals/) index.
 
 ---
 
@@ -166,7 +166,7 @@ eval "$(bcmr init zsh --cmd b)"    # creates bcp, bmv, brm
 eval "$(bcmr init zsh --cmd '')"   # creates cp, mv, rm
 ```
 
-> **Need help?** Check the [Getting Started](https://app.snaix.homes/bcmr/guide/getting-started) guide, or browse the full [Documentation](https://app.snaix.homes/bcmr/).
+> **Need help?** Check the [Getting Started](https://app.snaix.homes/bcmr/docs/getting-started) guide, or browse the full [Documentation](https://app.snaix.homes/bcmr/).
 
 ## Configuration
 
@@ -208,7 +208,7 @@ transfer over SSH" should feel like:
 - **[mscp](https://github.com/upa/mscp)** (GPL-3.0) — the
   parallel-SSH-connections pattern that lets `bcmr serve
   --parallel N` scale past scp's single-stream crypto ceiling
-  (see [Experiment 19](https://app.snaix.homes/bcmr/ablation/wire-protocol)).
+  (see [Experiment 19](https://app.snaix.homes/bcmr/internals/wire-protocol)).
   bcmr's implementation is an independent reimplementation of
   the concept in Rust, **not a derivative work** — no code was
   copied, only the architectural idea (open N independent SSH
