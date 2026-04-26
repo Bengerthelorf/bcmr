@@ -115,7 +115,7 @@ jobs:
           cp target/${{ matrix.target }}/release/bcmr${{ matrix.ext }} dist/
 
       - name: Upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
           path: dist/*
