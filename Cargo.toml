@@ -54,7 +54,7 @@ signal-hook = "0.3.18"
 self_update = { version = "0.43", default-features = false, features = ["archive-tar", "archive-zip", "compression-flate2", "reqwest", "rustls"] }
 futures = "0.3"
 num_cpus = "1.16"
-lz4_flex = { version = "0.11", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
+lz4_flex = { version = "0.13", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 zstd = { version = "0.13", default-features = false }
 # Path B direct-TCP transport: RNG for session keys + AES-256-GCM on
 # the data plane. BoringSSL-backed, hand-tuned AES-NI / VAES asm on
