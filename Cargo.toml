@@ -50,7 +50,7 @@ once_cell = "1.21.3"
 regex = "1.12.2"
 blake3 = "1.5"
 reflink-copy = "0.1.28"
-signal-hook = "0.3.18"
+signal-hook = "0.4.4"
 self_update = { version = "0.43", default-features = false, features = ["archive-tar", "archive-zip", "compression-flate2", "reqwest", "rustls"] }
 futures = "0.3"
 num_cpus = "1.16"
