@@ -583,14 +583,7 @@ impl ProgressRenderer for TuiProgress {
             println!();
         }
 
-        let elapsed = self.data.elapsed();
-        let avg_bps = self.data.average_bytes_per_sec().unwrap_or(0.0);
-        println!(
-            "Done: {} in {:.1}s | avg {}/s",
-            format_bytes(self.data.current_bytes as f64),
-            elapsed.as_secs_f64(),
-            format_bytes(avg_bps)
-        );
+        println!("{}", self.data.done_summary_line());
 
         self.finished = true;
         Ok(())
