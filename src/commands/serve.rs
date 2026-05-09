@@ -1,5 +1,5 @@
 use crate::core::protocol::{
-    CAP_AEAD, CAP_DEDUP, CAP_DIRECT_TCP, CAP_FAST, CAP_LZ4, CAP_SYNC, CAP_ZSTD,
+    CAP_AEAD, CAP_DEDUP, CAP_DIRECT_TCP, CAP_FAST, CAP_LZ4, CAP_PUT_OFFSET, CAP_SYNC, CAP_ZSTD,
 };
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
@@ -9,8 +9,14 @@ mod handlers;
 mod rendezvous;
 mod session;
 
-pub(super) const SERVER_CAPS: u8 =
-    CAP_LZ4 | CAP_ZSTD | CAP_DEDUP | CAP_FAST | CAP_SYNC | CAP_DIRECT_TCP | CAP_AEAD;
+pub(super) const SERVER_CAPS: u8 = CAP_LZ4
+    | CAP_ZSTD
+    | CAP_DEDUP
+    | CAP_FAST
+    | CAP_SYNC
+    | CAP_DIRECT_TCP
+    | CAP_AEAD
+    | CAP_PUT_OFFSET;
 
 fn resolve_root(arg: Option<PathBuf>) -> Result<PathBuf> {
     let raw = match arg {

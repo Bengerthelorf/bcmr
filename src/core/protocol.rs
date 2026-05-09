@@ -47,6 +47,8 @@ pub const CAP_DIRECT_TCP: u8 = 0x20;
 
 pub const CAP_AEAD: u8 = 0x40;
 
+pub const CAP_PUT_OFFSET: u8 = 0x80;
+
 pub const CAP_LZ4: u8 = 0x01;
 pub const CAP_ZSTD: u8 = 0x02;
 
