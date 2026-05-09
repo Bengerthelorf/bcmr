@@ -189,7 +189,11 @@ pub enum Commands {
     },
 
     /// Check for updates and self-update
-    Update,
+    Update {
+        /// Print the current and latest versions and exit, without installing.
+        #[arg(long)]
+        check: bool,
+    },
 
     #[command(name = "__complete-remote", hide = true)]
     CompleteRemote { partial: String },
@@ -651,7 +655,7 @@ mod tests {
 
     #[test]
     fn test_commands_non_file_defaults() {
-        let cmd = Commands::Update;
+        let cmd = Commands::Update { check: false };
         assert!(!cmd.is_recursive());
         assert!(!cmd.is_force());
         assert!(!cmd.is_preserve());

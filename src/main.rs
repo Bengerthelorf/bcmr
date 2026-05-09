@@ -119,7 +119,10 @@ async fn main() -> Result<()> {
             handle_status_command(job_id);
         }
         Commands::Init { .. } => handle_init_command(&cli.command)?,
-        Commands::Update => commands::update::run()?,
+        Commands::Update { check } => {
+            let check = *check;
+            tokio::task::spawn_blocking(move || commands::update::run(check)).await??;
+        }
         Commands::Serve { root, listen } => {
             if let Some(addr) = listen {
                 let parsed: std::net::SocketAddr = addr.parse().map_err(|e| {
