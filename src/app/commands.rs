@@ -165,16 +165,23 @@ pub(crate) async fn handle_copy_command(args: &Commands) -> Result<()> {
             None
         };
 
-        let plan =
-            match commands::copy::plan_copy(sources, dest, args.is_recursive(), &excludes).await {
-                Ok(p) => p,
-                Err(e) => {
-                    if let Some(r) = early {
-                        r.finish_with_error(&e.to_string());
-                    }
-                    return Err(e.into());
+        let plan = match commands::copy::plan_copy(
+            sources,
+            dest,
+            args.is_recursive(),
+            args.is_no_deref(),
+            &excludes,
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                if let Some(r) = early {
+                    r.finish_with_error(&e.to_string());
                 }
-            };
+                return Err(e.into());
+            }
+        };
 
         if args.is_force()
             && !plan.overwrites.is_empty()
@@ -282,6 +289,13 @@ pub(crate) async fn handle_move_command(args: &Commands) -> Result<()> {
 
     let excludes = args.compile_excludes()?;
     let (sources, dest) = args.get_sources_and_dest().map_err(anyhow::Error::msg)?;
+
+    if args.is_no_deref() {
+        bail!(
+            "--no-deref is not yet supported for bcmr move; use bcmr copy --no-deref \
+             then bcmr remove on the originals, or scp -p / rsync."
+        );
+    }
 
     for src in sources {
         validate_source_kind(src)?;

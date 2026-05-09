@@ -59,6 +59,13 @@ fn files_match(a: &Path, b: &Path) -> bool {
     ha == hb
 }
 
+#[cfg(unix)]
+fn is_symlink(p: &Path) -> bool {
+    p.symlink_metadata()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
 fn session_exists(src: &Path, dst: &Path) -> bool {
     Session::session_path(src, dst).exists()
 }
@@ -658,4 +665,344 @@ fn test_xattr_preserves_binary_value() {
 
     let got = xattr::get(&dst, "user.bcmr.bin").unwrap().unwrap();
     assert_eq!(got, binary_value);
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_no_deref_replicates_top_level_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("target.txt"), b"target body").unwrap();
+    let link = dir.path().join("link.txt");
+    std::os::unix::fs::symlink("target.txt", &link).unwrap();
+
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir(&dst_dir).unwrap();
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "--no-deref",
+        link.to_str().unwrap(),
+        dst_dir.to_str().unwrap(),
+    ]);
+    assert!(ok, "stderr={stderr}");
+
+    let landed = dst_dir.join("link.txt");
+    assert!(is_symlink(&landed));
+    assert_eq!(
+        std::fs::read_link(&landed).unwrap(),
+        std::path::Path::new("target.txt")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_no_deref_default_dereferences() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("target.txt"), b"derefed").unwrap();
+    let link = dir.path().join("link.txt");
+    std::os::unix::fs::symlink("target.txt", &link).unwrap();
+
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir(&dst_dir).unwrap();
+
+    let (ok, _, _) = run_bcmr(&[
+        "copy",
+        "-t",
+        link.to_str().unwrap(),
+        dst_dir.to_str().unwrap(),
+    ]);
+    assert!(ok);
+
+    let landed = dst_dir.join("link.txt");
+    assert!(landed.symlink_metadata().unwrap().file_type().is_file());
+    assert_eq!(fs::read(&landed).unwrap(), b"derefed");
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_no_deref_preserves_dangling_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let link = dir.path().join("broken.txt");
+    std::os::unix::fs::symlink("nonexistent", &link).unwrap();
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir(&dst_dir).unwrap();
+
+    let (ok, _, _) = run_bcmr(&[
+        "copy",
+        "-t",
+        "--no-deref",
+        link.to_str().unwrap(),
+        dst_dir.to_str().unwrap(),
+    ]);
+    assert!(ok);
+
+    let landed = dst_dir.join("broken.txt");
+    assert!(landed.symlink_metadata().is_ok());
+    assert_eq!(
+        std::fs::read_link(&landed).unwrap(),
+        std::path::Path::new("nonexistent")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_no_deref_recursive_preserves_nested_links() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("tree");
+    fs::create_dir(&src).unwrap();
+    fs::write(src.join("a.txt"), b"a").unwrap();
+    let sub = src.join("sub");
+    fs::create_dir(&sub).unwrap();
+    fs::write(sub.join("real.txt"), b"real").unwrap();
+    std::os::unix::fs::symlink("real.txt", sub.join("rel_link.txt")).unwrap();
+    std::os::unix::fs::symlink(src.join("a.txt"), src.join("abs_link.txt")).unwrap();
+
+    let dst_root = dir.path().join("dst");
+    fs::create_dir(&dst_root).unwrap();
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-rt",
+        "--no-deref",
+        src.to_str().unwrap(),
+        dst_root.to_str().unwrap(),
+    ]);
+    assert!(ok, "stderr={stderr}");
+
+    let landed = dst_root.join("tree");
+    assert!(landed.join("a.txt").is_file());
+    let rel = landed.join("sub/rel_link.txt");
+    assert!(is_symlink(&rel));
+    assert_eq!(
+        std::fs::read_link(&rel).unwrap(),
+        std::path::Path::new("real.txt")
+    );
+    let abs = landed.join("abs_link.txt");
+    assert!(is_symlink(&abs));
+    // Absolute targets stay verbatim — bcmr doesn't rewrite them relative to dst.
+    assert_eq!(std::fs::read_link(&abs).unwrap(), src.join("a.txt"));
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_no_deref_overwrite_gate_refuses_existing_dst() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("target.txt"), b"target").unwrap();
+    let link = dir.path().join("link.txt");
+    std::os::unix::fs::symlink("target.txt", &link).unwrap();
+
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir(&dst_dir).unwrap();
+    let collide = dst_dir.join("link.txt");
+    fs::write(&collide, b"PRE").unwrap();
+    let pre_hash = checksum::calculate_hash(&collide).unwrap();
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "--no-deref",
+        link.to_str().unwrap(),
+        dst_dir.to_str().unwrap(),
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("already exists") || stderr.contains("TargetExists"));
+    assert!(collide.is_file());
+    assert_eq!(checksum::calculate_hash(&collide).unwrap(), pre_hash);
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_no_deref_overwrite_with_force_replaces() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("target.txt"), b"target").unwrap();
+    let link = dir.path().join("link.txt");
+    std::os::unix::fs::symlink("target.txt", &link).unwrap();
+
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir(&dst_dir).unwrap();
+    let collide = dst_dir.join("link.txt");
+    fs::write(&collide, b"PRE").unwrap();
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-tfy",
+        "--no-deref",
+        link.to_str().unwrap(),
+        dst_dir.to_str().unwrap(),
+    ]);
+    assert!(ok, "stderr={stderr}");
+
+    assert!(is_symlink(&collide));
+    assert_eq!(
+        std::fs::read_link(&collide).unwrap(),
+        std::path::Path::new("target.txt")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_no_deref_overwrite_gate_treats_dangling_link_as_existing() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("target.txt"), b"new").unwrap();
+    let src_link = dir.path().join("src_link.txt");
+    std::os::unix::fs::symlink("target.txt", &src_link).unwrap();
+
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir(&dst_dir).unwrap();
+    let dangling = dst_dir.join("src_link.txt");
+    std::os::unix::fs::symlink("does_not_exist", &dangling).unwrap();
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "--no-deref",
+        src_link.to_str().unwrap(),
+        dst_dir.to_str().unwrap(),
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("already exists") || stderr.contains("TargetExists"));
+    assert_eq!(
+        std::fs::read_link(&dangling).unwrap(),
+        std::path::Path::new("does_not_exist")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_no_deref_replicates_top_level_symlink_to_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let real_dir = dir.path().join("real_dir");
+    fs::create_dir(&real_dir).unwrap();
+    fs::write(real_dir.join("inside.txt"), b"x").unwrap();
+    let link = dir.path().join("link_to_dir");
+    std::os::unix::fs::symlink("real_dir", &link).unwrap();
+
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir(&dst_dir).unwrap();
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "--no-deref",
+        link.to_str().unwrap(),
+        dst_dir.to_str().unwrap(),
+    ]);
+    assert!(ok, "stderr={stderr}");
+
+    let landed = dst_dir.join("link_to_dir");
+    assert!(is_symlink(&landed));
+    assert_eq!(
+        std::fs::read_link(&landed).unwrap(),
+        std::path::Path::new("real_dir")
+    );
+    // The link target's contents must NOT be walked into and copied.
+    assert!(!dst_dir.join("link_to_dir/inside.txt").exists() || is_symlink(&landed));
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_no_deref_multi_source_mix() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("real.txt"), b"real").unwrap();
+    fs::write(dir.path().join("target.txt"), b"target").unwrap();
+    let link = dir.path().join("link.txt");
+    std::os::unix::fs::symlink("target.txt", &link).unwrap();
+
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir(&dst_dir).unwrap();
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "--no-deref",
+        dir.path().join("real.txt").to_str().unwrap(),
+        link.to_str().unwrap(),
+        dst_dir.to_str().unwrap(),
+    ]);
+    assert!(ok, "stderr={stderr}");
+
+    let real_dst = dst_dir.join("real.txt");
+    let link_dst = dst_dir.join("link.txt");
+    assert!(real_dst.symlink_metadata().unwrap().file_type().is_file());
+    assert_eq!(fs::read(&real_dst).unwrap(), b"real");
+    assert!(is_symlink(&link_dst));
+    assert_eq!(
+        std::fs::read_link(&link_dst).unwrap(),
+        std::path::Path::new("target.txt")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_no_deref_refuses_overwriting_directory_even_with_force() {
+    // cp -P semantics: --force overwrites files / symlinks, never directories.
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("target.txt"), b"x").unwrap();
+    let link = dir.path().join("link.txt");
+    std::os::unix::fs::symlink("target.txt", &link).unwrap();
+
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir(&dst_dir).unwrap();
+    let collide = dst_dir.join("link.txt");
+    fs::create_dir(&collide).unwrap();
+    fs::write(collide.join("inside.txt"), b"keep").unwrap();
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-tfy",
+        "--no-deref",
+        link.to_str().unwrap(),
+        dst_dir.to_str().unwrap(),
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("cannot overwrite directory"));
+    assert!(collide.is_dir());
+    assert!(collide.join("inside.txt").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_no_deref_dry_run_emits_overwrite_for_existing_dst() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("target.txt"), b"x").unwrap();
+    let link = dir.path().join("link.txt");
+    std::os::unix::fs::symlink("target.txt", &link).unwrap();
+
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir(&dst_dir).unwrap();
+    fs::write(dst_dir.join("link.txt"), b"PRE").unwrap();
+
+    let (ok, stdout, stderr) = run_bcmr(&[
+        "copy",
+        "-tnfy",
+        "--no-deref",
+        link.to_str().unwrap(),
+        dst_dir.to_str().unwrap(),
+    ]);
+    assert!(ok, "stderr={stderr}");
+    let lower = stdout.to_lowercase();
+    assert!(
+        lower.contains("overwrite"),
+        "expected OVERWRITE in dry-run, got: {stdout}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_no_deref_remote_target_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("target.txt"), b"x").unwrap();
+    let link = dir.path().join("link.txt");
+    std::os::unix::fs::symlink("target.txt", &link).unwrap();
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "--no-deref",
+        link.to_str().unwrap(),
+        "no-such-host-bcmr-test.invalid:dst/",
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("--no-deref is currently only supported for local"));
 }

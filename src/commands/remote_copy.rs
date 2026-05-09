@@ -229,6 +229,14 @@ pub async fn handle_remote_copy(
     let remote_dest_initial = parse_remote_path(&dest_str);
     let is_upload = remote_dest_initial.is_some();
 
+    if args.is_no_deref() {
+        anyhow::bail!(
+            "--no-deref is currently only supported for local-to-local copies. \
+             For symlink-aware remote transfers, use scp/rsync directly until \
+             bcmr's serve protocol grows symlink semantics."
+        );
+    }
+
     if let Some(ref rd) = remote_dest_initial {
         rd.reject_unsafe()?;
     }
