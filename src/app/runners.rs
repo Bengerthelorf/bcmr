@@ -16,7 +16,7 @@ pub(crate) fn start_scanning_runner(
     let runner = ProgressRunner::new(
         0,
         is_plain_mode(args),
-        false,
+        args.is_quiet(),
         true,
         commands::copy::cleanup_partial_files,
     )?;

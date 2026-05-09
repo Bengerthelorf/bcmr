@@ -213,7 +213,7 @@ pub(crate) async fn handle_copy_command(args: &Commands) -> Result<()> {
             "Copying",
             first_display.as_deref(),
             plan.total_size,
-            false,
+            args.is_quiet(),
         )?;
 
         let result = commands::copy::execute_plan(
@@ -233,7 +233,7 @@ pub(crate) async fn handle_copy_command(args: &Commands) -> Result<()> {
         let runner = ProgressRunner::new(
             0,
             is_plain_mode(args),
-            false,
+            args.is_quiet(),
             is_json_mode(),
             commands::copy::cleanup_partial_files,
         )?;
@@ -386,7 +386,7 @@ pub(crate) async fn handle_move_command(args: &Commands) -> Result<()> {
         "Moving",
         first_display.as_deref(),
         total_size,
-        false,
+        args.is_quiet(),
     )?;
 
     for src in sources {
@@ -609,7 +609,7 @@ pub(crate) async fn handle_remove_command(args: &Commands) -> Result<()> {
         "Removing",
         first_display.as_deref(),
         total_size,
-        false,
+        args.is_quiet(),
     )?;
 
     let result = commands::remove::remove_paths(

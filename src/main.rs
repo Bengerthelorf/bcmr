@@ -73,6 +73,10 @@ fn maybe_detach(cli: &cli::Cli) -> Result<bool> {
 async fn main() -> Result<()> {
     let cli = cli::parse_args();
 
+    if let Some(ref path) = cli.config {
+        std::env::set_var("BCMR_CONFIG", path);
+    }
+
     if maybe_detach(&cli)? {
         return Ok(());
     }
