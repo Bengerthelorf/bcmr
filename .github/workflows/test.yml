@@ -62,6 +62,49 @@ jobs:
           cargo run -- completions powershell > /dev/null
           echo "All completion scripts generated successfully"
 
+      - name: Test completions install / uninstall (POSIX shells)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          export HOME=$(mktemp -d)
+
+          # --print should NOT write the file.
+          path=$(cargo run --quiet -- completions zsh --install --print)
+          test -z "$path" && { echo "FAIL: --print returned empty"; exit 1; }
+          test ! -e "$path" || { echo "FAIL: --print should not write file"; exit 1; }
+
+          # Install for each shell, verify file exists and starts plausibly.
+          for shell in bash zsh fish; do
+            cargo run --quiet -- completions $shell --install
+          done
+          test -s "$HOME/.local/share/zsh/site-functions/_bcmr"
+          test -s "$HOME/.local/share/bash-completion/completions/bcmr"
+          test -s "$HOME/.config/fish/completions/bcmr.fish"
+
+          # Uninstall removes the file.
+          cargo run --quiet -- completions zsh --install --uninstall
+          test ! -e "$HOME/.local/share/zsh/site-functions/_bcmr"
+
+          # PowerShell --install should be rejected (manual install only).
+          if cargo run --quiet -- completions powershell --install 2>/dev/null; then
+            echo "FAIL: --install should reject powershell"
+            exit 1
+          fi
+
+          # Conflict: --print + --uninstall rejected by clap.
+          if cargo run --quiet -- completions zsh --install --print --uninstall 2>/dev/null; then
+            echo "FAIL: --print + --uninstall should be rejected"
+            exit 1
+          fi
+
+          # --install requires a shell argument (clap requires=...).
+          if cargo run --quiet -- completions --print 2>/dev/null; then
+            echo "FAIL: --print without --install should be rejected"
+            exit 1
+          fi
+
+          echo "completions install tests passed"
+
       - name: Test PowerShell completions (Windows)
         if: runner.os == 'Windows'
         shell: pwsh

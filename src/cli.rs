@@ -335,6 +335,18 @@ pub enum Commands {
     Completions {
         /// Shell to generate completions for
         shell: clap_complete::Shell,
+
+        /// Write the completion script to the conventional shell path
+        #[arg(long)]
+        install: bool,
+
+        /// With --install, only print the target path; do not write
+        #[arg(long, requires = "install")]
+        print: bool,
+
+        /// With --install, remove the file at the conventional path
+        #[arg(long, requires = "install", conflicts_with = "print")]
+        uninstall: bool,
     },
 
     /// Diagnose local + remote setup (ssh / config / bcmr presence)
