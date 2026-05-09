@@ -38,6 +38,7 @@ where
 {
     let test_mode = cli.get_test_mode();
     let recursive = cli.is_recursive();
+    let no_deref = cli.is_no_deref();
     let jobs = cli.local_jobs();
     let verbose = cli.is_verbose();
     let callback = ProgressCallback {
@@ -57,18 +58,25 @@ where
         let mut total_size = 0u64;
         let mut files_found = 0u64;
 
-        let result = scan_sources(&sources, &dst, recursive, &excludes, |entry, size| {
-            total_size += size;
-            if size > 0 {
-                files_found += 1;
-                on_total_update(total_size);
-                on_file_found(files_found);
-            }
-            if tx.blocking_send(ScanMessage::Entry(entry)).is_err() {
-                return Ok(());
-            }
-            Ok(())
-        });
+        let result = scan_sources(
+            &sources,
+            &dst,
+            recursive,
+            no_deref,
+            &excludes,
+            |entry, size| {
+                total_size += size;
+                if size > 0 {
+                    files_found += 1;
+                    on_total_update(total_size);
+                    on_file_found(files_found);
+                }
+                if tx.blocking_send(ScanMessage::Entry(entry)).is_err() {
+                    return Ok(());
+                }
+                Ok(())
+            },
+        );
 
         let _ = tx.blocking_send(ScanMessage::Done);
         result
@@ -107,6 +115,17 @@ where
                         }
                         Ok::<(), BcmrError>(())
                     });
+                }
+                PlanEntry::Symlink {
+                    ref dst,
+                    ref target,
+                    ..
+                } => {
+                    super::check_symlink_overwrite(dst, cli)?;
+                    super::create_symlink_replacing(dst, target).await?;
+                    if verbose {
+                        eprintln!("'{}' -> '{}' (symlink)", target.display(), dst.display());
+                    }
                 }
             },
             ScanMessage::Done => {

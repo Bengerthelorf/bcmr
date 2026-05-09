@@ -103,6 +103,10 @@ pub struct CopyMoveArgs {
     #[arg(short = 'a', long, default_value_t = false)]
     pub append: bool,
 
+    /// Don't follow symbolic links — replicate the link itself at the destination (cp -P)
+    #[arg(long = "no-deref", default_value_t = false)]
+    pub no_deref: bool,
+
     /// Sync data to disk after operation (fsync)
     #[arg(long, default_value_t = false)]
     pub sync: bool,
@@ -381,6 +385,10 @@ impl Commands {
         self.copy_move_args().is_some_and(|a| a.append)
     }
 
+    pub fn is_no_deref(&self) -> bool {
+        self.copy_move_args().is_some_and(|a| a.no_deref)
+    }
+
     pub fn is_sync(&self) -> bool {
         self.copy_move_args().is_some_and(|a| a.sync)
     }
@@ -569,6 +577,7 @@ mod tests {
             resume: false,
             strict: false,
             append: false,
+            no_deref: false,
             sync: false,
             jobs: None,
             compress: "auto".to_string(),
