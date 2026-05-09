@@ -193,6 +193,10 @@ impl ProgressRenderer for InlineProgress {
         let _ = self.redraw();
     }
 
+    fn set_verify_mode(&mut self, on: bool) {
+        self.data.verify_mode = on;
+    }
+
     fn inc_items_processed(&mut self) {
         self.data.items_processed += 1;
         let _ = self.redraw();

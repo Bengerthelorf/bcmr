@@ -44,6 +44,7 @@ pub(crate) fn resume_or_new_runner(
             let mut p = r.progress().lock();
             p.set_total_bytes(total_size);
             p.set_scanning(false);
+            p.set_verify_mode(args.is_verify());
             if let Some(name) = first_display {
                 p.set_current_file(name, total_size);
             }
@@ -60,6 +61,7 @@ pub(crate) fn resume_or_new_runner(
     {
         let mut p = r.progress().lock();
         p.set_operation_type(operation);
+        p.set_verify_mode(args.is_verify());
         if let Some(name) = first_display {
             p.set_current_file(name, total_size);
         }

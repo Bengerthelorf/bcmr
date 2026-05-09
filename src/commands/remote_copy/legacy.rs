@@ -69,7 +69,11 @@ pub(super) async fn handle_remote_upload(
         crate::config::is_json_mode(),
         crate::commands::copy::cleanup_partial_files,
     )?;
-    runner.progress().lock().set_operation_type("Uploading");
+    {
+        let mut p = runner.progress().lock();
+        p.set_operation_type("Uploading");
+        p.set_verify_mode(args.is_verify());
+    }
     let multi_source = sources.len() > 1;
 
     if parallel > 1 {
@@ -205,7 +209,11 @@ pub(super) async fn handle_remote_download(
         crate::config::is_json_mode(),
         crate::commands::copy::cleanup_partial_files,
     )?;
-    runner.progress().lock().set_operation_type("Downloading");
+    {
+        let mut p = runner.progress().lock();
+        p.set_operation_type("Downloading");
+        p.set_verify_mode(args.is_verify());
+    }
 
     if parallel > 1 {
         runner.set_parallel_mode(parallel);

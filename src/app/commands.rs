@@ -242,6 +242,7 @@ pub(crate) async fn handle_copy_command(args: &Commands) -> Result<()> {
             let mut p = runner.progress().lock();
             p.set_operation_type("Copying");
             p.set_scanning(true);
+            p.set_verify_mode(args.is_verify());
             if let Some(first) = sources.first() {
                 let display_name = first.file_name().unwrap_or_default().to_string_lossy();
                 p.set_current_file(&display_name, 0);

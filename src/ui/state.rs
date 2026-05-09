@@ -61,6 +61,7 @@ pub struct ProgressData {
     pub files_found: u64,
     pub workers: Vec<WorkerState>,
     pub parallel_total: usize,
+    pub verify_mode: bool,
 }
 
 impl ProgressData {
@@ -86,6 +87,7 @@ impl ProgressData {
             files_found: 0,
             workers: Vec::new(),
             parallel_total: 0,
+            verify_mode: false,
         }
     }
 
@@ -195,6 +197,9 @@ impl ProgressData {
                 format_bytes(self.skipped_bytes as f64)
             ));
         }
+        if self.verify_mode {
+            line.push_str(" | verified");
+        }
         line
     }
 }
@@ -296,5 +301,16 @@ mod tests {
             line.contains("30"),
             "expected skipped MiB count, got: {line}"
         );
+    }
+
+    #[test]
+    fn test_done_summary_appends_verified_when_set() {
+        let mut pd = ProgressData::new(1024);
+        pd.current_bytes = 1024;
+        let plain = pd.done_summary_line();
+        assert!(!plain.contains("verified"), "got: {plain}");
+        pd.verify_mode = true;
+        let with = pd.done_summary_line();
+        assert!(with.contains("verified"), "got: {with}");
     }
 }

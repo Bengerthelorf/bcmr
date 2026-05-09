@@ -91,6 +91,8 @@ Error:
 | `bytes_total`     | number   | ✅       | Bytes actually transferred (may be less than the planned total on error).      |
 | `duration_secs`   | number   | ✅       | Wall-clock seconds for the run. Float.                                         |
 | `avg_speed_bps`   | number   | ✅       | **Bytes per second**. Omitted on error.                                        |
+| `bytes_skipped`   | number   | ✅       | Bytes skipped via `--append` / `--update`. Omitted when `0`.                   |
+| `verified`        | bool     | ✅       | `true` when the run was invoked with `-V/--verify`. Omitted when `false`.      |
 | `error`           | string   | ✅       | Human-readable error. Present only when `status="error"`.                      |
 
 ## `bcmr check --json`
@@ -133,7 +135,7 @@ When a background job fails, the log file ends with a single `result` event whos
 
 - **Schema versioning.** No `version` field today. Treat the schema as v0; assume best-effort backwards compat within a minor release.
 - **`phase` events.** A consumer wanting to know "scan phase finished, transfer phase started" today infers it from `scanning: true → false` between two `progress` events. A future explicit `{"type":"phase","name":"scan_complete"}` would beat the heuristic.
-- **`bytes_skipped`.** When `--update` or `--append` lands, the `result` will gain a `bytes_skipped` counter. Consumers can pre-emptively treat absent `bytes_skipped` as `0`.
+- **Reflink / dedup / compress counters.** A future PR will add `reflink_count`, `dedup_count`, and `compress_ratio` to the `result` event. Treat absent fields as zero/unknown.
 - **Operation-string enum.** `operation` is freeform today. Don't pattern-match; if you need to know the phase, use `scanning` or upcoming `phase` events.
 
 ## See also

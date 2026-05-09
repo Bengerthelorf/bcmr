@@ -121,10 +121,11 @@ pub(super) async fn handle_serve_upload(
         crate::config::is_json_mode(),
         crate::commands::copy::cleanup_partial_files,
     )?;
-    runner
-        .progress()
-        .lock()
-        .set_operation_type("Uploading (serve)");
+    {
+        let mut p = runner.progress().lock();
+        p.set_operation_type("Uploading (serve)");
+        p.set_verify_mode(args.is_verify());
+    }
 
     let multi_source = sources.len() > 1;
     for src in sources {
@@ -416,10 +417,11 @@ pub(super) async fn handle_serve_download(
         crate::config::is_json_mode(),
         crate::commands::copy::cleanup_partial_files,
     )?;
-    runner
-        .progress()
-        .lock()
-        .set_operation_type("Downloading (serve)");
+    {
+        let mut p = runner.progress().lock();
+        p.set_operation_type("Downloading (serve)");
+        p.set_verify_mode(args.is_verify());
+    }
 
     let use_stripe = args.use_direct_tcp() && pool.len() > 1 && !args.is_verify();
     let mut big_files: Vec<(String, PathBuf, u64)> = Vec::new();
