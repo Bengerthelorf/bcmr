@@ -14,6 +14,18 @@ struct Entry {
     is_dir: bool,
 }
 
+enum SideRoot {
+    Local(PathBuf),
+    Remote(RemotePath),
+}
+
+struct CollectResult {
+    src_entries: Vec<Entry>,
+    dst_entries: Vec<Entry>,
+    src_root: SideRoot,
+    dst_root: SideRoot,
+}
+
 pub async fn run(
     sources: &[PathBuf],
     dest: &Path,
@@ -69,7 +81,7 @@ pub async fn run(
             return Err(BcmrError::SourceNotFound(src.clone()));
         }
 
-        let (src_entries, dst_entries) = collect_both(
+        let collected = collect_both(
             src,
             dest,
             recursive,
@@ -80,7 +92,14 @@ pub async fn run(
         )
         .await?;
 
-        let (added, modified, missing) = diff_entries(src_entries, dst_entries);
+        let (added, modified, missing) = diff_entries(collected.src_entries, collected.dst_entries);
+        let modified = filter_size_match_via_hash(
+            modified,
+            &collected.src_root,
+            &collected.dst_root,
+            &mut serve_client,
+        )
+        .await?;
         all_added.extend(added);
         all_modified.extend(modified);
         all_missing.extend(missing);
@@ -101,7 +120,7 @@ async fn collect_both(
     is_remote_src: bool,
     is_remote_dest: bool,
     serve: &mut Option<ServeClient>,
-) -> Result<(Vec<Entry>, Vec<Entry>), BcmrError> {
+) -> Result<CollectResult, BcmrError> {
     let src_str = src.to_string_lossy();
     let dest_str = dest.to_string_lossy();
 
@@ -217,7 +236,68 @@ async fn collect_both(
         }
     };
 
-    Ok((src_entries, dst_entries))
+    let src_root = if let Some(ref rp) = remote_src {
+        if src_is_dir {
+            SideRoot::Remote(rp.clone())
+        } else {
+            SideRoot::Remote(remote_parent(rp))
+        }
+    } else if src_is_dir {
+        SideRoot::Local(src.to_path_buf())
+    } else {
+        SideRoot::Local(
+            src.parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from(".")),
+        )
+    };
+
+    let dst_root = if is_remote_dest {
+        let rdest = parse_remote_path(&dest_str).ok_or_else(|| {
+            BcmrError::InvalidInput(format!("Invalid remote path: {}", dest.display()))
+        })?;
+        let rdest_is_dir = remote_is_dir(&rdest, serve).await.unwrap_or(false);
+        if rdest_is_dir {
+            SideRoot::Remote(rdest.join(&src_name))
+        } else if src_is_dir {
+            SideRoot::Remote(rdest)
+        } else {
+            SideRoot::Remote(remote_parent(&rdest))
+        }
+    } else {
+        let dest_is_dir = dest.exists() && dest.is_dir();
+        if dest_is_dir {
+            SideRoot::Local(dest.join(&src_name))
+        } else if src_is_dir {
+            SideRoot::Local(dest.to_path_buf())
+        } else {
+            SideRoot::Local(
+                dest.parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from(".")),
+            )
+        }
+    };
+
+    Ok(CollectResult {
+        src_entries,
+        dst_entries,
+        src_root,
+        dst_root,
+    })
+}
+
+fn remote_parent(rp: &RemotePath) -> RemotePath {
+    let parent_path = match rp.path.rsplit_once('/') {
+        Some((p, _)) if !p.is_empty() => p.to_string(),
+        Some(_) => "/".to_string(),
+        None => ".".to_string(),
+    };
+    RemotePath {
+        user: rp.user.clone(),
+        host: rp.host.clone(),
+        path: parent_path,
+    }
 }
 
 async fn remote_is_dir(
@@ -335,6 +415,57 @@ fn mtime_secs(meta: &std::fs::Metadata) -> i64 {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+async fn hash_at(
+    root: &SideRoot,
+    rel: &Path,
+    serve: &mut Option<ServeClient>,
+) -> Result<String, BcmrError> {
+    match root {
+        SideRoot::Local(base) => {
+            let abs = base.join(rel);
+            tokio::task::spawn_blocking(move || crate::core::checksum::calculate_hash(&abs))
+                .await
+                .map_err(|e| BcmrError::InvalidInput(e.to_string()))?
+                .map_err(BcmrError::Io)
+        }
+        SideRoot::Remote(base) => {
+            let target = base.join(&rel.to_string_lossy());
+            if let Some(client) = serve.as_mut() {
+                let bytes = client.hash(&target.path, 0, None).await?;
+                return Ok(bytes.iter().map(|b| format!("{:02x}", b)).collect());
+            }
+            remote::remote_file_hash(&target, None).await
+        }
+    }
+}
+
+async fn filter_size_match_via_hash(
+    candidates: Vec<FileDiff>,
+    src_root: &SideRoot,
+    dst_root: &SideRoot,
+    serve: &mut Option<ServeClient>,
+) -> Result<Vec<FileDiff>, BcmrError> {
+    let mut kept = Vec::with_capacity(candidates.len());
+    for diff in candidates {
+        if diff.is_dir {
+            kept.push(diff);
+            continue;
+        }
+        if diff.src_size != diff.dst_size {
+            kept.push(diff);
+            continue;
+        }
+        let rel = diff.path.clone();
+        let src_hash = hash_at(src_root, &rel, serve).await;
+        let dst_hash = hash_at(dst_root, &rel, serve).await;
+        match (src_hash, dst_hash) {
+            (Ok(s), Ok(d)) if s == d => {}
+            _ => kept.push(diff),
+        }
+    }
+    Ok(kept)
 }
 
 fn diff_entries(src: Vec<Entry>, dst: Vec<Entry>) -> (Vec<FileDiff>, Vec<FileDiff>, Vec<FileDiff>) {
