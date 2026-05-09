@@ -207,6 +207,26 @@ pub(super) fn collect_upload_files(
     Ok(items)
 }
 
+fn reject_remote_to_remote(sources: &[PathBuf], remote_dest: &Option<RemotePath>) -> Result<()> {
+    let Some(rdest) = remote_dest else {
+        return Ok(());
+    };
+    let Some(first_remote) = sources
+        .iter()
+        .find(|s| parse_remote_path(&s.to_string_lossy()).is_some())
+    else {
+        return Ok(());
+    };
+    anyhow::bail!(
+        "bcmr does not support remote-to-remote transfers ({} -> {}).\n\
+         Copy via a local intermediate: \
+         bcmr copy <src-host>:src /tmp/staging/ && \
+         bcmr copy /tmp/staging/<basename> <dst-host>:dst/",
+        first_remote.display(),
+        rdest.display(),
+    );
+}
+
 pub(super) fn resolve_upload_remote(
     src: &std::path::Path,
     rdest: &RemotePath,
@@ -228,6 +248,8 @@ pub async fn handle_remote_copy(
     let dest_str = dest.to_string_lossy();
     let remote_dest_initial = parse_remote_path(&dest_str);
     let is_upload = remote_dest_initial.is_some();
+
+    reject_remote_to_remote(sources, &remote_dest_initial)?;
 
     if args.is_no_deref() {
         anyhow::bail!(
