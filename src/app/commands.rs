@@ -516,7 +516,8 @@ pub(crate) async fn handle_remove_command(args: &Commands) -> Result<()> {
 pub(crate) async fn handle_check_command(args: &Commands) -> Result<output::CheckResult> {
     let excludes = args.compile_excludes()?;
     let (sources, dest) = args.get_sources_and_dest().map_err(anyhow::Error::msg)?;
-    Ok(commands::check::run(sources, dest, args.is_recursive(), &excludes).await?)
+    let no_hash = matches!(args, Commands::Check { no_hash: true, .. });
+    Ok(commands::check::run(sources, dest, args.is_recursive(), &excludes, no_hash).await?)
 }
 
 pub(crate) fn handle_init_command(args: &Commands) -> Result<()> {

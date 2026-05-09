@@ -231,6 +231,10 @@ pub enum Commands {
         /// Exclude paths matching regex pattern
         #[arg(short = 'e', long)]
         exclude: Option<Vec<String>>,
+
+        /// Skip content hashing — flag size-matched, mtime-drifted files as modified
+        #[arg(long = "no-hash")]
+        no_hash: bool,
     },
 
     /// Remove files or directories

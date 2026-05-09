@@ -80,7 +80,31 @@ fn e2e_check_multi_source_detects_real_mismatch() {
 }
 
 #[test]
-fn e2e_check_same_size_different_mtime_is_modified() {
+fn e2e_check_same_content_drifted_mtime_into_dir_is_in_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("x.bin");
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir(&dst_dir).unwrap();
+    let dst = dst_dir.join("x.bin");
+    fs::write(&src, b"1234567890").unwrap();
+    fs::write(&dst, b"1234567890").unwrap();
+
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    let ft = filetime::FileTime::from_system_time(old);
+    filetime::set_file_mtime(&dst, ft).unwrap();
+
+    let (ok, stdout, _stderr) = run_bcmr(&[
+        "check",
+        src.to_str().unwrap(),
+        dst_dir.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(ok, "expected exit 0, got: {stdout}");
+    assert!(stdout.contains("\"in_sync\":true"), "got: {stdout}");
+}
+
+#[test]
+fn e2e_check_same_content_drifted_mtime_with_no_hash_reports_modified() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("x.bin");
     let dst_dir = dir.path().join("dst");
@@ -95,6 +119,7 @@ fn e2e_check_same_size_different_mtime_is_modified() {
 
     let (_, stdout, _stderr) = run_bcmr(&[
         "check",
+        "--no-hash",
         src.to_str().unwrap(),
         dst_dir.to_str().unwrap(),
         "--json",
@@ -104,4 +129,88 @@ fn e2e_check_same_size_different_mtime_is_modified() {
         stdout.contains("\"modified\":[{\"path\":\"x.bin\""),
         "got: {stdout}"
     );
+}
+
+#[test]
+fn e2e_check_file_to_file_same_size_diff_content_is_modified() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.bin");
+    let b = dir.path().join("b.bin");
+    fs::write(&a, b"AAAAAA").unwrap();
+    fs::write(&b, b"BBBBBB").unwrap();
+
+    let now = SystemTime::now();
+    let ft = filetime::FileTime::from_system_time(now);
+    filetime::set_file_mtime(&a, ft).unwrap();
+    filetime::set_file_mtime(&b, ft).unwrap();
+
+    let (_, stdout, _stderr) =
+        run_bcmr(&["check", a.to_str().unwrap(), b.to_str().unwrap(), "--json"]);
+    assert!(stdout.contains("\"in_sync\":false"), "got: {stdout}");
+    assert!(
+        stdout.contains("\"modified\":[{\"path\":\"a.bin\""),
+        "got: {stdout}"
+    );
+}
+
+#[test]
+fn e2e_check_file_to_file_same_content_is_in_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.bin");
+    let b = dir.path().join("b.bin");
+    fs::write(&a, b"hello world").unwrap();
+    fs::write(&b, b"hello world").unwrap();
+
+    let old = SystemTime::now() - Duration::from_secs(7200);
+    let ft = filetime::FileTime::from_system_time(old);
+    filetime::set_file_mtime(&b, ft).unwrap();
+
+    let (ok, stdout, _stderr) =
+        run_bcmr(&["check", a.to_str().unwrap(), b.to_str().unwrap(), "--json"]);
+    assert!(ok, "expected exit 0, got: {stdout}");
+    assert!(stdout.contains("\"in_sync\":true"), "got: {stdout}");
+}
+
+#[test]
+fn e2e_check_file_to_file_dst_missing_is_added() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.bin");
+    let b = dir.path().join("b.bin");
+    fs::write(&a, b"content").unwrap();
+
+    let (_, stdout, _stderr) =
+        run_bcmr(&["check", a.to_str().unwrap(), b.to_str().unwrap(), "--json"]);
+    assert!(stdout.contains("\"in_sync\":false"), "got: {stdout}");
+    assert!(
+        stdout.contains("\"added\":[{\"path\":\"a.bin\""),
+        "got: {stdout}"
+    );
+    assert!(stdout.contains("\"modified\":0"), "got: {stdout}");
+}
+
+#[test]
+fn e2e_check_dir_to_dir_size_match_drifted_mtime_is_in_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    let dst_parent = dir.path().join("dst");
+    fs::create_dir(&src_dir).unwrap();
+    fs::create_dir(&dst_parent).unwrap();
+    let dst_mirror = dst_parent.join("src");
+    fs::create_dir(&dst_mirror).unwrap();
+    fs::write(src_dir.join("f.bin"), b"same content").unwrap();
+    fs::write(dst_mirror.join("f.bin"), b"same content").unwrap();
+
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    let ft = filetime::FileTime::from_system_time(old);
+    filetime::set_file_mtime(dst_mirror.join("f.bin"), ft).unwrap();
+
+    let (ok, stdout, _stderr) = run_bcmr(&[
+        "check",
+        "-r",
+        src_dir.to_str().unwrap(),
+        dst_parent.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(ok, "expected exit 0, got: {stdout}");
+    assert!(stdout.contains("\"in_sync\":true"), "got: {stdout}");
 }
