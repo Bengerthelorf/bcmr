@@ -8,8 +8,8 @@ mod transfer;
 pub use attrs::{apply_remote_attrs_locally, preserve_remote_attrs, verify_remote_file};
 #[allow(unused_imports)]
 pub use ops::{
-    complete_remote_path, remote_file_hash, remote_file_size, remote_list_files, remote_stat,
-    remote_total_size, validate_ssh_connection,
+    complete_remote_path, remote_file_hash, remote_file_size, remote_list_files, remote_remove,
+    remote_stat, remote_total_size, validate_ssh_connection,
 };
 pub use resume::{check_resume_state, ResumeDecision};
 pub use transfer::{
@@ -45,6 +45,32 @@ impl RemotePath {
             host: self.host.clone(),
             path: format!("{}/{}", self.path, subpath),
         }
+    }
+
+    pub fn reject_unsafe(&self) -> Result<(), crate::core::error::BcmrError> {
+        let p = std::path::Path::new(&self.path);
+        let mut has_named_component = false;
+        for c in p.components() {
+            match c {
+                std::path::Component::ParentDir => {
+                    return Err(crate::core::error::BcmrError::InvalidInput(format!(
+                        "remote path '{}' contains '..' — refusing for safety; \
+                         this is a hard error on every transport, including the legacy SSH fallback",
+                        self
+                    )));
+                }
+                std::path::Component::Normal(_) => has_named_component = true,
+                _ => {}
+            }
+        }
+        if !has_named_component {
+            return Err(crate::core::error::BcmrError::InvalidInput(format!(
+                "remote path '{}' resolves to the login dir or root — refusing for safety \
+                 (use a non-empty named path)",
+                self
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -219,5 +245,37 @@ mod tests {
     #[test]
     fn test_shell_escape_with_quotes() {
         assert_eq!(super::ssh_cmd::shell_escape("it's"), "it'\\''s");
+    }
+
+    fn rp(path: &str) -> RemotePath {
+        RemotePath {
+            user: None,
+            host: "h".into(),
+            path: path.into(),
+        }
+    }
+
+    #[test]
+    fn reject_unsafe_blocks_parent_dir_components() {
+        assert!(rp("..").reject_unsafe().is_err());
+        assert!(rp("foo/..").reject_unsafe().is_err());
+        assert!(rp("foo/../bar").reject_unsafe().is_err());
+        assert!(rp("../etc/passwd").reject_unsafe().is_err());
+    }
+
+    #[test]
+    fn reject_unsafe_blocks_login_dir_and_root() {
+        assert!(rp("").reject_unsafe().is_err());
+        assert!(rp(".").reject_unsafe().is_err());
+        assert!(rp("./").reject_unsafe().is_err());
+        assert!(rp("/").reject_unsafe().is_err());
+    }
+
+    #[test]
+    fn reject_unsafe_allows_normal_paths() {
+        rp("foo").reject_unsafe().expect("plain name");
+        rp("foo/bar.txt").reject_unsafe().expect("nested name");
+        rp("./foo").reject_unsafe().expect("cur-prefixed name");
+        rp("/etc/passwd").reject_unsafe().expect("absolute name");
     }
 }

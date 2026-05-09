@@ -177,6 +177,38 @@ pub async fn remote_file_hash(
     Ok(hasher.finalize().to_hex().to_string())
 }
 
+pub async fn remote_remove(
+    remote: &RemotePath,
+    recursive: bool,
+    force: bool,
+    dir_only: bool,
+) -> Result<(), BcmrError> {
+    let target = remote.ssh_target();
+    let escaped = shell_escape(&remote.path);
+    let cmd = if dir_only {
+        format!("rmdir -- '{}'", escaped)
+    } else {
+        let flags = match (recursive, force) {
+            (true, true) => " -rf",
+            (true, false) => " -r",
+            (false, true) => " -f",
+            (false, false) => "",
+        };
+        format!("rm{} -- '{}'", flags, escaped)
+    };
+
+    let output = ssh_command(&target).arg(&cmd).output().await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(BcmrError::InvalidInput(ssh_error_message(
+            &stderr,
+            &format!("Cannot remove remote path '{}'", remote),
+        )));
+    }
+    Ok(())
+}
+
 pub async fn complete_remote_path(partial: &str) -> Vec<String> {
     let remote = match parse_remote_path(partial) {
         Some(r) => r,

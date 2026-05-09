@@ -269,14 +269,70 @@ pub(crate) async fn handle_move_command(args: &Commands) -> Result<()> {
 }
 
 pub(crate) async fn handle_remove_command(args: &Commands) -> Result<()> {
+    use crate::core::remote::{parse_remote_path, remote_remove, RemotePath};
+    use crate::ui::display::{print_dry_run, ActionType};
+    use std::path::PathBuf;
+
     let excludes = args.compile_excludes()?;
     let paths = args.get_remove_paths().map_err(anyhow::Error::msg)?;
 
-    let first_display = first_display_name(paths);
+    let mut local_paths: Vec<PathBuf> = Vec::new();
+    let mut remote_paths: Vec<RemotePath> = Vec::new();
+    for p in paths {
+        match parse_remote_path(&p.to_string_lossy()) {
+            Some(r) => {
+                r.reject_unsafe()?;
+                remote_paths.push(r);
+            }
+            None => local_paths.push(p.clone()),
+        }
+    }
+
+    if !remote_paths.is_empty() {
+        if args.is_dry_run() {
+            if !is_json_mode() {
+                println!("DRY RUN MODE: No changes will be made.\n");
+            }
+            for r in &remote_paths {
+                print_dry_run(ActionType::Remove, &r.display(), None);
+            }
+        } else {
+            if !args.is_force()
+                && !args.is_yes()
+                && !crate::app::prompts::confirm_remote_removal(&remote_paths)?
+            {
+                return Err(BcmrError::Cancelled.into());
+            }
+            let recursive = args.is_recursive();
+            let force = args.is_force();
+            let dir_only = args.is_dir_only();
+            for r in &remote_paths {
+                remote_remove(r, recursive, force, dir_only).await?;
+                if args.is_verbose() && !is_json_mode() {
+                    println!("removed {}", r.display());
+                }
+            }
+            if !is_json_mode() {
+                println!(
+                    "Removed {} remote path{}",
+                    remote_paths.len(),
+                    if remote_paths.len() == 1 { "" } else { "s" }
+                );
+            }
+        }
+
+        if local_paths.is_empty() {
+            return Ok(());
+        }
+    }
+
+    let first_display = first_display_name(&local_paths);
     let early = start_scanning_runner(args, "Removing", first_display.as_deref())?;
 
     let files_to_remove =
-        match commands::remove::check_removes(paths, args.is_recursive(), args, &excludes).await {
+        match commands::remove::check_removes(&local_paths, args.is_recursive(), args, &excludes)
+            .await
+        {
             Ok(v) => v,
             Err(e) => {
                 if let Some(r) = early {
@@ -287,7 +343,7 @@ pub(crate) async fn handle_remove_command(args: &Commands) -> Result<()> {
         };
 
     if args.is_dry_run() {
-        if !is_json_mode() {
+        if !is_json_mode() && remote_paths.is_empty() {
             println!("DRY RUN MODE: No changes will be made.\n");
         }
 
@@ -304,7 +360,7 @@ pub(crate) async fn handle_remove_command(args: &Commands) -> Result<()> {
             true,
         )?;
         let result = commands::remove::remove_paths(
-            paths,
+            &local_paths,
             args,
             &excludes,
             Arc::clone(runner.progress()),
@@ -357,7 +413,7 @@ pub(crate) async fn handle_remove_command(args: &Commands) -> Result<()> {
     )?;
 
     let result = commands::remove::remove_paths(
-        paths,
+        &local_paths,
         args,
         &excludes,
         Arc::clone(runner.progress()),

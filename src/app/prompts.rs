@@ -70,6 +70,17 @@ pub(crate) fn confirm_removal(files: &[commands::remove::FileToRemove]) -> Resul
     prompt_yes_no("\nDo you want to proceed?")
 }
 
+pub(crate) fn confirm_remote_removal(paths: &[crate::core::remote::RemotePath]) -> Result<bool> {
+    if is_json_mode() {
+        return Ok(true);
+    }
+    println!("\nThe following remote paths will be removed:");
+    for r in paths {
+        println!("  REMOTE: {}", r.display());
+    }
+    prompt_yes_no("\nDo you want to proceed?")
+}
+
 pub(crate) fn first_display_name(paths: &[std::path::PathBuf]) -> Option<String> {
     paths.first().map(|p| {
         p.file_name()
