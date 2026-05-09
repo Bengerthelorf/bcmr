@@ -71,6 +71,14 @@ impl ProgressRenderer for PlainTextProgress {
     }
 }
 
+fn ansi_disabled_by_env() -> bool {
+    let no_color = std::env::var_os("NO_COLOR")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    let dumb_term = matches!(std::env::var("TERM").as_deref(), Ok("dumb"));
+    no_color || dumb_term
+}
+
 pub fn create_renderer(
     total_bytes: u64,
     plain: bool,
@@ -85,10 +93,10 @@ pub fn create_renderer(
         }
     } else if silent {
         Ok(Box::new(SilentProgress))
+    } else if ansi_disabled_by_env() || !std::io::stdout().is_terminal() {
+        Ok(Box::new(PlainTextProgress::new(total_bytes)))
     } else if plain {
         Ok(Box::new(InlineProgress::new(total_bytes)?))
-    } else if !std::io::stdout().is_terminal() {
-        Ok(Box::new(PlainTextProgress::new(total_bytes)))
     } else {
         Ok(Box::new(TuiProgress::new(total_bytes)?))
     }
