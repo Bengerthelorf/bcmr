@@ -230,6 +230,17 @@ pub async fn expand_remote_tilde(ssh_target: &str, path: &str) -> Result<String,
     Ok(format!("{}{}", home, suffix))
 }
 
+pub async fn remote_path_is_directory(remote: &RemotePath) -> bool {
+    let cmd = format!("test -d '{}'", shell_escape(&remote.path));
+    let status = ssh_command(&remote.ssh_target())
+        .arg(&cmd)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+    matches!(status, Ok(s) if s.success())
+}
+
 pub async fn remote_remove(
     remote: &RemotePath,
     recursive: bool,

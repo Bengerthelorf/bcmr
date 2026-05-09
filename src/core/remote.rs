@@ -9,8 +9,8 @@ pub use attrs::{apply_remote_attrs_locally, preserve_remote_attrs, verify_remote
 #[allow(unused_imports)]
 pub use ops::{
     complete_remote_path, expand_remote_tilde, remote_file_hash, remote_file_size,
-    remote_list_files, remote_remove, remote_stat, remote_total_size, resolve_remote_home,
-    validate_ssh_connection,
+    remote_list_files, remote_path_is_directory, remote_remove, remote_stat, remote_total_size,
+    resolve_remote_home, validate_ssh_connection,
 };
 pub use resume::{check_resume_state, ResumeDecision};
 pub use transfer::{
