@@ -150,10 +150,20 @@ pub(super) async fn handle_serve_upload(
                 (runner.inc_callback())(size);
                 continue;
             }
-            let offset = match resume_offset {
+            let mut offset = match resume_offset {
                 Some(UploadDecision::Append(o)) => o,
                 _ => 0,
             };
+            if offset > 0 && !pool.first_mut().supports_put_offset() {
+                if !crate::config::is_json_mode() {
+                    eprintln!(
+                        "bcmr: remote server does not advertise CAP_PUT_OFFSET; \
+                         re-uploading '{}' from scratch (resume not supported by this server)",
+                        src.display()
+                    );
+                }
+                offset = 0;
+            }
 
             let use_stripe = args.use_direct_tcp()
                 && pool.len() > 1

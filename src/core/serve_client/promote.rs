@@ -160,6 +160,7 @@ impl ServeClient {
             rx,
             algo: CompressionAlgo::None,
             dedup_enabled: false,
+            effective_caps: 0,
             poisoned: false,
         };
 

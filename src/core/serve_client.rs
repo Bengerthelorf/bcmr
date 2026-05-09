@@ -8,7 +8,8 @@ use crate::core::compress;
 use crate::core::error::BcmrError;
 use crate::core::framing::{self, RecvHalf, SendHalf};
 use crate::core::protocol::{
-    CompressionAlgo, Message, CAP_AEAD, CAP_DEDUP, CAP_LZ4, CAP_ZSTD, PROTOCOL_VERSION,
+    CompressionAlgo, Message, CAP_AEAD, CAP_DEDUP, CAP_LZ4, CAP_PUT_OFFSET, CAP_ZSTD,
+    PROTOCOL_VERSION,
 };
 use crate::core::protocol_aead::Direction;
 use crate::core::transport::ssh as ssh_transport;
@@ -31,7 +32,7 @@ struct Transport {
     _drain: Option<tokio::task::JoinHandle<()>>,
 }
 
-const CLIENT_CAPS: u8 = CAP_LZ4 | CAP_ZSTD | CAP_DEDUP;
+const CLIENT_CAPS: u8 = CAP_LZ4 | CAP_ZSTD | CAP_DEDUP | CAP_PUT_OFFSET;
 
 const DEDUP_MIN_FILE_SIZE: u64 = 16 * 1024 * 1024;
 const DEDUP_BLOCK_SIZE: usize = 4 * 1024 * 1024;
@@ -44,6 +45,7 @@ pub struct ServeClient {
     rx: RecvHalf,
     algo: CompressionAlgo,
     dedup_enabled: bool,
+    effective_caps: u8,
     poisoned: bool,
 }
 
@@ -79,8 +81,13 @@ impl ServeClient {
             rx,
             algo: CompressionAlgo::None,
             dedup_enabled: false,
+            effective_caps: 0,
             poisoned: false,
         }
+    }
+
+    pub fn supports_put_offset(&self) -> bool {
+        self.effective_caps & CAP_PUT_OFFSET != 0
     }
 
     async fn handshake(&mut self, caps: u8) -> Result<(), BcmrError> {
@@ -104,6 +111,7 @@ impl ServeClient {
                 let effective = caps & server_caps;
                 self.algo = CompressionAlgo::negotiate(caps, server_caps);
                 self.dedup_enabled = (effective & CAP_DEDUP) != 0;
+                self.effective_caps = effective;
                 if (effective & CAP_AEAD) != 0 {
                     let key = session_key.ok_or_else(|| {
                         BcmrError::CryptoFailure(
