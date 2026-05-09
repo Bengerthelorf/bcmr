@@ -69,8 +69,31 @@ fn maybe_detach(cli: &cli::Cli) -> Result<bool> {
     Ok(true)
 }
 
+const NO_ARGS_HINT: &str = "\
+Better Copy Move Remove (BCMR) — modern cp/mv/scp/rm with progress, resume, and remote support.
+
+Common usage:
+  bcmr copy -r src/ host:dst/        # SSH copy, recursive, with progress
+  bcmr copy -V file host:dst/        # full BLAKE3 verify
+  bcmr move -r old/ archive/
+  bcmr check -r src/ host:dst/       # compare without copying
+
+  bcmr deploy <host>                 # install bcmr remotely for fast-path
+  bcmr init zsh                      # set up shell integration (bcp/bmv/brm)
+  bcmr completions install zsh       # one-shot completion install
+  bcmr doctor                        # diagnose ssh / config / PATH issues
+
+Type `bcmr help <command>` or `bcmr <command> --help` for full options.
+Configuration: ~/.config/bcmr/config.toml
+";
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    if std::env::args().len() == 1 {
+        print!("{}", NO_ARGS_HINT);
+        return Ok(());
+    }
+
     let cli = cli::parse_args();
 
     if let Some(ref path) = cli.config {

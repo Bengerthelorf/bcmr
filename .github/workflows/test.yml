@@ -331,3 +331,18 @@ jobs:
           cargo run -- update --help
           cargo run -- completions --help
           echo "Help/version tests passed"
+
+      - name: Test no-args common-usage hint
+        shell: bash
+        run: |
+          # Bare 'bcmr' should exit 0 and print the common-usage block.
+          out=$(cargo run --quiet)
+          echo "$out"
+          echo "$out" | grep -q "Common usage:" || { echo "FAIL: missing 'Common usage:' header"; exit 1; }
+          echo "$out" | grep -q "bcmr copy -r src/ host:dst/" || { echo "FAIL: missing example"; exit 1; }
+          echo "$out" | grep -q "bcmr help" || { echo "FAIL: missing help pointer"; exit 1; }
+
+          # Subcommand typo should suggest the closest match (clap default).
+          err=$(cargo run --quiet -- cp 2>&1 || true)
+          echo "$err" | grep -q "copy" || { echo "FAIL: did-you-mean did not suggest 'copy' for 'cp'"; exit 1; }
+          echo "no-args + did-you-mean tests passed"
