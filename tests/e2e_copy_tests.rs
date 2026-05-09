@@ -1006,3 +1006,49 @@ fn e2e_no_deref_remote_target_refuses() {
     assert!(!ok);
     assert!(stderr.contains("--no-deref is currently only supported for local"));
 }
+
+#[test]
+fn e2e_cross_host_copy_refuses_with_clear_error() {
+    let (ok, _stdout, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "host-a-bcmr-test.invalid:src.bin",
+        "host-b-bcmr-test.invalid:dst/",
+    ]);
+    assert!(!ok, "expected non-zero exit");
+    assert!(
+        stderr.contains("does not support remote-to-remote"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("local intermediate"), "stderr: {stderr}");
+}
+
+#[test]
+fn e2e_same_host_remote_to_remote_copy_refuses() {
+    let (ok, _stdout, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "host-x-bcmr-test.invalid:src.bin",
+        "host-x-bcmr-test.invalid:dst/",
+    ]);
+    assert!(!ok);
+    assert!(
+        stderr.contains("does not support remote-to-remote"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn e2e_cross_host_move_refuses_with_clear_error() {
+    let (ok, _stdout, stderr) = run_bcmr(&[
+        "move",
+        "-t",
+        "host-a-bcmr-test.invalid:src.bin",
+        "host-b-bcmr-test.invalid:dst/",
+    ]);
+    assert!(!ok, "expected non-zero exit");
+    assert!(
+        stderr.contains("does not support remote-to-remote"),
+        "stderr: {stderr}"
+    );
+}
