@@ -1,7 +1,9 @@
 use crate::ui::inline::InlineProgress;
 use crate::ui::json::JsonProgress;
+use crate::ui::state::ProgressData;
 use crate::ui::tui::TuiProgress;
-use std::io;
+use crate::ui::utils::format_bytes;
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 
 pub trait ProgressRenderer: Send {
@@ -39,6 +41,36 @@ impl ProgressRenderer for SilentProgress {
     }
 }
 
+struct PlainTextProgress {
+    data: ProgressData,
+}
+
+impl PlainTextProgress {
+    fn new(total_bytes: u64) -> Self {
+        Self {
+            data: ProgressData::new(total_bytes),
+        }
+    }
+}
+
+impl ProgressRenderer for PlainTextProgress {
+    fn inc_current(&mut self, delta: u64) {
+        self.data.current_bytes += delta;
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        let elapsed = self.data.elapsed();
+        let avg_bps = self.data.average_bytes_per_sec().unwrap_or(0.0);
+        println!(
+            "Done: {} in {:.1}s | avg {}/s",
+            format_bytes(self.data.current_bytes as f64),
+            elapsed.as_secs_f64(),
+            format_bytes(avg_bps),
+        );
+        Ok(())
+    }
+}
+
 pub fn create_renderer(
     total_bytes: u64,
     plain: bool,
@@ -55,6 +87,8 @@ pub fn create_renderer(
         Ok(Box::new(SilentProgress))
     } else if plain {
         Ok(Box::new(InlineProgress::new(total_bytes)?))
+    } else if !std::io::stdout().is_terminal() {
+        Ok(Box::new(PlainTextProgress::new(total_bytes)))
     } else {
         Ok(Box::new(TuiProgress::new(total_bytes)?))
     }
