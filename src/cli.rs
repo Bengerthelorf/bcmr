@@ -313,7 +313,7 @@ pub enum Commands {
         rm: bool,
 
         /// With --rm, target every job log
-        #[arg(long, requires = "rm")]
+        #[arg(long, requires = "rm", conflicts_with = "job_id")]
         all: bool,
 
         /// Garbage-collect job logs older than the configured retention (7d)

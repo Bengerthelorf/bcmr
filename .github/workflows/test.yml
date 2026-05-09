@@ -317,6 +317,29 @@ jobs:
           echo "status: $status"
           echo "$status" | grep -q '"type":"result"' || { echo "FAIL: status did not return result"; exit 1; }
 
+          # bcmr status --rm <id> should drop just that job's log.
+          rm_out=$(cargo run --quiet -- --json status "$job_id" --rm)
+          echo "rm: $rm_out"
+          echo "$rm_out" | grep -q '"removed":true' || { echo "FAIL: --rm did not report removed:true"; exit 1; }
+          [ -e "$log" ] && { echo "FAIL: log file still exists after --rm"; exit 1; }
+
+          # bcmr status --gc returns a count (no surviving jobs to GC here).
+          gc_out=$(cargo run --quiet -- --json status --gc)
+          echo "gc: $gc_out"
+          echo "$gc_out" | grep -q '"action":"gc"' || { echo "FAIL: --gc did not report action"; exit 1; }
+
+          # Conflict: --rm + --gc should be rejected by clap.
+          if cargo run --quiet -- status --rm --gc 2>/dev/null; then
+            echo "FAIL: clap should reject --rm + --gc"
+            exit 1
+          fi
+
+          # Conflict: positional id + --all should be rejected by clap.
+          if cargo run --quiet -- status someid --rm --all 2>/dev/null; then
+            echo "FAIL: clap should reject positional id + --all"
+            exit 1
+          fi
+
           echo "--json background mode remove test passed"
 
       - name: Test version and help
