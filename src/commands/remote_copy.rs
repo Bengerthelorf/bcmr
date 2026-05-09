@@ -263,7 +263,22 @@ pub async fn handle_remote_copy(
         }
     }
     let sources: &[PathBuf] = &expanded_sources;
-    let dest: &std::path::Path = expanded_dest_buf.as_path();
+
+    let expanded_dest_str = expanded_dest_buf.to_string_lossy();
+    let expanded_remote_dest = parse_remote_path(&expanded_dest_str);
+    let dest_buf: PathBuf = if let Some(ref rd) = expanded_remote_dest {
+        let needs_dir_probe = !rd.path.ends_with('/') && rd.path != "." && !rd.path.is_empty();
+        if needs_dir_probe && remote::remote_path_is_directory(rd).await {
+            let mut probed = rd.clone();
+            probed.path.push('/');
+            PathBuf::from(probed.display())
+        } else {
+            expanded_dest_buf.clone()
+        }
+    } else {
+        expanded_dest_buf.clone()
+    };
+    let dest: &std::path::Path = dest_buf.as_path();
     let dest_str = dest.to_string_lossy();
     let remote_dest = parse_remote_path(&dest_str);
 
