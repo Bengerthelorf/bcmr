@@ -165,8 +165,20 @@ pub(crate) async fn handle_copy_command(args: &Commands) -> Result<()> {
 }
 
 pub(crate) async fn handle_move_command(args: &Commands) -> Result<()> {
+    use crate::core::remote::parse_remote_path;
+
     let excludes = args.compile_excludes()?;
     let (sources, dest) = args.get_sources_and_dest().map_err(anyhow::Error::msg)?;
+
+    let dest_str = dest.to_string_lossy();
+    let remote_dest = parse_remote_path(&dest_str);
+    let any_remote_source = sources
+        .iter()
+        .any(|s| parse_remote_path(&s.to_string_lossy()).is_some());
+
+    if remote_dest.is_some() || any_remote_source {
+        return handle_remote_move(args, sources, dest, &excludes).await;
+    }
 
     if sources.len() > 1 && (!dest.exists() || !dest.is_dir()) {
         bail!(
@@ -266,6 +278,62 @@ pub(crate) async fn handle_move_command(args: &Commands) -> Result<()> {
     }
 
     runner.finish_ok()
+}
+
+async fn handle_remote_move(
+    args: &Commands,
+    sources: &[std::path::PathBuf],
+    dest: &std::path::Path,
+    excludes: &[regex::Regex],
+) -> Result<()> {
+    use crate::core::remote::{parse_remote_path, remote_remove};
+    use crate::ui::display::{print_dry_run, ActionType};
+
+    handle_remote_copy(args, sources, dest, excludes).await?;
+
+    if args.is_dry_run() {
+        if !is_json_mode() {
+            for src in sources {
+                let label = src.to_string_lossy();
+                print_dry_run(ActionType::Remove, &format!("source {}", label), None);
+            }
+        }
+        return Ok(());
+    }
+
+    let recursive = args.is_recursive();
+    let verbose = args.is_verbose() && !is_json_mode();
+
+    for src in sources {
+        let src_str = src.to_string_lossy();
+        if let Some(remote_src) = parse_remote_path(&src_str) {
+            remote_remove(&remote_src, recursive, false, false).await?;
+            if verbose {
+                println!("removed source {}", remote_src.display());
+            }
+        } else {
+            let md = match src.symlink_metadata() {
+                Ok(m) => m,
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Source '{}' vanished after copy: {}",
+                        src.display(),
+                        e
+                    ));
+                }
+            };
+            if md.is_dir() {
+                tokio::fs::remove_dir_all(src).await?;
+            } else {
+                tokio::fs::remove_file(src).await?;
+            }
+            if verbose {
+                println!("removed source '{}'", src.display());
+            }
+        }
+    }
+
+    Ok(())
 }
 
 pub(crate) async fn handle_remove_command(args: &Commands) -> Result<()> {
