@@ -40,10 +40,15 @@ impl RemotePath {
     }
 
     pub fn join(&self, subpath: &str) -> Self {
+        let path = if self.path.ends_with('/') {
+            format!("{}{}", self.path, subpath)
+        } else {
+            format!("{}/{}", self.path, subpath)
+        };
         Self {
             user: self.user.clone(),
             host: self.host.clone(),
-            path: format!("{}/{}", self.path, subpath),
+            path,
         }
     }
 
@@ -235,6 +240,16 @@ mod tests {
         let joined = r.join("sub/file.txt");
         assert_eq!(joined.path, "/base/sub/file.txt");
         assert_eq!(joined.host, "h");
+    }
+
+    #[test]
+    fn join_does_not_double_slash_when_base_has_trailing_slash() {
+        let r = RemotePath {
+            user: None,
+            host: "h".to_string(),
+            path: "dst/".to_string(),
+        };
+        assert_eq!(r.join("file.txt").path, "dst/file.txt");
     }
 
     #[test]
