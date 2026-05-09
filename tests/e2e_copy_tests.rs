@@ -1008,6 +1008,36 @@ fn e2e_no_deref_remote_target_refuses() {
 }
 
 #[test]
+fn e2e_help_long_form_lists_examples_env_and_exit_codes() {
+    let (_ok, stdout, _stderr) = run_bcmr(&["--help"]);
+    for token in ["EXAMPLES:", "ENVIRONMENT:", "EXIT CODES:", "BCMR_CAS_DIR"] {
+        assert!(
+            stdout.contains(token),
+            "expected '{token}' in --help, got: {stdout}"
+        );
+    }
+
+    let (_ok, short_stdout, _) = run_bcmr(&["-h"]);
+    for token in ["EXAMPLES:", "ENVIRONMENT:", "EXIT CODES:"] {
+        assert!(
+            !short_stdout.contains(token),
+            "did not expect '{token}' in -h short form, got: {short_stdout}"
+        );
+    }
+}
+
+#[test]
+fn e2e_subcommand_help_shows_examples() {
+    for sub in ["copy", "move", "check", "remove"] {
+        let (_ok, stdout, _stderr) = run_bcmr(&[sub, "--help"]);
+        assert!(
+            stdout.contains("EXAMPLES:"),
+            "{sub} --help missing EXAMPLES: section, got: {stdout}"
+        );
+    }
+}
+
+#[test]
 fn e2e_cross_host_copy_refuses_with_clear_error() {
     let (ok, _stdout, stderr) = run_bcmr(&[
         "copy",

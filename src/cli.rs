@@ -1,12 +1,119 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+const CLI_AFTER_LONG_HELP: &str = "\
+EXAMPLES:
+  Copy a file to a remote host:
+      bcmr copy ./report.pdf host:backup/
+
+  Recursive with attribute preservation:
+      bcmr copy -r -p ./project/ host:archives/
+
+  Resume a partial transfer:
+      bcmr copy -C ./large.iso host:backup/
+
+  Background with JSON for scripts:
+      bcmr copy --json -V ./big.tar.gz host:dst/
+
+  Compare source and destination without copying:
+      bcmr check ./project/ host:archives/
+
+ENVIRONMENT:
+  BCMR_CAS_DIR                  CAS directory (default: $XDG_CACHE_HOME/bcmr/cas)
+  BCMR_CAS_CAP_MB               CAS size cap in MB
+  BCMR_DEBUG_SSH_STDERR=1       surface ssh stderr for debugging
+  BCMR_RENDEZVOUS_TIMEOUT_SECS  direct-TCP rendezvous timeout (seconds)
+  BCMR_UNSAFE_LAN_LISTEN=1      opt-in to LAN listen on 'bcmr serve' (requires peer-auth)
+  NO_COLOR                      any non-empty value disables colored output
+  TERM=dumb                     selects plain renderer
+
+CONFIGURATION:
+  ~/.config/bcmr/config.toml      (override with $XDG_CONFIG_HOME)
+
+EXIT CODES:
+  0    success
+  1    transfer error / 'bcmr check' not in sync
+  2    error result in --json mode / SourceNotFound on bare 'bcmr check'
+  64   invalid arguments (clap)
+  130  Ctrl-C / SIGINT
+
+DOCUMENTATION:
+  https://app.snaix.homes/bcmr
+";
+
+const COPY_AFTER_LONG_HELP: &str = "\
+EXAMPLES:
+  Local copy with verify:
+      bcmr copy -V src.iso dst.iso
+
+  Recursive with preserve, parallel local jobs:
+      bcmr copy -r -p -j 4 ./project/ ./backup/
+
+  Upload to remote host:
+      bcmr copy ./report.pdf host:archive/
+
+  Resume a previous run after interruption:
+      bcmr copy -C ./large.tar.gz host:dst/
+
+  Background job with JSON status events:
+      bcmr copy --json -V ./big.bin host:dst/   # query: bcmr status
+
+  Sparse-aware copy:
+      bcmr copy --sparse=auto disk.img dst.img
+
+  Compress wire payload (auto-skips already-compressed files):
+      bcmr copy --compress=auto src/ host:dst/
+";
+
+const MOVE_AFTER_LONG_HELP: &str = "\
+EXAMPLES:
+  Local rename or move (atomic when same filesystem):
+      bcmr move ./old.txt ./new.txt
+
+  Move recursively to a remote host (copy + verify + delete-source):
+      bcmr move -r -V ./project/ host:archive/
+";
+
+const CHECK_AFTER_LONG_HELP: &str = "\
+EXAMPLES:
+  Compare a single local file against a remote one:
+      bcmr check ./report.pdf host:archive/report.pdf
+
+  Recursive directory check (size + content hash for size-matched files):
+      bcmr check -r ./project/ host:archive/
+
+  JSON output for scripts:
+      bcmr check --json ./project/ host:archive/
+
+  Skip content hashing (legacy size+mtime only):
+      bcmr check --no-hash ./project/ host:archive/
+";
+
+const REMOVE_AFTER_LONG_HELP: &str = "\
+EXAMPLES:
+  Remove a file:
+      bcmr remove ./old.log
+
+  Recursive removal with confirmation:
+      bcmr remove -r ./build/
+
+  Force removal (no prompt) and verbose output:
+      bcmr remove -rf -v ./tmp/
+
+  Empty directory only (rmdir-like):
+      bcmr remove -d ./empty-dir/
+
+  Dry-run to preview:
+      bcmr remove -rn ./candidate/
+";
+
 #[derive(Parser, Debug)]
 #[command(
     name = "bcmr",
     about = "Better Copy Move Remove (BCMR) - A modern CLI tool for file operations",
     version,
-    author
+    author,
+    after_long_help = CLI_AFTER_LONG_HELP
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -163,6 +270,7 @@ pub enum Commands {
     },
 
     /// Copy files or directories
+    #[command(after_long_help = COPY_AFTER_LONG_HELP)]
     Copy {
         #[command(flatten)]
         args: CopyMoveArgs,
@@ -181,6 +289,7 @@ pub enum Commands {
     },
 
     /// Move files or directories
+    #[command(after_long_help = MOVE_AFTER_LONG_HELP)]
     Move {
         #[command(flatten)]
         args: CopyMoveArgs,
@@ -233,6 +342,7 @@ pub enum Commands {
     },
 
     /// Compare source and destination without making changes
+    #[command(after_long_help = CHECK_AFTER_LONG_HELP)]
     Check {
         /// Source files and destination (last argument is the destination)
         #[arg(required = true, num_args = 2..)]
@@ -252,6 +362,7 @@ pub enum Commands {
     },
 
     /// Remove files or directories
+    #[command(after_long_help = REMOVE_AFTER_LONG_HELP)]
     Remove {
         /// Files or directories to remove
         #[arg(required = true)]
