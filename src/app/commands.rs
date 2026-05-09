@@ -57,6 +57,55 @@ fn validate_source_kind(_src: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+fn source_basename(src: &std::path::Path) -> Option<String> {
+    use crate::core::remote::parse_remote_path;
+    let s = src.to_string_lossy();
+    if let Some(rsrc) = parse_remote_path(&s) {
+        rsrc.path
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    } else {
+        src.file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+    }
+}
+
+fn check_basename_collisions(sources: &[std::path::PathBuf], force: bool) -> Result<()> {
+    use std::collections::BTreeMap;
+    if sources.len() < 2 {
+        return Ok(());
+    }
+    let mut groups: BTreeMap<String, Vec<&std::path::Path>> = BTreeMap::new();
+    for src in sources {
+        if let Some(name) = source_basename(src) {
+            groups.entry(name).or_default().push(src.as_path());
+        }
+    }
+    let collisions: Vec<_> = groups.iter().filter(|(_, v)| v.len() > 1).collect();
+    if collisions.is_empty() {
+        return Ok(());
+    }
+    let mut msg = String::from(
+        "Multiple sources collide on basename at destination — last writer would silently win:\n",
+    );
+    for (name, paths) in &collisions {
+        msg.push_str(&format!("  '{}' from:\n", name));
+        for p in *paths {
+            msg.push_str(&format!("    {}\n", p.display()));
+        }
+    }
+    if force {
+        eprintln!("bcmr: warning: {}", msg.trim_end());
+        eprintln!("bcmr: -f set, proceeding (last writer wins).");
+        return Ok(());
+    }
+    msg.push_str("Pass -f/--force to allow the last-writer-wins overwrite, or copy each source to a distinct destination.");
+    bail!("{}", msg);
+}
+
 pub(crate) async fn handle_copy_command(args: &Commands) -> Result<()> {
     use crate::core::remote::parse_remote_path;
 
@@ -73,6 +122,8 @@ pub(crate) async fn handle_copy_command(args: &Commands) -> Result<()> {
     for src in sources {
         validate_source_kind(src)?;
     }
+
+    check_basename_collisions(sources, args.is_force())?;
 
     let dest_str = dest.to_string_lossy();
     let remote_dest = parse_remote_path(&dest_str);
