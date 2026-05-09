@@ -1082,6 +1082,82 @@ fn e2e_help_advertises_plain_not_tui() {
 }
 
 #[test]
+fn e2e_quiet_suppresses_done_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("s.bin");
+    let dst = dir.path().join("d.bin");
+    fs::write(&src, b"quiet-test").unwrap();
+
+    let (ok, stdout, _stderr) =
+        run_bcmr(&["copy", "-q", src.to_str().unwrap(), dst.to_str().unwrap()]);
+    assert!(ok, "copy should succeed");
+    assert!(dst.exists(), "dst should exist");
+    assert!(
+        !stdout.contains("Done:"),
+        "expected no Done line under -q, got: {stdout}"
+    );
+}
+
+#[test]
+fn e2e_quiet_long_form_also_suppresses() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("s.bin");
+    let dst = dir.path().join("d.bin");
+    fs::write(&src, b"quiet-long").unwrap();
+
+    let (ok, stdout, _stderr) = run_bcmr(&[
+        "copy",
+        "--quiet",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    assert!(ok);
+    assert!(dst.exists());
+    assert!(!stdout.contains("Done:"), "got: {stdout}");
+}
+
+#[test]
+fn e2e_config_override_does_not_crash_on_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("s.bin");
+    let dst = dir.path().join("d.bin");
+    fs::write(&src, b"x").unwrap();
+
+    let (ok, _stdout, _stderr) = run_bcmr(&[
+        "--config",
+        "/nonexistent/bcmr-test.toml",
+        "copy",
+        "-q",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    assert!(ok, "missing config path should not break the command");
+    assert!(dst.exists());
+}
+
+#[test]
+fn e2e_config_override_layers_on_top_of_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("override.toml");
+    fs::write(&cfg, "[progress]\nstyle = \"plain\"\n").unwrap();
+
+    let src = dir.path().join("s.bin");
+    let dst = dir.path().join("d.bin");
+    fs::write(&src, b"y").unwrap();
+
+    let (ok, _stdout, _stderr) = run_bcmr(&[
+        "--config",
+        cfg.to_str().unwrap(),
+        "copy",
+        "-q",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    assert!(ok, "override config should be honored");
+    assert!(dst.exists());
+}
+
+#[test]
 fn e2e_same_host_remote_to_remote_copy_refuses() {
     let (ok, _stdout, stderr) = run_bcmr(&[
         "copy",

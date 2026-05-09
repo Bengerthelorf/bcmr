@@ -117,7 +117,7 @@ pub(super) async fn handle_serve_upload(
     let runner = ProgressRunner::new(
         total_size,
         is_plain_mode(args),
-        false,
+        args.is_quiet(),
         crate::config::is_json_mode(),
         crate::commands::copy::cleanup_partial_files,
     )?;
@@ -412,7 +412,7 @@ pub(super) async fn handle_serve_download(
     let runner = ProgressRunner::new(
         total_size,
         is_plain_mode(args),
-        false,
+        args.is_quiet(),
         crate::config::is_json_mode(),
         crate::commands::copy::cleanup_partial_files,
     )?;

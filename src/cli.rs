@@ -123,6 +123,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
+    /// Use this config file instead of ~/.config/bcmr/config.toml (layered on top of defaults)
+    #[arg(long, global = true, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+
     #[arg(long = "_bg", hide = true)]
     pub _bg: Option<String>,
 }
@@ -186,6 +190,10 @@ pub struct CopyMoveArgs {
     /// Use plain inline progress (3-line) instead of the fancy TUI box
     #[arg(long, alias = "tui", short_alias = 't')]
     pub plain: bool,
+
+    /// Suppress progress UI; only errors print to stderr
+    #[arg(short = 'q', long)]
+    pub quiet: bool,
 
     /// Run in dry-run mode (no changes)
     #[arg(short = 'n', long)]
@@ -400,6 +408,10 @@ pub enum Commands {
         #[arg(long, alias = "tui", short_alias = 't')]
         plain: bool,
 
+        /// Suppress progress UI; only errors print to stderr
+        #[arg(short = 'q', long)]
+        quiet: bool,
+
         /// Run in dry-run mode (no changes)
         #[arg(short = 'n', long)]
         dry_run: bool,
@@ -465,6 +477,11 @@ impl Commands {
     pub fn is_plain_progress(&self) -> bool {
         self.copy_move_args().is_some_and(|a| a.plain)
             || matches!(self, Commands::Remove { plain: true, .. })
+    }
+
+    pub fn is_quiet(&self) -> bool {
+        self.copy_move_args().is_some_and(|a| a.quiet)
+            || matches!(self, Commands::Remove { quiet: true, .. })
     }
 
     pub fn is_dry_run(&self) -> bool {
@@ -686,6 +703,7 @@ mod tests {
             verbose: false,
             exclude: None,
             plain: false,
+            quiet: false,
             dry_run: false,
             test_mode: None,
             verify: false,
@@ -769,6 +787,7 @@ mod tests {
             dir: true,
             exclude: None,
             plain: false,
+            quiet: false,
             dry_run: false,
             test_mode: None,
         };

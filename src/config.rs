@@ -260,6 +260,13 @@ impl Config {
             }
         }
 
+        if let Ok(override_path) = std::env::var("BCMR_CONFIG") {
+            let path = std::path::PathBuf::from(&override_path);
+            if path.exists() {
+                s = s.add_source(File::from(path));
+            }
+        }
+
         s.build()?.try_deserialize()
     }
 }
