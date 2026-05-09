@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use tokio::process::Command;
 
-pub async fn run(target: &str, remote_path: &str) -> Result<()> {
+pub async fn run(target: &str, remote_path: &str, sudo: bool) -> Result<()> {
     let remote_path_owned = if remote_path.starts_with('~') {
         crate::core::remote::expand_remote_tilde(target, remote_path).await?
     } else {
@@ -9,6 +9,30 @@ pub async fn run(target: &str, remote_path: &str) -> Result<()> {
     };
     let remote_path = remote_path_owned.as_str();
     eprintln!("Deploying bcmr to {}:{}", target, remote_path);
+
+    if sudo {
+        let probe = Command::new("ssh")
+            .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
+            .arg(target)
+            .arg("sudo -n true")
+            .output()
+            .await?;
+        if !probe.status.success() {
+            let stderr = String::from_utf8_lossy(&probe.stderr);
+            let reason = stderr.trim();
+            let suffix = if reason.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", reason)
+            };
+            bail!(
+                "--sudo requires passwordless sudo on {} (`sudo -n true` failed{})",
+                target,
+                suffix
+            );
+        }
+        eprintln!("  Verified passwordless sudo on remote.");
+    }
 
     let check = ssh(target, "bcmr --version 2>/dev/null || echo NOTFOUND").await?;
     if !check.contains("NOTFOUND") {
@@ -30,66 +54,108 @@ pub async fn run(target: &str, remote_path: &str) -> Result<()> {
     let local_arch = std::env::consts::ARCH;
     eprintln!("  Local:  {} {}", local_os, local_arch);
 
+    let sudo_prefix = if sudo { "sudo " } else { "" };
     let dir = if remote_path.contains('/') {
         remote_path.rsplit_once('/').map(|(d, _)| d).unwrap_or(".")
     } else {
         "."
     };
-    ssh(target, &format!("mkdir -p {}", shell_escape(dir))).await?;
+    ssh(
+        target,
+        &format!("{}mkdir -p {}", sudo_prefix, shell_escape(dir)),
+    )
+    .await?;
 
-    if remote_os == local_os && remote_arch == local_arch {
-        eprintln!("  Same platform. Transferring local binary...");
-        let local_bin = std::env::current_exe()?;
-        scp_to(target, &local_bin, remote_path).await?;
+    let staging = if sudo {
+        let raw = ssh(target, "mktemp -t bcmr-deploy.XXXXXX").await?;
+        let path = raw.trim().to_string();
+        if path.is_empty() {
+            bail!("--sudo: failed to allocate a remote staging path via mktemp");
+        }
+        Some(path)
     } else {
-        eprintln!("  Cross-platform. Downloading from GitHub Releases...");
-        let asset_name = release_asset_name(remote_os, remote_arch)?;
-        let url = format!(
-            "https://github.com/Bengerthelorf/bcmr/releases/latest/download/{}",
-            asset_name
-        );
-        let download_cmd = format!(
-            "curl -fsSL '{}' | tar xz -C {} bcmr && mv {}/bcmr {}",
-            url,
-            shell_escape(dir),
-            shell_escape(dir),
-            shell_escape(remote_path)
-        );
-        let output = ssh(target, &download_cmd).await;
-        if output.is_err() {
-            eprintln!("  Direct download failed. Downloading locally...");
-            let tmp_dir = std::env::temp_dir().join("bcmr-deploy-tmp");
-            let _ = tokio::fs::create_dir_all(&tmp_dir).await;
-            let tmp_archive = tmp_dir.join(&asset_name);
-            let status = Command::new("curl")
-                .args(["-fsSL", &url, "-o"])
-                .arg(&tmp_archive)
-                .status()
-                .await?;
-            if !status.success() {
-                bail!(
-                    "Failed to download {} from GitHub Releases.\n\
-                     Install manually: cargo install bcmr",
-                    asset_name
-                );
+        None
+    };
+    let upload_dest = staging.as_deref().unwrap_or(remote_path);
+
+    let install_outcome: Result<()> = async {
+        if remote_os == local_os && remote_arch == local_arch {
+            eprintln!("  Same platform. Transferring local binary...");
+            let local_bin = std::env::current_exe()?;
+            scp_to(target, &local_bin, upload_dest).await?;
+        } else {
+            eprintln!("  Cross-platform. Downloading from GitHub Releases...");
+            let asset_name = release_asset_name(remote_os, remote_arch)?;
+            let url = format!(
+                "https://github.com/Bengerthelorf/bcmr/releases/latest/download/{}",
+                asset_name
+            );
+            let extract_dir = format!("/tmp/bcmr-deploy-extract-{}", std::process::id());
+            let download_cmd = format!(
+                "rm -rf {0} && mkdir -p {0} && curl -fsSL '{1}' | tar xz -C {0} bcmr && mv {0}/bcmr {2} && rm -rf {0}",
+                shell_escape(&extract_dir),
+                url,
+                shell_escape(upload_dest)
+            );
+            let output = ssh(target, &download_cmd).await;
+            if output.is_err() {
+                eprintln!("  Direct download failed. Downloading locally...");
+                let tmp_dir = std::env::temp_dir().join("bcmr-deploy-tmp");
+                let _ = tokio::fs::create_dir_all(&tmp_dir).await;
+                let tmp_archive = tmp_dir.join(&asset_name);
+                let status = Command::new("curl")
+                    .args(["-fsSL", &url, "-o"])
+                    .arg(&tmp_archive)
+                    .status()
+                    .await?;
+                if !status.success() {
+                    bail!(
+                        "Failed to download {} from GitHub Releases.\n\
+                         Install manually: cargo install bcmr",
+                        asset_name
+                    );
+                }
+                let status = Command::new("tar")
+                    .args(["xzf"])
+                    .arg(&tmp_archive)
+                    .args(["-C"])
+                    .arg(&tmp_dir)
+                    .status()
+                    .await?;
+                if !status.success() {
+                    bail!("Failed to extract {}", asset_name);
+                }
+                let extracted = tmp_dir.join("bcmr");
+                scp_to(target, &extracted, upload_dest).await?;
+                let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
             }
-            let status = Command::new("tar")
-                .args(["xzf"])
-                .arg(&tmp_archive)
-                .args(["-C"])
-                .arg(&tmp_dir)
-                .status()
-                .await?;
-            if !status.success() {
-                bail!("Failed to extract {}", asset_name);
-            }
-            let extracted = tmp_dir.join("bcmr");
-            scp_to(target, &extracted, remote_path).await?;
-            let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+        }
+
+        if let Some(ref staged) = staging {
+            ssh(
+                target,
+                &format!(
+                    "{}install -m 755 {} {} && rm -f {}",
+                    sudo_prefix,
+                    shell_escape(staged),
+                    shell_escape(remote_path),
+                    shell_escape(staged)
+                ),
+            )
+            .await?;
+        } else {
+            ssh(target, &format!("chmod +x {}", shell_escape(remote_path))).await?;
+        }
+        Ok(())
+    }
+    .await;
+
+    if install_outcome.is_err() {
+        if let Some(staged) = staging.as_deref() {
+            let _ = ssh(target, &format!("rm -f {}", shell_escape(staged))).await;
         }
     }
-
-    ssh(target, &format!("chmod +x {}", shell_escape(remote_path))).await?;
+    install_outcome?;
     let verify = ssh(target, &format!("{} --version", shell_escape(remote_path))).await?;
     eprintln!("  Installed: {}", verify.trim());
 

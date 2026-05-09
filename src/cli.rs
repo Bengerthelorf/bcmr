@@ -222,6 +222,10 @@ pub enum Commands {
         /// Installation path on remote host
         #[arg(long, default_value = "~/.local/bin/bcmr")]
         path: Option<String>,
+
+        /// Use sudo on the remote for the install step (requires passwordless sudo)
+        #[arg(long)]
+        sudo: bool,
     },
 
     /// Compare source and destination without making changes
