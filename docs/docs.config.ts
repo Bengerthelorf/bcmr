@@ -26,6 +26,7 @@ export default {
         'ablation/wire-protocol',
         'ablation/path-b-design',
         'ablation/no-rolling-checksum',
+        'ablation/json-schema',
         'ablation/open-questions',
       ],
     },
