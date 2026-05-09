@@ -235,6 +235,15 @@ pub async fn handle_remote_copy(
     for src in sources {
         if let Some(rsrc) = parse_remote_path(&src.to_string_lossy()) {
             rsrc.reject_unsafe()?;
+            continue;
+        }
+        if let Ok(md) = src.symlink_metadata() {
+            if md.is_dir() && !args.is_recursive() {
+                anyhow::bail!(
+                    "Source '{}' is a directory. Use -r flag for recursive copy.",
+                    src.display()
+                );
+            }
         }
     }
 
@@ -305,7 +314,7 @@ pub async fn handle_remote_copy(
         Ok(()) => return Ok(()),
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("--append refused:") {
+            if msg.contains("--append refused:") || msg.contains("Use -r flag for recursive copy") {
                 return Err(e);
             }
             let is_dry_run_redirect = msg.contains("dry-run fallback");

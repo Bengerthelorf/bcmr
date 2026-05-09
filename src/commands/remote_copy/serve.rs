@@ -222,6 +222,12 @@ pub(super) async fn handle_serve_upload(
                 ));
             }
             serve_upload_dir(&mut pool, src, rdest, &runner, excludes, args).await?;
+        } else if src.is_dir() {
+            pool.close().await?;
+            bail!(
+                "Source '{}' is a directory. Use -r flag for recursive copy.",
+                src.display()
+            );
         }
     }
 
@@ -343,6 +349,13 @@ pub(super) async fn handle_serve_download(
         let src_str = src.to_string_lossy();
         if let Some(rp) = parse_remote_path(&src_str) {
             let (size, _mtime, is_dir) = pool.first_mut().stat(&rp.path).await?;
+            if is_dir && !args.is_recursive() {
+                pool.close().await?;
+                bail!(
+                    "Remote source '{}' is a directory. Use -r flag for recursive copy.",
+                    rp
+                );
+            }
             if is_dir && args.is_recursive() {
                 let entries = pool.first_mut().list(&rp.path).await?;
                 let dir_name = rp.path.rsplit('/').next().unwrap_or(&rp.path);

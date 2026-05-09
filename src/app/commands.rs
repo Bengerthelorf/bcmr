@@ -35,6 +35,19 @@ pub(crate) async fn handle_copy_command(args: &Commands) -> Result<()> {
         return handle_remote_copy(args, sources, dest, &excludes).await;
     }
 
+    if !args.is_recursive() {
+        for src in sources {
+            if let Ok(md) = src.symlink_metadata() {
+                if md.is_dir() {
+                    bail!(
+                        "Source '{}' is a directory. Use -r flag for recursive copy.",
+                        src.display()
+                    );
+                }
+            }
+        }
+    }
+
     if sources.len() > 1 && (!dest.exists() || !dest.is_dir()) {
         bail!(
             "When copying multiple sources, destination '{}' must be an existing directory",
