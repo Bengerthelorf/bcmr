@@ -2,8 +2,13 @@ use anyhow::{bail, Result};
 use tokio::process::Command;
 
 pub async fn run(target: &str, remote_path: &str) -> Result<()> {
-    let display_path = remote_path.replace("~", "$HOME");
-    eprintln!("Deploying bcmr to {}:{}", target, display_path);
+    let remote_path_owned = if remote_path.starts_with('~') {
+        crate::core::remote::expand_remote_tilde(target, remote_path).await?
+    } else {
+        remote_path.to_string()
+    };
+    let remote_path = remote_path_owned.as_str();
+    eprintln!("Deploying bcmr to {}:{}", target, remote_path);
 
     let check = ssh(target, "bcmr --version 2>/dev/null || echo NOTFOUND").await?;
     if !check.contains("NOTFOUND") {

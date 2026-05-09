@@ -177,6 +177,59 @@ pub async fn remote_file_hash(
     Ok(hasher.finalize().to_hex().to_string())
 }
 
+fn split_tilde_prefix(path: &str) -> Option<(&str, &str)> {
+    let after_tilde = path.strip_prefix('~')?;
+    let (user_spec, suffix) = match after_tilde.find('/') {
+        Some(idx) => (&after_tilde[..idx], &after_tilde[idx..]),
+        None => (after_tilde, ""),
+    };
+    Some((user_spec, suffix))
+}
+
+pub async fn resolve_remote_home(ssh_target: &str, user_spec: &str) -> Result<String, BcmrError> {
+    let probe = if user_spec.is_empty() {
+        "printf '%s' \"$HOME\"".to_string()
+    } else {
+        if !user_spec
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(BcmrError::InvalidInput(format!(
+                "remote path: refusing to expand ~{} — only alphanumeric/_/- usernames accepted",
+                user_spec
+            )));
+        }
+        format!("printf '%s' ~{}", user_spec)
+    };
+
+    let output = ssh_command(ssh_target).arg(&probe).output().await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(BcmrError::InvalidInput(ssh_error_message(
+            &stderr,
+            &format!("remote ~{} expansion", user_spec),
+        )));
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let home = raw.trim().to_string();
+    if home.is_empty() || home.starts_with('~') {
+        return Err(BcmrError::InvalidInput(format!(
+            "remote did not expand ~{} (no such user, or HOME unset)",
+            user_spec
+        )));
+    }
+    Ok(home)
+}
+
+pub async fn expand_remote_tilde(ssh_target: &str, path: &str) -> Result<String, BcmrError> {
+    let Some((user_spec, suffix)) = split_tilde_prefix(path) else {
+        return Ok(path.to_string());
+    };
+    let home = resolve_remote_home(ssh_target, user_spec).await?;
+    Ok(format!("{}{}", home, suffix))
+}
+
 pub async fn remote_remove(
     remote: &RemotePath,
     recursive: bool,
@@ -244,4 +297,31 @@ pub async fn complete_remote_path(partial: &str) -> Vec<String> {
         .filter(|l| prefix.is_empty() || l.starts_with(&prefix))
         .map(|l| format!("{}:{}{}", target, base, l))
         .collect()
+}
+
+#[cfg(test)]
+mod tilde_tests {
+    use super::split_tilde_prefix;
+
+    #[test]
+    fn split_handles_bare_tilde() {
+        assert_eq!(split_tilde_prefix("~"), Some(("", "")));
+        assert_eq!(split_tilde_prefix("~/"), Some(("", "/")));
+        assert_eq!(split_tilde_prefix("~/foo"), Some(("", "/foo")));
+        assert_eq!(split_tilde_prefix("~/foo/bar"), Some(("", "/foo/bar")));
+    }
+
+    #[test]
+    fn split_handles_user_tilde() {
+        assert_eq!(split_tilde_prefix("~alice"), Some(("alice", "")));
+        assert_eq!(split_tilde_prefix("~alice/foo"), Some(("alice", "/foo")));
+    }
+
+    #[test]
+    fn split_returns_none_for_non_tilde() {
+        assert_eq!(split_tilde_prefix(""), None);
+        assert_eq!(split_tilde_prefix("foo"), None);
+        assert_eq!(split_tilde_prefix("/abs/path"), None);
+        assert_eq!(split_tilde_prefix("./foo~"), None);
+    }
 }
