@@ -127,6 +127,48 @@ Error:
 
 Exit code is `0` when `in_sync=true`, `1` when not, `2` on error.
 
+## `bcmr doctor --json`
+
+`bcmr doctor` is foreground and synchronous; under `--json` it emits a single object on stdout — no NDJSON, no header, no progress events:
+
+```json
+{
+  "bcmr_version": "0.6.0",
+  "local": [
+    {"status":"ok","label":"config file","detail":"/Users/.../config.toml (valid TOML)"},
+    {"status":"warn","label":"jobs dir","detail":"... (62 jobs, 1.4 MiB)","recommend":"consider 'bcmr status --gc' ..."}
+  ],
+  "hosts": [
+    {
+      "host": "user@host1",
+      "checks": [
+        {"status":"ok","label":"ssh","detail":"reachable as user@host1"},
+        {"status":"ok","label":"remote bcmr","detail":"/home/u/.cargo/bin/bcmr v0.6.0 (matches local)"}
+      ]
+    }
+  ],
+  "ok": true
+}
+```
+
+| Field          | Type   | Notes                                                                  |
+| -------------- | ------ | ---------------------------------------------------------------------- |
+| `bcmr_version` | string | Local CLI version string.                                              |
+| `local`        | array  | Local environment checks (config / jobs dir / color env).              |
+| `hosts`        | array  | One entry per host arg; preserves input order.                         |
+| `ok`           | bool   | `true` iff no check has `status="fail"` (in either local or hosts).    |
+
+Each `Check` entry carries:
+
+| Field       | Type   | Notes                                                          |
+| ----------- | ------ | -------------------------------------------------------------- |
+| `status`    | string | `"ok"`, `"warn"`, or `"fail"`.                                  |
+| `label`     | string | Short identifier (`config file`, `ssh`, `remote bcmr`, etc.).  |
+| `detail`    | string | Human-readable result.                                         |
+| `recommend` | string | Suggested fix; omitted on plain `ok` checks.                   |
+
+Exit code is `0` when `ok=true`, `1` otherwise. Per-host probes run concurrently but the output preserves input order so scripts can index by position.
+
 ## Error events on a stream
 
 When a background job fails, the log file ends with a single `result` event whose `status="error"` and `error` carries the message. Consumers should treat the absence of a terminal `result` as "process killed before reporting" and fall back to checking `bcmr status <job_id>` — the status command reads the on-disk JobInfo and the log tail.

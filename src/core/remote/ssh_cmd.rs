@@ -61,7 +61,7 @@ pub(super) fn shell_escape(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
-pub(super) fn ssh_error_message(stderr: &str, context: &str) -> String {
+pub(crate) fn ssh_error_message(stderr: &str, context: &str) -> String {
     let stderr_lower = stderr.to_lowercase();
     if stderr_lower.contains("connection refused") {
         format!(

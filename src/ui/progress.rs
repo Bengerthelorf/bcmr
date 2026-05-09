@@ -69,7 +69,7 @@ impl ProgressRenderer for PlainTextProgress {
     }
 }
 
-fn ansi_disabled_by_env() -> bool {
+pub(crate) fn ansi_disabled_by_env() -> bool {
     let no_color = std::env::var_os("NO_COLOR")
         .map(|v| !v.is_empty())
         .unwrap_or(false);
