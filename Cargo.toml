@@ -51,7 +51,7 @@ regex = "1.12.2"
 blake3 = "1.5"
 reflink-copy = "0.1.28"
 signal-hook = "0.3.18"
-self_update = { version = "0.43", default-features = false, features = ["archive-tar", "archive-zip", "compression-flate2", "reqwest", "rustls"] }
+self_update = { version = "0.44", default-features = false, features = ["archive-tar", "archive-zip", "compression-flate2", "reqwest", "rustls"] }
 futures = "0.3"
 num_cpus = "1.16"
 lz4_flex = { version = "0.11", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
