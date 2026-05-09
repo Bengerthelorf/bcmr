@@ -153,6 +153,42 @@ end
 
             script
         }
+        Shell::Powershell => {
+            let mut script = String::new();
+
+            if let Some(path) = path {
+                script.push_str(&format!(
+                    r#"
+# Add bcmr directory to PATH
+$env:PATH = "{};" + $env:PATH
+"#,
+                    path.display()
+                ));
+            }
+
+            if !no_cmd {
+                let prefix = prefix_arg.unwrap_or(if cmd_compat.is_empty() {
+                    ""
+                } else {
+                    cmd_compat
+                });
+                let suffix = suffix_arg.unwrap_or("");
+
+                script.push_str(&format!(
+                    r#"
+# bcmr shell integration for powershell
+function {prefix}cp{suffix} {{ & "{exe_path}" copy @args }}
+function {prefix}mv{suffix} {{ & "{exe_path}" move @args }}
+function {prefix}rm{suffix} {{ & "{exe_path}" remove @args }}
+"#,
+                    prefix = prefix,
+                    suffix = suffix,
+                    exe_path = exe_path
+                ));
+            }
+
+            script
+        }
     }
 }
 
@@ -215,5 +251,21 @@ mod tests {
     fn test_compat_cmd_with_suffix() {
         let script = generate_init_script(&Shell::Bash, "b", None, Some("+"), None, false);
         assert!(script.contains("function bcp+()"));
+    }
+
+    #[test]
+    fn test_powershell_init_script() {
+        let script = generate_init_script(&Shell::Powershell, "b", None, None, None, false);
+        assert!(script.contains("function bcp"));
+        assert!(script.contains("function bmv"));
+        assert!(script.contains("function brm"));
+        assert!(script.contains("@args"));
+    }
+
+    #[test]
+    fn test_powershell_with_path() {
+        let path = PathBuf::from(r"C:\bcmr");
+        let script = generate_init_script(&Shell::Powershell, "", None, None, Some(&path), false);
+        assert!(script.contains(r#"$env:PATH = "C:\bcmr;" + $env:PATH"#));
     }
 }
