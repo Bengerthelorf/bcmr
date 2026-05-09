@@ -219,20 +219,6 @@ pub(super) fn resolve_upload_remote(
     }
 }
 
-fn reject_parent_dir_components(remote: &RemotePath) -> Result<()> {
-    if std::path::Path::new(&remote.path)
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        anyhow::bail!(
-            "remote path '{}' contains '..' — refusing for safety; \
-             this is a hard error on every transport, including the legacy SSH fallback",
-            remote
-        );
-    }
-    Ok(())
-}
-
 pub async fn handle_remote_copy(
     args: &Commands,
     sources: &[std::path::PathBuf],
@@ -244,11 +230,11 @@ pub async fn handle_remote_copy(
     let is_upload = remote_dest.is_some();
 
     if let Some(ref rd) = remote_dest {
-        reject_parent_dir_components(rd)?;
+        rd.reject_unsafe()?;
     }
     for src in sources {
         if let Some(rsrc) = parse_remote_path(&src.to_string_lossy()) {
-            reject_parent_dir_components(&rsrc)?;
+            rsrc.reject_unsafe()?;
         }
     }
 

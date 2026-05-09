@@ -32,6 +32,15 @@ pub async fn run(
         ));
     }
 
+    if let Some(ref rd) = remote_dest {
+        rd.reject_unsafe()?;
+    }
+    for src in sources {
+        if let Some(rsrc) = parse_remote_path(&src.to_string_lossy()) {
+            rsrc.reject_unsafe()?;
+        }
+    }
+
     let remote_host = if let Some(ref rd) = remote_dest {
         Some(rd.ssh_target())
     } else if any_remote_source {
