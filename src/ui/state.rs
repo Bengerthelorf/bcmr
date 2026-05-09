@@ -179,6 +179,24 @@ impl ProgressData {
         }
         Some(self.current_bytes as f64 / secs)
     }
+
+    pub fn done_summary_line(&self) -> String {
+        use crate::ui::utils::format_bytes;
+        let avg = self.average_bytes_per_sec().unwrap_or(0.0);
+        let mut line = format!(
+            "Done: {} in {:.1}s | avg {}/s",
+            format_bytes(self.current_bytes as f64),
+            self.elapsed().as_secs_f64(),
+            format_bytes(avg),
+        );
+        if self.skipped_bytes > 0 {
+            line.push_str(&format!(
+                " | skipped {}",
+                format_bytes(self.skipped_bytes as f64)
+            ));
+        }
+        line
+    }
 }
 
 #[cfg(test)]
@@ -256,5 +274,27 @@ mod tests {
         w.last_update = Instant::now() - Duration::from_secs(1);
         let speed = w.calculate_speed();
         assert!(speed > 0.0);
+    }
+
+    #[test]
+    fn test_done_summary_omits_skipped_when_zero() {
+        let mut pd = ProgressData::new(1024);
+        pd.current_bytes = 1024;
+        let line = pd.done_summary_line();
+        assert!(line.starts_with("Done:"), "got: {line}");
+        assert!(line.contains("avg"), "got: {line}");
+        assert!(!line.contains("skipped"), "got: {line}");
+    }
+
+    #[test]
+    fn test_done_summary_includes_skipped_when_nonzero() {
+        let mut pd = ProgressData::new(1024 * 1024 * 100);
+        pd.inc_skipped(1024 * 1024 * 30);
+        let line = pd.done_summary_line();
+        assert!(line.contains("skipped"), "got: {line}");
+        assert!(
+            line.contains("30"),
+            "expected skipped MiB count, got: {line}"
+        );
     }
 }

@@ -2,7 +2,6 @@ use crate::ui::inline::InlineProgress;
 use crate::ui::json::JsonProgress;
 use crate::ui::state::ProgressData;
 use crate::ui::tui::TuiProgress;
-use crate::ui::utils::format_bytes;
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 
@@ -59,14 +58,7 @@ impl ProgressRenderer for PlainTextProgress {
     }
 
     fn finish(&mut self) -> io::Result<()> {
-        let elapsed = self.data.elapsed();
-        let avg_bps = self.data.average_bytes_per_sec().unwrap_or(0.0);
-        println!(
-            "Done: {} in {:.1}s | avg {}/s",
-            format_bytes(self.data.current_bytes as f64),
-            elapsed.as_secs_f64(),
-            format_bytes(avg_bps),
-        );
+        println!("{}", self.data.done_summary_line());
         Ok(())
     }
 }
