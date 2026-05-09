@@ -25,6 +25,7 @@ pub enum Shell {
     Bash,
     Zsh,
     Fish,
+    Powershell,
 }
 
 #[derive(Clone, Debug)]
@@ -40,6 +41,7 @@ impl std::fmt::Display for Shell {
             Shell::Bash => write!(f, "bash"),
             Shell::Zsh => write!(f, "zsh"),
             Shell::Fish => write!(f, "fish"),
+            Shell::Powershell => write!(f, "powershell"),
         }
     }
 }
@@ -132,7 +134,7 @@ pub enum DirectMode {
 pub enum Commands {
     /// Initialize shell integration
     Init {
-        /// Shell to initialize (bash, zsh, fish)
+        /// Shell to initialize (bash, zsh, fish, powershell)
         shell: Shell,
 
         /// Command prefix (base for aliases; empty = no prefix)
