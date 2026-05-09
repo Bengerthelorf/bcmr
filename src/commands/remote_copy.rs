@@ -305,6 +305,9 @@ pub async fn handle_remote_copy(
         Ok(()) => return Ok(()),
         Err(e) => {
             let msg = e.to_string();
+            if msg.contains("--append refused:") {
+                return Err(e);
+            }
             let is_dry_run_redirect = msg.contains("dry-run fallback");
             let is_resume_redirect = msg.contains("not yet supported, fallback to legacy")
                 || msg.contains("not supported, fallback to legacy");
