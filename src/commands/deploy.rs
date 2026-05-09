@@ -87,6 +87,43 @@ pub async fn run(target: &str, remote_path: &str) -> Result<()> {
     ssh(target, &format!("chmod +x {}", shell_escape(remote_path))).await?;
     let verify = ssh(target, &format!("{} --version", shell_escape(remote_path))).await?;
     eprintln!("  Installed: {}", verify.trim());
+
+    let path_probe = ssh(target, "command -v bcmr 2>/dev/null || true").await?;
+    let resolved = path_probe.trim();
+    if resolved.is_empty() {
+        eprintln!();
+        eprintln!("  ⚠  bcmr is installed but NOT on the remote's non-interactive SSH PATH.");
+        eprintln!(
+            "     Subsequent bcmr operations against {} will fall back to legacy SSH",
+            target
+        );
+        eprintln!("     until the install directory is added to PATH.");
+        eprintln!();
+        let install_dir = if remote_path.contains('/') {
+            remote_path.rsplit_once('/').map(|(d, _)| d).unwrap_or(".")
+        } else {
+            "."
+        };
+        eprintln!("     Quick fix on the remote (one of these):");
+        eprintln!(
+            "       echo 'export PATH={}:$PATH' >> ~/.profile   # picked up by future SSH",
+            install_dir
+        );
+        eprintln!(
+            "       sudo ln -s {} /usr/local/bin/bcmr            # system-wide",
+            remote_path
+        );
+    } else if resolved != remote_path {
+        eprintln!();
+        eprintln!(
+            "  ⚠  Deployed to {} but 'command -v bcmr' resolves to {}",
+            remote_path, resolved
+        );
+        eprintln!(
+            "     (the PATH-resolved binary will be used by bcmr operations against {}).",
+            target
+        );
+    }
     eprintln!("  Done.");
 
     Ok(())
