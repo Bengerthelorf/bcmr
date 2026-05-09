@@ -38,6 +38,8 @@ pub struct Config {
     pub transfer: TransferConfig,
     #[serde(default)]
     pub update_check: UpdateCheck,
+    #[serde(default)]
+    pub paths: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -160,11 +162,33 @@ impl Default for Config {
             scp: ScpConfig::default(),
             transfer: TransferConfig::default(),
             update_check: UpdateCheck::default(),
+            paths: std::collections::HashMap::new(),
         }
     }
 }
 
 pub static CONFIG: Lazy<Config> = Lazy::new(|| Config::new().unwrap_or_else(|_| Config::default()));
+
+pub fn resolve_path_alias(
+    input: &str,
+    paths: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    let bytes = input.as_bytes();
+    if bytes.first() != Some(&b'@') {
+        return None;
+    }
+    let (name_end, suffix_start) = match input[1..].find('/') {
+        Some(rel) => (1 + rel, 1 + rel),
+        None => (input.len(), input.len()),
+    };
+    let name = &input[1..name_end];
+    if name.is_empty() {
+        return None;
+    }
+    let target = paths.get(name)?;
+    let suffix = &input[suffix_start..];
+    Some(format!("{}{}", target.trim_end_matches('/'), suffix))
+}
 
 impl Config {
     pub fn new() -> Result<Self, ConfigError> {
@@ -298,5 +322,43 @@ mod tests {
     #[test]
     fn test_static_config() {
         assert!(!CONFIG.progress.style.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_path_alias_returns_none_for_non_alias() {
+        let mut paths = std::collections::HashMap::new();
+        paths.insert("proj".to_string(), "host:/data".to_string());
+        assert!(resolve_path_alias("file.bin", &paths).is_none());
+        assert!(resolve_path_alias("host:/x", &paths).is_none());
+        assert!(resolve_path_alias("@", &paths).is_none()); // empty name
+    }
+
+    #[test]
+    fn test_resolve_path_alias_substitutes_bare_alias() {
+        let mut paths = std::collections::HashMap::new();
+        paths.insert("proj".to_string(), "host:/data/".to_string());
+        assert_eq!(resolve_path_alias("@proj", &paths).unwrap(), "host:/data");
+    }
+
+    #[test]
+    fn test_resolve_path_alias_appends_suffix() {
+        let mut paths = std::collections::HashMap::new();
+        paths.insert("proj".to_string(), "host:/data/".to_string());
+        assert_eq!(
+            resolve_path_alias("@proj/sub/file.bin", &paths).unwrap(),
+            "host:/data/sub/file.bin"
+        );
+        // No trailing slash on target also works.
+        paths.insert("dst".to_string(), "host:/var".to_string());
+        assert_eq!(
+            resolve_path_alias("@dst/log", &paths).unwrap(),
+            "host:/var/log"
+        );
+    }
+
+    #[test]
+    fn test_resolve_path_alias_unknown_returns_none() {
+        let paths = std::collections::HashMap::new();
+        assert!(resolve_path_alias("@unknown/file", &paths).is_none());
     }
 }

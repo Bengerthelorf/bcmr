@@ -94,11 +94,13 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let cli = cli::parse_args();
+    let mut cli = cli::parse_args();
 
     if let Some(ref path) = cli.config {
         std::env::set_var("BCMR_CONFIG", path);
     }
+
+    expand_path_bookmarks(&mut cli.command);
 
     if maybe_detach(&cli)? {
         return Ok(());
@@ -205,6 +207,22 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn expand_path_bookmarks(cmd: &mut Commands) {
+    use std::path::PathBuf;
+    let paths = match cmd {
+        Commands::Copy { args, .. } | Commands::Move { args, .. } => &mut args.paths,
+        Commands::Check { paths, .. } => paths,
+        Commands::Remove { paths, .. } => paths,
+        _ => return,
+    };
+    for p in paths.iter_mut() {
+        let s = p.to_string_lossy();
+        if let Some(resolved) = config::resolve_path_alias(&s, &config::CONFIG.paths) {
+            *p = PathBuf::from(resolved);
+        }
+    }
 }
 
 fn show_update_hint(update_rx: Option<mpsc::Receiver<Option<String>>>) {
