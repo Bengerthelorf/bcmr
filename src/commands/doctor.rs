@@ -166,8 +166,6 @@ fn run_local_checks() -> Vec<Check> {
 }
 
 fn check_config_file() -> Check {
-    // Honor --config / BCMR_CONFIG (set by main.rs) so doctor validates the
-    // file the run will actually load, not always the XDG default.
     let path = std::env::var_os("BCMR_CONFIG")
         .map(PathBuf::from)
         .or_else(|| {

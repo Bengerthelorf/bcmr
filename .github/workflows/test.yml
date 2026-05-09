@@ -408,13 +408,16 @@ jobs:
           fi
 
           # --config <PATH> should be honored — point at a file with valid TOML
-          # and confirm doctor names it back in the report.
+          # and confirm doctor names it back in the report. We assert the
+          # basename only because mktemp on Windows Git Bash returns a Unix-
+          # style path while Rust prints the canonical Windows path.
           tmp=$(mktemp)
           echo '[progress]' > "$tmp"
           echo 'style = "plain"' >> "$tmp"
           out2=$(cargo run --quiet -- --config "$tmp" doctor)
           echo "$out2"
-          echo "$out2" | grep -q "$tmp" || { echo "FAIL: --config path not surfaced"; exit 1; }
+          base=$(basename "$tmp")
+          echo "$out2" | grep -q "$base" || { echo "FAIL: --config basename '$base' not surfaced"; exit 1; }
           rm -f "$tmp"
 
           echo "doctor smoke tests passed"
