@@ -36,7 +36,16 @@ impl RemotePath {
     }
 
     pub fn display(&self) -> String {
-        format!("{}:{}", self.ssh_target(), self.path)
+        let host_display = if self.host.contains(':') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+        let target = match &self.user {
+            Some(user) => format!("{}@{}", user, host_display),
+            None => host_display,
+        };
+        format!("{}:{}", target, self.path)
     }
 
     pub fn join(&self, subpath: &str) -> Self {
@@ -97,34 +106,62 @@ pub fn parse_remote_path(s: &str) -> Option<RemotePath> {
     }
 
     if s.len() >= 2 && s.as_bytes()[0].is_ascii_alphabetic() && s.as_bytes()[1] == b':' {
-        let colon_pos = s.find(':')?;
-        if colon_pos == 1 {
-            return None;
-        }
+        return None;
     }
 
-    let colon_pos = s.find(':')?;
+    let userinfo_split = {
+        let lbrack = s.find('[');
+        let colon = s.find(':');
+        let cap = match (lbrack, colon) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => return None,
+        };
+        s[..cap].find('@')
+    };
+
+    let (user, rest) = if let Some(at_pos) = userinfo_split {
+        let user_part = &s[..at_pos];
+        if user_part.is_empty() || user_part.contains('/') || user_part.contains(' ') {
+            return None;
+        }
+        (Some(user_part.to_string()), &s[at_pos + 1..])
+    } else {
+        (None, s)
+    };
+
+    if let Some(stripped) = rest.strip_prefix('[') {
+        let bracket_close = stripped.find(']')?;
+        let host = &stripped[..bracket_close];
+        if host.is_empty() {
+            return None;
+        }
+        let after = &stripped[bracket_close + 1..];
+        let path_part = after.strip_prefix(':')?;
+        let path = if path_part.is_empty() {
+            ".".to_string()
+        } else {
+            path_part.to_string()
+        };
+        return Some(RemotePath {
+            user,
+            host: host.to_string(),
+            path,
+        });
+    }
+
+    let colon_pos = rest.find(':')?;
     if colon_pos == 0 {
         return None;
     }
 
-    let host_part = &s[..colon_pos];
-    let path_part = &s[colon_pos + 1..];
+    let host_part = &rest[..colon_pos];
+    let path_part = &rest[colon_pos + 1..];
 
-    if host_part.contains('/') || host_part.contains(' ') {
+    if host_part.contains('/') || host_part.contains(' ') || host_part.contains('@') {
         return None;
     }
-
-    let (user, host) = if let Some(at_pos) = host_part.find('@') {
-        let user = &host_part[..at_pos];
-        let host = &host_part[at_pos + 1..];
-        if user.is_empty() || host.is_empty() {
-            return None;
-        }
-        (Some(user.to_string()), host.to_string())
-    } else {
-        (None, host_part.to_string())
-    };
 
     let path = if path_part.is_empty() {
         ".".to_string()
@@ -132,7 +169,11 @@ pub fn parse_remote_path(s: &str) -> Option<RemotePath> {
         path_part.to_string()
     };
 
-    Some(RemotePath { user, host, path })
+    Some(RemotePath {
+        user,
+        host: host_part.to_string(),
+        path,
+    })
 }
 
 #[derive(Debug)]
@@ -201,6 +242,62 @@ mod tests {
     #[test]
     fn test_parse_remote_path_with_slash_in_host() {
         assert!(parse_remote_path("host/name:path").is_none());
+    }
+
+    #[test]
+    fn parse_bracketed_ipv6() {
+        let r = parse_remote_path("[::1]:dst").unwrap();
+        assert_eq!(r.user, None);
+        assert_eq!(r.host, "::1");
+        assert_eq!(r.path, "dst");
+
+        let r = parse_remote_path("me@[::1]:dst").unwrap();
+        assert_eq!(r.user, Some("me".to_string()));
+        assert_eq!(r.host, "::1");
+        assert_eq!(r.path, "dst");
+
+        let r = parse_remote_path("[2001:db8::1]:/abs").unwrap();
+        assert_eq!(r.host, "2001:db8::1");
+        assert_eq!(r.path, "/abs");
+
+        let r = parse_remote_path("[fe80::1%eth0]:foo").unwrap();
+        assert_eq!(r.host, "fe80::1%eth0");
+
+        let r = parse_remote_path("[::1]:").unwrap();
+        assert_eq!(r.path, ".");
+    }
+
+    #[test]
+    fn parse_bracketed_ipv6_rejections() {
+        assert!(parse_remote_path("[]:foo").is_none());
+        assert!(parse_remote_path("[::1]").is_none());
+        assert!(parse_remote_path("@[::1]:foo").is_none());
+    }
+
+    #[test]
+    fn display_brackets_ipv6_host() {
+        let r = RemotePath {
+            user: None,
+            host: "::1".into(),
+            path: "/foo".into(),
+        };
+        assert_eq!(r.display(), "[::1]:/foo");
+
+        let r2 = RemotePath {
+            user: Some("me".into()),
+            host: "fe80::1%eth0".into(),
+            path: "/foo".into(),
+        };
+        assert_eq!(r2.display(), "me@[fe80::1%eth0]:/foo");
+
+        // Round-trip: display output should re-parse to the same value.
+        let parsed = parse_remote_path(&r.display()).unwrap();
+        assert_eq!(parsed.host, r.host);
+        assert_eq!(parsed.path, r.path);
+        let parsed2 = parse_remote_path(&r2.display()).unwrap();
+        assert_eq!(parsed2.user, r2.user);
+        assert_eq!(parsed2.host, r2.host);
+        assert_eq!(parsed2.path, r2.path);
     }
 
     #[test]
