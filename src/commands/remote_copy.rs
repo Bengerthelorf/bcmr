@@ -27,7 +27,7 @@ pub(super) fn transfer_options_from_cli(cli: &Commands) -> remote::TransferOptio
 }
 
 pub fn is_plain_mode(args: &Commands) -> bool {
-    args.is_tui_mode() || CONFIG.progress.style.eq_ignore_ascii_case("plain")
+    args.is_plain_progress() || CONFIG.progress.style.eq_ignore_ascii_case("plain")
 }
 
 pub(super) struct TransferItem {
