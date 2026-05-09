@@ -76,9 +76,9 @@ pub struct CopyMoveArgs {
     #[arg(short = 'e', long)]
     pub exclude: Option<Vec<String>>,
 
-    /// Enable inline TUI mode (classic 3-line display)
-    #[arg(short, long)]
-    pub tui: bool,
+    /// Use plain inline progress (3-line) instead of the fancy TUI box
+    #[arg(long, alias = "tui", short_alias = 't')]
+    pub plain: bool,
 
     /// Run in dry-run mode (no changes)
     #[arg(short = 'n', long)]
@@ -285,9 +285,9 @@ pub enum Commands {
         #[arg(short = 'e', long, value_name = "PATTERN", value_delimiter = ',')]
         exclude: Option<Vec<String>>,
 
-        /// Enable inline TUI mode (classic 3-line display)
-        #[arg(short, long)]
-        tui: bool,
+        /// Use plain inline progress (3-line) instead of the fancy TUI box
+        #[arg(long, alias = "tui", short_alias = 't')]
+        plain: bool,
 
         /// Run in dry-run mode (no changes)
         #[arg(short = 'n', long)]
@@ -351,9 +351,9 @@ impl Commands {
         }
     }
 
-    pub fn is_tui_mode(&self) -> bool {
-        self.copy_move_args().is_some_and(|a| a.tui)
-            || matches!(self, Commands::Remove { tui: true, .. })
+    pub fn is_plain_progress(&self) -> bool {
+        self.copy_move_args().is_some_and(|a| a.plain)
+            || matches!(self, Commands::Remove { plain: true, .. })
     }
 
     pub fn is_dry_run(&self) -> bool {
@@ -574,7 +574,7 @@ mod tests {
             yes: false,
             verbose: false,
             exclude: None,
-            tui: false,
+            plain: false,
             dry_run: false,
             test_mode: None,
             verify: false,
@@ -616,7 +616,7 @@ mod tests {
         assert!(!cmd.is_yes());
         assert!(cmd.is_verbose());
         assert!(cmd.is_dry_run());
-        assert!(!cmd.is_tui_mode());
+        assert!(!cmd.is_plain_progress());
         assert!(cmd.is_verify());
         assert!(cmd.is_resume());
         assert!(cmd.is_strict());
@@ -657,7 +657,7 @@ mod tests {
             verbose: false,
             dir: true,
             exclude: None,
-            tui: false,
+            plain: false,
             dry_run: false,
             test_mode: None,
         };

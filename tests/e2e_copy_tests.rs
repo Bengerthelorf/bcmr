@@ -1024,6 +1024,34 @@ fn e2e_cross_host_copy_refuses_with_clear_error() {
 }
 
 #[test]
+fn e2e_plain_flag_and_legacy_tui_alias_both_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("s.bin");
+    fs::write(&src, b"plain-test").unwrap();
+
+    for (flag, tag) in [("--plain", "long"), ("--tui", "alias"), ("-t", "short")] {
+        let dst = dir.path().join(format!("d_{tag}.bin"));
+        let (ok, _stdout, stderr) =
+            run_bcmr(&["copy", flag, src.to_str().unwrap(), dst.to_str().unwrap()]);
+        assert!(ok, "{flag} should be accepted, stderr: {stderr}");
+        assert!(dst.exists(), "{flag} did not produce output");
+    }
+}
+
+#[test]
+fn e2e_help_advertises_plain_not_tui() {
+    let (_ok, stdout, _stderr) = run_bcmr(&["copy", "--help"]);
+    assert!(
+        stdout.contains("--plain"),
+        "expected --plain in help, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("--tui"),
+        "did not expect --tui in help (kept as hidden alias), got: {stdout}"
+    );
+}
+
+#[test]
 fn e2e_same_host_remote_to_remote_copy_refuses() {
     let (ok, _stdout, stderr) = run_bcmr(&[
         "copy",

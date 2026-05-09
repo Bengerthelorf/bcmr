@@ -184,8 +184,8 @@ pub async fn remove_path(
         return Ok(());
     }
 
-    let is_tui = cli.is_tui_mode();
-    if cli.is_interactive() && !cli.is_force() && !confirm_remove(path, is_dir, is_tui).await? {
+    let plain = cli.is_plain_progress();
+    if cli.is_interactive() && !cli.is_force() && !confirm_remove(path, is_dir, plain).await? {
         return Ok(());
     }
 
@@ -217,7 +217,7 @@ pub async fn remove_path(
 
             if cli.is_interactive()
                 && !cli.is_force()
-                && !confirm_remove(entry_path, ft.is_dir(), is_tui).await?
+                && !confirm_remove(entry_path, ft.is_dir(), plain).await?
             {
                 continue;
             }
