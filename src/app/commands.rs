@@ -361,8 +361,9 @@ pub(crate) async fn handle_remove_command(args: &Commands) -> Result<()> {
     let mut remote_paths: Vec<RemotePath> = Vec::new();
     for p in paths {
         match parse_remote_path(&p.to_string_lossy()) {
-            Some(r) => {
+            Some(mut r) => {
                 r.reject_unsafe()?;
+                r.expand_tilde().await?;
                 remote_paths.push(r);
             }
             None => local_paths.push(p.clone()),

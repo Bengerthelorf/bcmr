@@ -226,10 +226,10 @@ pub async fn handle_remote_copy(
     excludes: &[regex::Regex],
 ) -> Result<()> {
     let dest_str = dest.to_string_lossy();
-    let remote_dest = parse_remote_path(&dest_str);
-    let is_upload = remote_dest.is_some();
+    let remote_dest_initial = parse_remote_path(&dest_str);
+    let is_upload = remote_dest_initial.is_some();
 
-    if let Some(ref rd) = remote_dest {
+    if let Some(ref rd) = remote_dest_initial {
         rd.reject_unsafe()?;
     }
     for src in sources {
@@ -246,6 +246,26 @@ pub async fn handle_remote_copy(
             }
         }
     }
+
+    let expanded_dest_buf: PathBuf = if let Some(mut rd) = remote_dest_initial.clone() {
+        rd.expand_tilde().await?;
+        PathBuf::from(rd.display())
+    } else {
+        dest.to_path_buf()
+    };
+    let mut expanded_sources: Vec<PathBuf> = Vec::with_capacity(sources.len());
+    for src in sources {
+        if let Some(mut rsrc) = parse_remote_path(&src.to_string_lossy()) {
+            rsrc.expand_tilde().await?;
+            expanded_sources.push(PathBuf::from(rsrc.display()));
+        } else {
+            expanded_sources.push(src.clone());
+        }
+    }
+    let sources: &[PathBuf] = &expanded_sources;
+    let dest: &std::path::Path = expanded_dest_buf.as_path();
+    let dest_str = dest.to_string_lossy();
+    let remote_dest = parse_remote_path(&dest_str);
 
     let compression_mode = CONFIG.scp.compression.to_lowercase();
     let compress = match compression_mode.as_str() {
