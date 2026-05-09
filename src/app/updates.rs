@@ -8,7 +8,7 @@ pub(crate) fn background_update_check(
 ) -> Option<mpsc::Receiver<Option<String>>> {
     if matches!(
         command,
-        Commands::Update
+        Commands::Update { .. }
             | Commands::Completions { .. }
             | Commands::CompleteRemote { .. }
             | Commands::Serve { .. }

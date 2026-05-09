@@ -24,27 +24,52 @@ fn version_newer(latest: &str, current: &str) -> bool {
     parse(latest) > parse(current)
 }
 
-pub fn check_for_update() -> Option<String> {
+fn fetch_latest_version() -> Result<String> {
     let releases = self_update::backends::github::ReleaseList::configure()
         .repo_owner("Bengerthelorf")
         .repo_name("bcmr")
-        .build()
-        .ok()?
-        .fetch()
-        .ok()?;
+        .build()?
+        .fetch()?;
+    releases
+        .first()
+        .map(|r| r.version.clone())
+        .ok_or_else(|| anyhow::anyhow!("no releases found"))
+}
 
-    let latest = releases.first()?;
+pub fn check_for_update() -> Option<String> {
+    let latest = fetch_latest_version().ok()?;
     let current = cargo_crate_version!();
-
-    if version_newer(&latest.version, current) {
-        Some(latest.version.clone())
+    if version_newer(&latest, current) {
+        Some(latest)
     } else {
         None
     }
 }
 
-pub fn run() -> Result<()> {
+pub fn run(check_only: bool) -> Result<()> {
     let current = cargo_crate_version!();
+
+    if check_only {
+        let latest = fetch_latest_version()?;
+        let available = version_newer(&latest, current);
+        if crate::config::is_json_mode() {
+            let json = serde_json::json!({
+                "current": current,
+                "latest": latest,
+                "update_available": available,
+            });
+            println!("{}", json);
+        } else {
+            println!("Current version: {}", current);
+            if available {
+                println!("Latest version:  {} (update available)", latest);
+            } else {
+                println!("Latest version:  {} (up to date)", latest);
+            }
+        }
+        return Ok(());
+    }
+
     println!("Current version: {}", current);
     println!("Checking for updates...");
 
