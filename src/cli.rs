@@ -307,6 +307,18 @@ pub enum Commands {
     Status {
         /// Job ID to query (omit to list all jobs)
         job_id: Option<String>,
+
+        /// Remove the named job's log file (use --all to drop every job)
+        #[arg(long)]
+        rm: bool,
+
+        /// With --rm, target every job log
+        #[arg(long, requires = "rm")]
+        all: bool,
+
+        /// Garbage-collect job logs older than the configured retention (7d)
+        #[arg(long, conflicts_with_all = ["rm", "all"])]
+        gc: bool,
     },
 
     /// Check for updates and self-update

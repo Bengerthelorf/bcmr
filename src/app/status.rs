@@ -26,7 +26,60 @@ pub(crate) fn status_detail(latest: &str) -> String {
         .unwrap_or_default()
 }
 
-pub(crate) fn handle_status_command(job_id: &Option<String>) {
+pub(crate) fn handle_status_command(job_id: &Option<String>, rm: bool, all: bool, gc: bool) {
+    if gc {
+        let removed = commands::jobs::cleanup_old_jobs(commands::jobs::DEFAULT_GC_RETENTION_SECS);
+        if is_json_mode() {
+            println!(
+                "{}",
+                serde_json::json!({"action": "gc", "removed": removed})
+            );
+        } else {
+            println!("Removed {} old job log(s).", removed);
+        }
+        return;
+    }
+
+    if rm {
+        if all {
+            let removed = commands::jobs::remove_all_jobs();
+            if is_json_mode() {
+                println!(
+                    "{}",
+                    serde_json::json!({"action": "rm", "scope": "all", "removed": removed})
+                );
+            } else {
+                println!("Removed {} job log(s).", removed);
+            }
+            return;
+        }
+        let Some(id) = job_id else {
+            eprintln!("Error: --rm needs a job id (or pass --all to drop every job)");
+            std::process::exit(2);
+        };
+        match commands::jobs::remove_job(id) {
+            Ok(true) => {
+                if is_json_mode() {
+                    println!(
+                        "{}",
+                        serde_json::json!({"action": "rm", "job_id": id, "removed": true})
+                    );
+                } else {
+                    println!("Removed job '{}'.", id);
+                }
+            }
+            Ok(false) => {
+                eprintln!("Error: job '{}' not found", id);
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("Error: cannot remove '{}': {}", id, e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     match job_id {
         Some(id) => {
             let (state, latest) = match commands::jobs::job_state(id) {

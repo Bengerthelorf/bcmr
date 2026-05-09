@@ -184,11 +184,48 @@ pub fn list_jobs() -> Vec<JobEntry> {
     jobs
 }
 
-pub fn cleanup_old_jobs(max_age_secs: u64) {
+pub fn remove_job(job_id: &str) -> std::io::Result<bool> {
+    remove_job_in(&jobs_dir(), job_id)
+}
+
+pub fn remove_all_jobs() -> usize {
+    remove_all_jobs_in(&jobs_dir())
+}
+
+fn remove_job_in(dir: &std::path::Path, job_id: &str) -> std::io::Result<bool> {
+    let path = dir.join(format!("{}.jsonl", job_id));
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+fn remove_all_jobs_in(dir: &std::path::Path) -> usize {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.ends_with(".jsonl") {
+            continue;
+        }
+        if std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+pub const DEFAULT_GC_RETENTION_SECS: u64 = 7 * 24 * 3600;
+
+pub fn cleanup_old_jobs(max_age_secs: u64) -> usize {
     let dir = jobs_dir();
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
-        Err(_) => return,
+        Err(_) => return 0,
     };
 
     let cutoff = SystemTime::now()
@@ -197,6 +234,7 @@ pub fn cleanup_old_jobs(max_age_secs: u64) {
         .as_secs()
         .saturating_sub(max_age_secs);
 
+    let mut removed = 0usize;
     for entry in entries.flatten() {
         if let Ok(meta) = entry.metadata() {
             let mtime = meta
@@ -206,9 +244,40 @@ pub fn cleanup_old_jobs(max_age_secs: u64) {
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
 
-            if mtime < cutoff {
-                let _ = std::fs::remove_file(entry.path());
+            if mtime < cutoff && std::fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
             }
         }
+    }
+    removed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_remove_job_in_deletes_existing_log() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("abc.jsonl"), "{}").unwrap();
+        assert!(remove_job_in(dir.path(), "abc").unwrap());
+        assert!(!dir.path().join("abc.jsonl").exists());
+    }
+
+    #[test]
+    fn test_remove_job_in_returns_false_for_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!remove_job_in(dir.path(), "nope").unwrap());
+    }
+
+    #[test]
+    fn test_remove_all_jobs_in_drops_only_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.jsonl"), "{}").unwrap();
+        std::fs::write(dir.path().join("b.jsonl"), "{}").unwrap();
+        std::fs::write(dir.path().join("readme.txt"), "keep").unwrap();
+        let removed = remove_all_jobs_in(dir.path());
+        assert_eq!(removed, 2);
+        assert!(dir.path().join("readme.txt").exists());
     }
 }
