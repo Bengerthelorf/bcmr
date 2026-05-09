@@ -12,6 +12,51 @@ use crate::ui::utils::format_bytes;
 use anyhow::{bail, Result};
 use std::sync::Arc;
 
+#[cfg(unix)]
+fn validate_source_kind(src: &std::path::Path) -> Result<()> {
+    use crate::core::remote::parse_remote_path;
+    use std::os::unix::fs::FileTypeExt;
+
+    if parse_remote_path(&src.to_string_lossy()).is_some() {
+        return Ok(());
+    }
+    let md = match src.metadata() {
+        Ok(m) => m,
+        Err(_) => return Ok(()),
+    };
+    let ft = md.file_type();
+    if ft.is_file() || ft.is_dir() {
+        return Ok(());
+    }
+    let kind = if ft.is_fifo() {
+        "FIFO (named pipe)"
+    } else if ft.is_socket() {
+        "socket"
+    } else if ft.is_block_device() {
+        "block device"
+    } else if ft.is_char_device() {
+        "character device"
+    } else {
+        "non-regular file"
+    };
+    let hint = if src.to_str() == Some("/dev/null") {
+        "\nTo clear a remote file, use: : > /tmp/empty && bcmr copy /tmp/empty <dest>"
+    } else {
+        ""
+    };
+    bail!(
+        "Source '{}' is a {}; bcmr copy supports only regular files and directories.{}",
+        src.display(),
+        kind,
+        hint
+    );
+}
+
+#[cfg(not(unix))]
+fn validate_source_kind(_src: &std::path::Path) -> Result<()> {
+    Ok(())
+}
+
 pub(crate) async fn handle_copy_command(args: &Commands) -> Result<()> {
     use crate::core::remote::parse_remote_path;
 
@@ -23,6 +68,10 @@ pub(crate) async fn handle_copy_command(args: &Commands) -> Result<()> {
     }
     if let Some(mode) = args.get_sparse_mode() {
         validate_mode(&mode, "sparse")?;
+    }
+
+    for src in sources {
+        validate_source_kind(src)?;
     }
 
     let dest_str = dest.to_string_lossy();
@@ -182,6 +231,10 @@ pub(crate) async fn handle_move_command(args: &Commands) -> Result<()> {
 
     let excludes = args.compile_excludes()?;
     let (sources, dest) = args.get_sources_and_dest().map_err(anyhow::Error::msg)?;
+
+    for src in sources {
+        validate_source_kind(src)?;
+    }
 
     let dest_str = dest.to_string_lossy();
     let remote_dest = parse_remote_path(&dest_str);
