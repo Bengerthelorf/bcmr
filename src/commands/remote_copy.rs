@@ -212,7 +212,7 @@ pub(super) fn resolve_upload_remote(
     rdest: &RemotePath,
     multi_source: bool,
 ) -> RemotePath {
-    if multi_source || rdest.path == "." {
+    if multi_source || rdest.path == "." || rdest.path.ends_with('/') {
         rdest.join(&src.file_name().unwrap_or_default().to_string_lossy())
     } else {
         rdest.clone()
