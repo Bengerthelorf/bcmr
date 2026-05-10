@@ -184,11 +184,68 @@ pub fn list_jobs() -> Vec<JobEntry> {
     jobs
 }
 
-pub fn cleanup_old_jobs(max_age_secs: u64) {
+pub fn remove_job(job_id: &str) -> std::io::Result<bool> {
+    remove_job_in(&jobs_dir(), job_id)
+}
+
+pub fn remove_all_jobs() -> usize {
+    remove_all_jobs_in(&jobs_dir())
+}
+
+fn remove_job_in(dir: &std::path::Path, job_id: &str) -> std::io::Result<bool> {
+    let path = dir.join(format!("{}.jsonl", job_id));
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+fn remove_all_jobs_in(dir: &std::path::Path) -> usize {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        // Unlinking mid-write loses data the writer hadn't fsync'd yet.
+        if job_is_active(&path) {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+fn job_is_active(log_path: &std::path::Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(log_path) else {
+        return false;
+    };
+    let Some(first) = content.lines().next() else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(first) else {
+        return false;
+    };
+    v.get("pid")
+        .and_then(|p| p.as_u64())
+        .map(|p| is_pid_alive(p as u32))
+        .unwrap_or(false)
+}
+
+pub const DEFAULT_GC_RETENTION_SECS: u64 = 7 * 24 * 3600;
+
+pub fn cleanup_old_jobs(max_age_secs: u64) -> usize {
     let dir = jobs_dir();
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
-        Err(_) => return,
+        Err(_) => return 0,
     };
 
     let cutoff = SystemTime::now()
@@ -197,6 +254,7 @@ pub fn cleanup_old_jobs(max_age_secs: u64) {
         .as_secs()
         .saturating_sub(max_age_secs);
 
+    let mut removed = 0usize;
     for entry in entries.flatten() {
         if let Ok(meta) = entry.metadata() {
             let mtime = meta
@@ -206,9 +264,58 @@ pub fn cleanup_old_jobs(max_age_secs: u64) {
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
 
-            if mtime < cutoff {
-                let _ = std::fs::remove_file(entry.path());
+            if mtime < cutoff && std::fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
             }
         }
+    }
+    removed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_remove_job_in_deletes_existing_log() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("abc.jsonl"), "{}").unwrap();
+        assert!(remove_job_in(dir.path(), "abc").unwrap());
+        assert!(!dir.path().join("abc.jsonl").exists());
+    }
+
+    #[test]
+    fn test_remove_job_in_returns_false_for_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!remove_job_in(dir.path(), "nope").unwrap());
+    }
+
+    #[test]
+    fn test_remove_all_jobs_in_drops_only_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.jsonl"), "{}").unwrap();
+        std::fs::write(dir.path().join("b.jsonl"), "{}").unwrap();
+        std::fs::write(dir.path().join("readme.txt"), "keep").unwrap();
+        let removed = remove_all_jobs_in(dir.path());
+        assert_eq!(removed, 2);
+        assert!(dir.path().join("readme.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_remove_all_jobs_in_skips_active_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let active = dir.path().join("active.jsonl");
+        let stale = dir.path().join("stale.jsonl");
+        std::fs::write(
+            &active,
+            format!("{{\"pid\":{},\"job_id\":\"x\"}}\n", std::process::id()),
+        )
+        .unwrap();
+        std::fs::write(&stale, "{\"pid\":999999,\"job_id\":\"y\"}\n").unwrap();
+        let removed = remove_all_jobs_in(dir.path());
+        assert_eq!(removed, 1);
+        assert!(active.exists(), "active log must survive");
+        assert!(!stale.exists(), "stale log must be removed");
     }
 }

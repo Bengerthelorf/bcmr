@@ -64,7 +64,7 @@ fn maybe_detach(cli: &cli::Cli) -> Result<bool> {
 
     println!("{}", serde_json::to_string(&job_info)?);
 
-    commands::jobs::cleanup_old_jobs(7 * 24 * 3600);
+    let _ = commands::jobs::cleanup_old_jobs(commands::jobs::DEFAULT_GC_RETENTION_SECS);
 
     Ok(true)
 }
@@ -142,8 +142,13 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Status { job_id } => {
-            handle_status_command(job_id);
+        Commands::Status {
+            job_id,
+            rm,
+            all,
+            gc,
+        } => {
+            handle_status_command(job_id, *rm, *all, *gc);
         }
         Commands::Init { .. } => handle_init_command(&cli.command)?,
         Commands::Update { check } => {
