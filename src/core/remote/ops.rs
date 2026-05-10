@@ -136,6 +136,39 @@ pub async fn remote_list_files(remote: &RemotePath) -> Result<Vec<(String, u64, 
     Ok(entries)
 }
 
+pub async fn remote_list_shallow(
+    remote: &RemotePath,
+) -> Result<Vec<(String, u64, bool)>, BcmrError> {
+    let escaped = shell_escape(&remote.path);
+    let cmd = format!(
+        "find '{}' -maxdepth 1 -mindepth 1 -printf '%f\\0%s\\0%y\\0' 2>/dev/null; true",
+        escaped
+    );
+    let output = ssh_command(&remote.ssh_target()).arg(cmd).output().await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(BcmrError::InvalidInput(ssh_error_message(
+            &stderr,
+            &format!("Cannot list remote directory '{}'", remote),
+        )));
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let fields: Vec<&str> = raw.split('\0').collect();
+    let mut entries = Vec::new();
+    let mut i = 0;
+    while i + 3 <= fields.len() {
+        let name = fields[i].to_string();
+        let size: u64 = fields[i + 1].parse().unwrap_or(0);
+        let is_dir = fields[i + 2] == "d";
+        i += 3;
+        if name.is_empty() {
+            continue;
+        }
+        entries.push((name, size, is_dir));
+    }
+    Ok(entries)
+}
+
 pub async fn remote_file_hash(
     remote: &RemotePath,
     limit: Option<u64>,

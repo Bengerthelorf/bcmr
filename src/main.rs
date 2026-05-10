@@ -182,6 +182,10 @@ async fn main() -> Result<()> {
         Commands::Doctor { hosts } => {
             commands::doctor::run(hosts, is_json_mode()).await?;
         }
+        Commands::Ls { path } => commands::inspect::ls(path).await?,
+        Commands::Stat { path } => commands::inspect::stat(path).await?,
+        Commands::Du { path } => commands::inspect::du(path).await?,
+        Commands::Hash { path } => commands::inspect::hash(path).await?,
         Commands::CompleteRemote { partial } => {
             for entry in crate::core::remote::complete_remote_path(partial).await {
                 println!("{}", entry);

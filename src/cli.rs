@@ -360,6 +360,30 @@ pub enum Commands {
         hosts: Vec<String>,
     },
 
+    /// List files under a remote path (host:path)
+    Ls {
+        /// Remote path (host:path or @bookmark)
+        path: PathBuf,
+    },
+
+    /// Show type and size of a remote file or directory
+    Stat {
+        /// Remote path (host:path or @bookmark)
+        path: PathBuf,
+    },
+
+    /// Show recursive size of a remote path (du -sh equivalent)
+    Du {
+        /// Remote path (host:path or @bookmark)
+        path: PathBuf,
+    },
+
+    /// Compute the BLAKE3 hash of a remote file
+    Hash {
+        /// Remote path (host:path or @bookmark)
+        path: PathBuf,
+    },
+
     #[command(hide = true)]
     Serve {
         /// Restrict all paths to this directory (defaults to $HOME)
