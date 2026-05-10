@@ -62,6 +62,7 @@ pub struct ProgressData {
     pub workers: Vec<WorkerState>,
     pub parallel_total: usize,
     pub verify_mode: bool,
+    pub reflink_count: u64,
 }
 
 impl ProgressData {
@@ -88,6 +89,7 @@ impl ProgressData {
             workers: Vec::new(),
             parallel_total: 0,
             verify_mode: false,
+            reflink_count: 0,
         }
     }
 
@@ -197,6 +199,9 @@ impl ProgressData {
                 format_bytes(self.skipped_bytes as f64)
             ));
         }
+        if self.reflink_count > 0 {
+            line.push_str(&format!(" | reflinked {}", self.reflink_count));
+        }
         if self.verify_mode {
             line.push_str(" | verified");
         }
@@ -301,6 +306,17 @@ mod tests {
             line.contains("30"),
             "expected skipped MiB count, got: {line}"
         );
+    }
+
+    #[test]
+    fn test_done_summary_appends_reflinked_when_count_nonzero() {
+        let mut pd = ProgressData::new(1024);
+        pd.current_bytes = 1024;
+        let plain = pd.done_summary_line();
+        assert!(!plain.contains("reflinked"), "got: {plain}");
+        pd.reflink_count = 3;
+        let with = pd.done_summary_line();
+        assert!(with.contains("reflinked 3"), "got: {with}");
     }
 
     #[test]

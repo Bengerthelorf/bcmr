@@ -353,6 +353,7 @@ pub async fn execute_plan<F>(
     cli: &Commands,
     progress_callback: F,
     on_new_file: impl Fn(&str, u64) + Send + Sync + 'static,
+    on_reflink: impl Fn() + Send + Sync + 'static,
 ) -> std::result::Result<(), BcmrError>
 where
     F: Fn(u64) + Send + Sync + Clone + 'static,
@@ -361,6 +362,7 @@ where
     let callback = ProgressCallback {
         callback: progress_callback,
         on_new_file: Arc::new(on_new_file),
+        on_reflink: Arc::new(on_reflink),
     };
 
     for entry in &plan.entries {
@@ -425,10 +427,12 @@ where
 }
 
 type OnNewFileFn = Arc<dyn Fn(&str, u64) + Send + Sync>;
+type OnReflinkFn = Arc<dyn Fn() + Send + Sync>;
 
 pub struct ProgressCallback<F> {
     pub(super) callback: F,
     pub(super) on_new_file: OnNewFileFn,
+    pub(super) on_reflink: OnReflinkFn,
 }
 
 impl<F: Clone> Clone for ProgressCallback<F> {
@@ -436,6 +440,7 @@ impl<F: Clone> Clone for ProgressCallback<F> {
         Self {
             callback: self.callback.clone(),
             on_new_file: Arc::clone(&self.on_new_file),
+            on_reflink: Arc::clone(&self.on_reflink),
         }
     }
 }
@@ -447,6 +452,7 @@ pub async fn copy_path<F>(
     excludes: &[regex::Regex],
     progress_callback: F,
     on_new_file: impl Fn(&str, u64) + Send + Sync + 'static,
+    on_reflink: impl Fn() + Send + Sync + 'static,
 ) -> std::result::Result<(), BcmrError>
 where
     F: Fn(u64) + Send + Sync + Clone + 'static,
@@ -455,6 +461,7 @@ where
     let callback = ProgressCallback {
         callback: progress_callback,
         on_new_file: Arc::new(on_new_file),
+        on_reflink: Arc::new(on_reflink),
     };
 
     if traversal::is_excluded(src, excludes) {

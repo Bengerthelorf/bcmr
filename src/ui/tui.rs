@@ -501,6 +501,10 @@ impl ProgressRenderer for TuiProgress {
         self.data.verify_mode = on;
     }
 
+    fn inc_reflink(&mut self) {
+        self.data.reflink_count += 1;
+    }
+
     fn inc_items_processed(&mut self) {
         self.data.items_processed += 1;
         let _ = self.redraw();

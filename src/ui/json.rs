@@ -84,6 +84,8 @@ struct ResultLine<'a> {
     avg_speed_bps: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     bytes_skipped: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reflink_count: Option<u64>,
     #[serde(skip_serializing_if = "core::ops::Not::not")]
     verified: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -230,6 +232,7 @@ impl ProgressRenderer for JsonProgress {
             duration_secs: elapsed.as_secs_f64(),
             avg_speed_bps: avg_bps,
             bytes_skipped: (self.data.skipped_bytes > 0).then_some(self.data.skipped_bytes),
+            reflink_count: (self.data.reflink_count > 0).then_some(self.data.reflink_count),
             verified: self.data.verify_mode,
             error: None,
         };
@@ -252,6 +255,7 @@ impl ProgressRenderer for JsonProgress {
             duration_secs: elapsed.as_secs_f64(),
             avg_speed_bps: None,
             bytes_skipped: (self.data.skipped_bytes > 0).then_some(self.data.skipped_bytes),
+            reflink_count: (self.data.reflink_count > 0).then_some(self.data.reflink_count),
             verified: self.data.verify_mode,
             error: Some(msg),
         };
@@ -261,5 +265,9 @@ impl ProgressRenderer for JsonProgress {
 
     fn set_verify_mode(&mut self, on: bool) {
         self.data.verify_mode = on;
+    }
+
+    fn inc_reflink(&mut self) {
+        self.data.reflink_count += 1;
     }
 }

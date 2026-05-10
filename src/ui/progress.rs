@@ -29,6 +29,7 @@ pub trait ProgressRenderer: Send {
     fn finish_worker(&mut self, _slot: usize) {}
 
     fn set_verify_mode(&mut self, _on: bool) {}
+    fn inc_reflink(&mut self) {}
 
     fn tick(&mut self) {}
 }
@@ -66,6 +67,10 @@ impl ProgressRenderer for PlainTextProgress {
 
     fn set_verify_mode(&mut self, on: bool) {
         self.data.verify_mode = on;
+    }
+
+    fn inc_reflink(&mut self) {
+        self.data.reflink_count += 1;
     }
 }
 
