@@ -200,6 +200,39 @@ jobs:
           test -s /tmp/bcmr-fanout/a.txt || { echo "FAIL: a.txt should still copy"; exit 1; }
           test -s /tmp/bcmr-fanout/b.txt || { echo "FAIL: b.txt should still copy"; exit 1; }
 
+          # Single positional with no --to and no dest must error, not silently no-op.
+          if cargo run --quiet -- copy --plain /tmp/bcmr-fanout/src.txt 2>/dev/null; then
+            echo "FAIL: copy with single positional and no --to should error"; exit 1;
+          fi
+
+          # --quiet suppresses the per-target progress header on stderr.
+          rm -f /tmp/bcmr-fanout/{a,b}.txt
+          q=$(cargo run --quiet -- copy --quiet /tmp/bcmr-fanout/src.txt \
+                --to /tmp/bcmr-fanout/a.txt --to /tmp/bcmr-fanout/b.txt 2>&1 1>/dev/null)
+          if echo "$q" | grep -q "→ copying to"; then
+            echo "FAIL: --quiet should suppress per-target header"; exit 1;
+          fi
+
+          # move --to fans out and removes sources only when all targets succeed.
+          echo "move-content" > /tmp/bcmr-fanout/mv-src.txt
+          rm -f /tmp/bcmr-fanout/m{1,2}.txt
+          cargo run --quiet -- move --plain /tmp/bcmr-fanout/mv-src.txt \
+            --to /tmp/bcmr-fanout/m1.txt --to /tmp/bcmr-fanout/m2.txt
+          test -s /tmp/bcmr-fanout/m1.txt && test -s /tmp/bcmr-fanout/m2.txt \
+            || { echo "FAIL: move fan-out targets missing"; exit 1; }
+          test ! -e /tmp/bcmr-fanout/mv-src.txt \
+            || { echo "FAIL: move source should be removed after fan-out"; exit 1; }
+
+          # move --to with one failing target preserves the source.
+          echo "preserve-content" > /tmp/bcmr-fanout/mv2-src.txt
+          if cargo run --quiet -- move --plain /tmp/bcmr-fanout/mv2-src.txt \
+              --to /tmp/bcmr-fanout/keep1.txt \
+              --to /nonexistent/dir/x.txt 2>/dev/null; then
+            echo "FAIL: move fan-out should fail when a target fails"; exit 1;
+          fi
+          test -s /tmp/bcmr-fanout/mv2-src.txt \
+            || { echo "FAIL: move source must be preserved when fan-out fails"; exit 1; }
+
           rm -rf /tmp/bcmr-fanout
           echo "Multi-dest fan-out tests passed"
 
