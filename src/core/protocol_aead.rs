@@ -214,6 +214,37 @@ mod tests {
     }
 
     #[test]
+    fn counter_overflow_on_encrypt_returns_crypto_failure() {
+        let key = test_key();
+        let mut send = u64::MAX;
+        let err = encrypt_message(
+            &Message::OpenDirectChannel,
+            &key,
+            Direction::ClientToServer,
+            &mut send,
+        )
+        .unwrap_err();
+        assert!(matches!(err, BcmrError::CryptoFailure(_)));
+    }
+
+    #[test]
+    fn counter_overflow_on_decrypt_returns_crypto_failure() {
+        // encrypt_message refuses nonce=MAX, so seal with ring directly to
+        // reach the decrypt-side overflow guard.
+        let key = test_key();
+        let plaintext = encode_message(&Message::OpenDirectChannel);
+        let mut in_out = plaintext;
+        let nonce = make_nonce(Direction::ClientToServer, u64::MAX);
+        key.seal_in_place_append_tag(nonce, ring::aead::Aad::empty(), &mut in_out)
+            .unwrap();
+
+        let mut recv = u64::MAX;
+        let err = decrypt_message(&mut in_out, &key, Direction::ClientToServer, &mut recv)
+            .unwrap_err();
+        assert!(matches!(err, BcmrError::CryptoFailure(_)));
+    }
+
+    #[test]
     fn counter_desync_fails() {
         let key = test_key();
         let mut send = 0u64;

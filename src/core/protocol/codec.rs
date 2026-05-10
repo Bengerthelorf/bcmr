@@ -6,6 +6,9 @@ use super::{
     TYPE_RESUME, TYPE_RESUME_RESPONSE, TYPE_STAT, TYPE_STAT_RESPONSE, TYPE_TRUNCATE, TYPE_WELCOME,
 };
 
+// Caps Vec preallocation on peer-supplied u32 counts; prevents OOM DoS.
+const MAX_DECODE_COUNT: usize = 1_048_576;
+
 fn write_u8(buf: &mut Vec<u8>, v: u8) {
     buf.push(v);
 }
@@ -379,6 +382,9 @@ pub fn decode_message(data: &[u8]) -> Option<Message> {
         TYPE_HAVE_BLOCKS => {
             let block_size = p.read_u32_le()?;
             let count = p.read_u32_le()? as usize;
+            if count > MAX_DECODE_COUNT {
+                return None;
+            }
             let mut hashes = Vec::with_capacity(count);
             for _ in 0..count {
                 let mut h = [0u8; 32];
@@ -402,6 +408,9 @@ pub fn decode_message(data: &[u8]) -> Option<Message> {
         },
         TYPE_LIST_RESPONSE => {
             let count = p.read_u32_le()? as usize;
+            if count > MAX_DECODE_COUNT {
+                return None;
+            }
             let mut entries = Vec::with_capacity(count);
             for _ in 0..count {
                 entries.push(p.read_list_entry()?);
@@ -441,4 +450,33 @@ pub fn decode_message(data: &[u8]) -> Option<Message> {
     };
 
     Some(msg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame_with_payload(payload: Vec<u8>) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(4 + payload.len());
+        frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&payload);
+        frame
+    }
+
+    #[test]
+    fn decode_rejects_have_blocks_count_above_cap() {
+        let mut payload = vec![TYPE_HAVE_BLOCKS];
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.extend_from_slice(&u32::MAX.to_le_bytes());
+        let frame = frame_with_payload(payload);
+        assert!(decode_message(&frame).is_none());
+    }
+
+    #[test]
+    fn decode_rejects_list_response_count_above_cap() {
+        let mut payload = vec![TYPE_LIST_RESPONSE];
+        payload.extend_from_slice(&u32::MAX.to_le_bytes());
+        let frame = frame_with_payload(payload);
+        assert!(decode_message(&frame).is_none());
+    }
 }

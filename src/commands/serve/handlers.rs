@@ -8,6 +8,7 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
 use super::session::CHUNK_SIZE;
+use super::write_open;
 
 pub(super) async fn handle_stat(path: &str) -> Result<Message> {
     let meta = fs::metadata(path).await?;
@@ -318,14 +319,9 @@ where
     ensure_parent_dir(path).await?;
 
     let mut file = if offset == 0 {
-        fs::File::create(path).await?
+        write_open(path, true).await?
     } else {
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)
-            .await?;
+        let mut f = write_open(path, false).await?;
         f.seek(std::io::SeekFrom::Start(offset)).await?;
         f
     };
@@ -535,12 +531,7 @@ where
     use tokio::io::{AsyncSeekExt, AsyncWriteExt as _};
 
     ensure_parent_dir(path).await?;
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .await?;
+    let mut file = write_open(path, false).await?;
     file.seek(std::io::SeekFrom::Start(offset)).await?;
 
     let mut written: u64 = 0;
@@ -648,12 +639,7 @@ async fn ensure_parent_dir(path: &str) -> Result<()> {
 
 pub(super) async fn handle_truncate(path: &str, size: u64) -> Result<Message> {
     ensure_parent_dir(path).await?;
-    let f = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)
-        .await?;
+    let f = write_open(path, true).await?;
     f.set_len(size).await?;
     Ok(Message::Ok { hash: None })
 }
