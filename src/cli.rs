@@ -319,6 +319,10 @@ pub enum Commands {
         /// Garbage-collect job logs older than the configured retention (7d)
         #[arg(long, conflicts_with_all = ["rm", "all"])]
         gc: bool,
+
+        /// Follow a running job's NDJSON log until its terminal result
+        #[arg(long, requires = "job_id", conflicts_with_all = ["rm", "all", "gc"])]
+        watch: bool,
     },
 
     /// Check for updates and self-update

@@ -420,6 +420,23 @@ jobs:
           echo "status: $status"
           echo "$status" | grep -q '"type":"result"' || { echo "FAIL: status did not return result"; exit 1; }
 
+          # bcmr status <id> --watch should replay the existing log and exit
+          # at the result event. The log is already terminal here, so --watch
+          # returns immediately.
+          watch_pretty=$(cargo run --quiet -- status "$job_id" --watch)
+          echo "$watch_pretty"
+          echo "$watch_pretty" | grep -q "Done:" || { echo "FAIL: --watch missing terminal Done line"; exit 1; }
+          watch_json=$(cargo run --quiet -- --json status "$job_id" --watch)
+          echo "$watch_json" | grep -q '"type":"result"' || { echo "FAIL: --watch --json missing result event"; exit 1; }
+
+          # Conflict: --watch needs a job_id, can't pair with --rm/--gc.
+          if cargo run --quiet -- status --watch 2>/dev/null; then
+            echo "FAIL: --watch without job_id should be rejected"; exit 1;
+          fi
+          if cargo run --quiet -- status "$job_id" --watch --rm 2>/dev/null; then
+            echo "FAIL: --watch + --rm should be rejected"; exit 1;
+          fi
+
           # bcmr status --rm <id> should drop just that job's log.
           rm_out=$(cargo run --quiet -- --json status "$job_id" --rm)
           echo "rm: $rm_out"
