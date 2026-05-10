@@ -107,10 +107,48 @@ fn check_basename_collisions(sources: &[std::path::PathBuf], force: bool) -> Res
 }
 
 pub(crate) async fn handle_copy_command(args: &Commands) -> Result<()> {
+    let to = args
+        .copy_move_args()
+        .map(|a| a.to.as_slice())
+        .unwrap_or(&[]);
+    if to.is_empty() {
+        return handle_copy_one(args, None).await;
+    }
+
+    let mut failures = 0usize;
+    for dest in to {
+        if !is_json_mode() {
+            eprintln!("→ copying to {}", dest.display());
+        }
+        if let Err(e) = handle_copy_one(args, Some(dest)).await {
+            failures += 1;
+            eprintln!("Error copying to {}: {}", dest.display(), e);
+        }
+    }
+    if failures > 0 {
+        bail!("{} of {} fan-out targets failed", failures, to.len());
+    }
+    Ok(())
+}
+
+async fn handle_copy_one(args: &Commands, dest_override: Option<&std::path::Path>) -> Result<()> {
     use crate::core::remote::parse_remote_path;
 
     let excludes = args.compile_excludes()?;
-    let (sources, dest) = args.get_sources_and_dest().map_err(anyhow::Error::msg)?;
+    let (sources, dest_buf): (&[std::path::PathBuf], std::path::PathBuf) = match dest_override {
+        Some(d) => {
+            let s = args
+                .copy_move_args()
+                .map(|a| a.paths.as_slice())
+                .unwrap_or(&[]);
+            (s, d.to_path_buf())
+        }
+        None => {
+            let (s, d) = args.get_sources_and_dest().map_err(anyhow::Error::msg)?;
+            (s, d.clone())
+        }
+    };
+    let dest: &std::path::Path = dest_buf.as_path();
 
     if let Some(mode) = args.get_reflink_mode() {
         validate_mode(&mode, "reflink")?;

@@ -170,6 +170,38 @@ jobs:
 
           echo "Copy tests passed"
 
+      - name: Test multi-destination fan-out (--to)
+        shell: bash
+        run: |
+          mkdir -p /tmp/bcmr-fanout
+          echo "fanout-content" > /tmp/bcmr-fanout/src.txt
+          rm -f /tmp/bcmr-fanout/a.txt /tmp/bcmr-fanout/b.txt /tmp/bcmr-fanout/c.txt
+
+          # All three dests get the file.
+          cargo run --quiet -- copy --plain /tmp/bcmr-fanout/src.txt \
+            --to /tmp/bcmr-fanout/a.txt \
+            --to /tmp/bcmr-fanout/b.txt \
+            --to /tmp/bcmr-fanout/c.txt
+          for d in a b c; do
+            test -s "/tmp/bcmr-fanout/$d.txt" || { echo "FAIL: /tmp/bcmr-fanout/$d.txt missing"; exit 1; }
+            diff /tmp/bcmr-fanout/src.txt /tmp/bcmr-fanout/$d.txt
+          done
+
+          # One dest fails, others succeed; exit code reflects failures.
+          rm -f /tmp/bcmr-fanout/{a,b}.txt
+          if cargo run --quiet -- copy --plain /tmp/bcmr-fanout/src.txt \
+              --to /tmp/bcmr-fanout/a.txt \
+              --to /nonexistent/dir/x.txt \
+              --to /tmp/bcmr-fanout/b.txt 2>/dev/null; then
+            echo "FAIL: expected non-zero when one dest fails"
+            exit 1
+          fi
+          test -s /tmp/bcmr-fanout/a.txt || { echo "FAIL: a.txt should still copy"; exit 1; }
+          test -s /tmp/bcmr-fanout/b.txt || { echo "FAIL: b.txt should still copy"; exit 1; }
+
+          rm -rf /tmp/bcmr-fanout
+          echo "Multi-dest fan-out tests passed"
+
       - name: Test copy with verify
         shell: bash
         run: |
