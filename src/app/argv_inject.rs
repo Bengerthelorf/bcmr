@@ -4,25 +4,24 @@ use crate::core::remote::parse_remote_path;
 const SUBCOMMANDS_THAT_TAKE_DEFAULTS: &[&str] = &["copy", "move", "check", "remove"];
 
 pub fn inject_defaults(argv: Vec<String>, config: &Config) -> Vec<String> {
+    let profile_name = profile_from_argv_or_env(&argv);
+    let argv = strip_profile_flag(argv);
+
     let Some(sub_idx) = find_subcommand(&argv) else {
         return argv;
     };
 
-    let profile_name = profile_from_argv_or_env(&argv);
     let profile_args: Vec<String> = profile_name
         .as_deref()
         .and_then(|n| config.profile.get(n))
         .map(|p| p.default_args.clone())
         .unwrap_or_default();
 
-    let host_args: Vec<String> = first_matching_host_args(&argv[sub_idx..], config);
+    let host_args: Vec<String> = first_matching_host_args(&argv[sub_idx + 1..], config);
 
     if profile_args.is_empty() && host_args.is_empty() {
-        return strip_profile_flag(argv);
+        return argv;
     }
-
-    let argv = strip_profile_flag(argv);
-    let sub_idx = find_subcommand(&argv).expect("subcommand must still be present");
 
     let mut out = Vec::with_capacity(argv.len() + profile_args.len() + host_args.len());
     out.extend(argv[..=sub_idx].iter().cloned());
@@ -74,7 +73,15 @@ fn first_matching_host_args(after_sub: &[String], config: &Config) -> Vec<String
         return Vec::new();
     }
     for token in after_sub {
-        let Some(rp) = parse_remote_path(token) else {
+        let candidate: &str =
+            if let Some(eq) = token.strip_prefix("--").and_then(|s| s.split_once('=')) {
+                eq.1
+            } else if token.starts_with('-') {
+                continue;
+            } else {
+                token
+            };
+        let Some(rp) = parse_remote_path(candidate) else {
             continue;
         };
         if let Some(defaults) = config.host.get(&rp.host) {
@@ -180,5 +187,37 @@ mod tests {
         let cfg = cfg_with(&[("lab", &["-V"])], &[]);
         let argv = s(&["bcmr", "doctor", "lab"]);
         assert_eq!(inject_defaults(argv.clone(), &cfg), argv);
+    }
+
+    #[test]
+    fn profile_stripped_on_non_defaulting_subcommand() {
+        let cfg = cfg_with(&[], &[("work", &["-V"])]);
+        let argv = s(&["bcmr", "--profile", "work", "doctor"]);
+        let out = inject_defaults(argv, &cfg);
+        assert_eq!(out, s(&["bcmr", "doctor"]));
+    }
+
+    #[test]
+    fn profile_value_as_subcommand_no_panic() {
+        let cfg = cfg_with(&[], &[("copy", &["-V"])]);
+        let argv = s(&["bcmr", "--profile", "copy", "x", "dst"]);
+        let out = inject_defaults(argv, &cfg);
+        assert_eq!(out, s(&["bcmr", "x", "dst"]));
+    }
+
+    #[test]
+    fn host_default_via_to_equals_form() {
+        let cfg = cfg_with(&[("lab", &["-p"])], &[]);
+        let argv = s(&["bcmr", "copy", "src", "--to=lab:dst/"]);
+        let out = inject_defaults(argv, &cfg);
+        assert_eq!(out, s(&["bcmr", "copy", "-p", "src", "--to=lab:dst/"]));
+    }
+
+    #[test]
+    fn flag_name_not_treated_as_host() {
+        let cfg = cfg_with(&[("--to", &["BUG"])], &[]);
+        let argv = s(&["bcmr", "copy", "src", "--to=other:dst"]);
+        let out = inject_defaults(argv, &cfg);
+        assert_eq!(out, s(&["bcmr", "copy", "src", "--to=other:dst"]));
     }
 }
