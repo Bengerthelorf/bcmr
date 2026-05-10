@@ -94,11 +94,13 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let cli = cli::parse_args();
+    let mut cli = cli::parse_args();
 
     if let Some(ref path) = cli.config {
         std::env::set_var("BCMR_CONFIG", path);
     }
+
+    expand_path_bookmarks(&mut cli.command)?;
 
     if maybe_detach(&cli)? {
         return Ok(());
@@ -214,6 +216,88 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn expand_path_bookmarks(cmd: &mut Commands) -> Result<()> {
+    use std::path::PathBuf;
+    let paths = match cmd {
+        Commands::Copy { args, .. } | Commands::Move { args, .. } => &mut args.paths,
+        Commands::Check { paths, .. } => paths,
+        Commands::Remove { paths, .. } => paths,
+        _ => return Ok(()),
+    };
+    let table = &config::CONFIG.paths;
+    for p in paths.iter_mut() {
+        let s = p.to_string_lossy();
+        let Some((name, _suffix)) = config::parse_alias_token(&s) else {
+            continue;
+        };
+        if !config::is_valid_alias_name(name) {
+            anyhow::bail!(
+                "invalid alias name '@{name}'; alias names must match [A-Za-z_][A-Za-z0-9_-]*. \
+                 To copy a literal file whose name starts with '@', use './{}'",
+                &s
+            );
+        }
+        match config::resolve_path_alias(&s, table) {
+            Some(resolved) => *p = PathBuf::from(resolved),
+            None => {
+                let suggestion = nearest_alias(name, table.keys());
+                let known: Vec<&str> = table.keys().map(String::as_str).collect();
+                let mut msg = format!("unknown path alias '@{name}'");
+                if let Some(near) = suggestion {
+                    msg.push_str(&format!(" — did you mean '@{near}'?"));
+                }
+                if known.is_empty() {
+                    msg.push_str(
+                        "\nNo aliases configured. Add a [paths] table to ~/.config/bcmr/config.toml.",
+                    );
+                } else {
+                    let mut sorted = known;
+                    sorted.sort_unstable();
+                    msg.push_str(&format!("\nKnown aliases: {}", sorted.join(", ")));
+                }
+                msg.push_str(&format!(
+                    "\nTo refer to a literal file named '@{name}', use './{}'",
+                    &s
+                ));
+                anyhow::bail!("{msg}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn nearest_alias<'a>(
+    target: &str,
+    candidates: impl Iterator<Item = &'a String>,
+) -> Option<&'a str> {
+    candidates
+        .map(|c| (levenshtein(target, c), c.as_str()))
+        .filter(|(d, c)| *d <= (c.len() / 2 + 1).max(2))
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, c)| c)
+}
+
+fn levenshtein(a: &str, b: &str) -> usize {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0usize; b.len() + 1];
+    for (i, &ac) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, &bc) in b.iter().enumerate() {
+            let cost = if ac == bc { 0 } else { 1 };
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
 }
 
 fn show_update_hint(update_rx: Option<mpsc::Receiver<Option<String>>>) {

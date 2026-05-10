@@ -133,6 +133,32 @@ BCMR checks these paths in order:
    - **macOS:** `~/Library/Application Support/com.bcmr.bcmr/`
    - **Windows:** `%APPDATA%\bcmr\bcmr\`
 
+## Path Bookmarks
+
+Long, repeated remote destinations get tedious. The `[paths]` table maps short `@aliases` to full `host:path` strings; bcmr substitutes them at startup so every downstream code path sees the resolved destination.
+
+```toml
+[paths]
+proj   = "lab:/data/projects/myrepo/"
+backup = "nas:/backups/"
+logs   = "archive:/var/log/myapp/"
+```
+
+```sh
+bcmr copy ./project/  @proj           # → lab:/data/projects/myrepo/
+bcmr copy db.gz       @proj/backups/  # → lab:/data/projects/myrepo/backups/
+bcmr copy report.pdf  @backup/today/  # → nas:/backups/today/
+```
+
+**Rules:**
+
+- Alias names must match `[A-Za-z_][A-Za-z0-9_-]*`. Invalid names error at use.
+- The trailing slash on the configured target is preserved for the bare-alias form (`@proj` returns the target verbatim) and normalised for the suffixed form (`@proj/foo` joins with exactly one `/` between).
+- An unknown `@alias` errors with a `did you mean ...?` suggestion (Levenshtein-based) and lists all known aliases. Bcmr does not silently fall through to a literal-file lookup.
+- To copy a literal file whose name starts with `@`, prefix with `./` — e.g. `bcmr copy ./@weird-filename ./dst/`.
+
+Aliases work in every position that accepts a path: source list, destination, `bcmr check`, `bcmr remove`.
+
 ## Environment Variables
 
 | Variable | Default | Description |

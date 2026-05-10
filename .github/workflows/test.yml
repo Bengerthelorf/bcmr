@@ -206,6 +206,45 @@ jobs:
           test ! -d /tmp/bcmr-test-dst/dryrun-target/
           echo "Dry-run test passed"
 
+      - name: Test path bookmarks (@alias resolution)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          # Build a config with a [paths] map pointing at a local dest dir,
+          # then run a copy using the @alias and confirm the file lands at
+          # the resolved path.
+          tmp=$(mktemp -d)
+          mkdir -p "$tmp/dst"
+          cat > "$tmp/cfg.toml" <<EOF
+          [paths]
+          local = "$tmp/dst/"
+          EOF
+          echo "bookmark-test" > "$tmp/src.txt"
+
+          # Bare alias resolves to the dest dir.
+          cargo run --quiet -- --config "$tmp/cfg.toml" copy --plain "$tmp/src.txt" @local
+          test -f "$tmp/dst/src.txt" || { echo "FAIL: @local should resolve to dst dir"; exit 1; }
+
+          # Alias with a relative suffix.
+          cargo run --quiet -- --config "$tmp/cfg.toml" copy --plain "$tmp/src.txt" @local/named.txt
+          test -f "$tmp/dst/named.txt" || { echo "FAIL: @local/named.txt should resolve"; exit 1; }
+          diff "$tmp/src.txt" "$tmp/dst/named.txt"
+
+          # Unknown alias must error with a did-you-mean hint, not silently
+          # try to copy a file literally named '@locl'. Levenshtein distance
+          # between the typo and 'local' is 1, well within the suggestion
+          # threshold.
+          err=$(cargo run --quiet -- --config "$tmp/cfg.toml" copy --plain "$tmp/src.txt" @locl 2>&1 || true)
+          echo "$err" | grep -q "unknown path alias '@locl'" || { echo "FAIL: missing unknown-alias error"; exit 1; }
+          echo "$err" | grep -q "did you mean '@local'" || { echo "FAIL: missing did-you-mean"; exit 1; }
+
+          # Invalid alias name errors with the regex hint.
+          err2=$(cargo run --quiet -- --config "$tmp/cfg.toml" copy --plain "$tmp/src.txt" '@bad!' 2>&1 || true)
+          echo "$err2" | grep -q "invalid alias name '@bad!'" || { echo "FAIL: missing invalid-name error"; exit 1; }
+
+          rm -rf "$tmp"
+          echo "Path bookmark tests passed"
+
       - name: Test exclude patterns
         shell: bash
         run: |
