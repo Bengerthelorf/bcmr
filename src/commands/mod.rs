@@ -5,6 +5,7 @@ mod copy_strategies;
 pub mod deploy;
 pub mod doctor;
 pub mod init;
+pub mod inspect;
 pub mod jobs;
 pub mod r#move;
 pub mod remote_copy;
