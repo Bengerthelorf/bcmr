@@ -61,6 +61,11 @@ impl ProgressRunner {
         move |n| p.lock().inc_skipped(n)
     }
 
+    pub fn reflink_callback(&self) -> impl Fn() + Send + Sync + Clone + 'static {
+        let p = Arc::clone(&self.progress);
+        move || p.lock().inc_reflink()
+    }
+
     pub fn file_callback(&self) -> impl Fn(&str, u64) + Send + Sync + Clone + 'static {
         let p = Arc::clone(&self.progress);
         move |name, size| p.lock().set_current_file(name, size)

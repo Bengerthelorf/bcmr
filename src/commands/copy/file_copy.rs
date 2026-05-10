@@ -238,6 +238,7 @@ where
     )
     .await?
     {
+        (callback.on_reflink)();
         let ctx = FinalizeCtx {
             write_target: &write_target,
             dst,

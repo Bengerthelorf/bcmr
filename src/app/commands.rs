@@ -221,6 +221,7 @@ pub(crate) async fn handle_copy_command(args: &Commands) -> Result<()> {
             args,
             runner.inc_callback(),
             runner.file_callback(),
+            runner.reflink_callback(),
         )
         .await;
 
@@ -273,6 +274,7 @@ pub(crate) async fn handle_copy_command(args: &Commands) -> Result<()> {
                 on_total_update: Box::new(total_cb),
                 on_scan_complete: Box::new(scan_done_cb),
                 on_file_found: Box::new(files_found_cb),
+                on_reflink: Box::new(runner.reflink_callback()),
             },
         )
         .await;
@@ -368,7 +370,8 @@ pub(crate) async fn handle_move_command(args: &Commands) -> Result<()> {
         }
 
         for src in sources {
-            commands::r#move::move_path(src, dest, args, &excludes, |_| {}, |_, _| {}).await?;
+            commands::r#move::move_path(src, dest, args, &excludes, |_| {}, |_, _| {}, || {})
+                .await?;
         }
 
         if !is_json_mode() {
@@ -398,6 +401,7 @@ pub(crate) async fn handle_move_command(args: &Commands) -> Result<()> {
             &excludes,
             runner.inc_callback(),
             runner.file_callback(),
+            runner.reflink_callback(),
         )
         .await;
 

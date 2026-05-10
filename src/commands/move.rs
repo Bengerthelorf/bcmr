@@ -53,6 +53,7 @@ pub async fn move_path<F>(
     excludes: &[regex::Regex],
     progress_callback: F,
     on_new_file: impl Fn(&str, u64) + Send + Sync + 'static + Clone,
+    on_reflink: impl Fn() + Send + Sync + 'static + Clone,
 ) -> std::result::Result<(), BcmrError>
 where
     F: Fn(u64) + Send + Sync + Clone + 'static,
@@ -104,6 +105,7 @@ where
                     excludes,
                     progress_callback.clone(),
                     on_new_file.clone(),
+                    on_reflink.clone(),
                 )
                 .await?;
                 fs::remove_file(src).await?;
@@ -174,6 +176,7 @@ where
                 excludes,
                 progress_callback.clone(),
                 on_new_file.clone(),
+                on_reflink.clone(),
             )
             .await?;
 
@@ -198,6 +201,7 @@ where
                         excludes,
                         progress_callback.clone(),
                         on_new_file.clone(),
+                        on_reflink.clone(),
                     )
                     .await?;
                     fs::remove_dir_all(src).await?;

@@ -24,6 +24,7 @@ pub struct PipelineCallbacks<F: Fn(u64) + Send + Sync> {
     pub on_total_update: BoxCallback,
     pub on_scan_complete: BoxNotify,
     pub on_file_found: BoxCallback,
+    pub on_reflink: BoxNotify,
 }
 
 pub async fn pipeline_copy<F>(
@@ -44,6 +45,7 @@ where
     let callback = ProgressCallback {
         callback: cb.on_progress,
         on_new_file: Arc::from(cb.on_new_file),
+        on_reflink: Arc::from(cb.on_reflink),
     };
     let on_total_update = cb.on_total_update;
     let on_scan_complete = cb.on_scan_complete;
