@@ -101,6 +101,14 @@ jobs:
             exit 1
           fi
 
+          # XDG override: the install path must follow XDG_DATA_HOME, not just $HOME.
+          XDG_DATA=$(mktemp -d)
+          xdg_path=$(HOME=$FAKE XDG_DATA_HOME=$XDG_DATA $BCMR completions zsh --install --print)
+          [ "$xdg_path" = "$XDG_DATA/zsh/site-functions/_bcmr" ] || {
+            echo "FAIL: XDG_DATA_HOME not honored; got '$xdg_path'"; exit 1;
+          }
+          rm -rf "$XDG_DATA"
+
           rm -rf "$FAKE"
           echo "completions install tests passed"
 
