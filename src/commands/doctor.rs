@@ -4,7 +4,7 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use tokio::process::Command;
 
-#[derive(Serialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum CheckStatus {
     Ok,
@@ -290,12 +290,23 @@ async fn run_host_checks(host: &str) -> Vec<Check> {
 }
 
 struct RemoteProbe {
-    bcmr_path: Option<String>,
+    noninteractive_path: Option<String>,
+    login_path: Option<String>,
     bcmr_version: Option<String>,
 }
 
 async fn ssh_probe(host: &str) -> std::result::Result<RemoteProbe, String> {
-    let cmd = "command -v bcmr 2>/dev/null && bcmr --version 2>/dev/null || true";
+    // Three sentinel-separated probes in one ssh roundtrip:
+    //  - noninteractive: the env bcmr's fast path actually uses (`ssh host '<cmd>'`).
+    //  - login: what the user sees when they ssh in interactively, for the
+    //    'installed but unreachable from fast-path' diagnostic.
+    //  - version: whichever shell finds bcmr first.
+    let cmd = "echo '---noninteractive---'; \
+               command -v bcmr 2>/dev/null; \
+               echo '---login---'; \
+               bash -lc 'command -v bcmr 2>/dev/null' 2>/dev/null; \
+               echo '---version---'; \
+               bcmr --version 2>/dev/null || bash -lc 'bcmr --version 2>/dev/null' 2>/dev/null || true";
     let output = Command::new("ssh")
         .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, cmd])
         .output()
@@ -304,43 +315,72 @@ async fn ssh_probe(host: &str) -> std::result::Result<RemoteProbe, String> {
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).to_string());
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut path = None;
+    Ok(parse_probe_output(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn parse_probe_output(stdout: &str) -> RemoteProbe {
+    let mut section = "";
+    let mut noninteractive = None;
+    let mut login = None;
     let mut version = None;
     for line in stdout.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        if line.starts_with('/') {
-            path = Some(line.to_string());
-        } else if line.starts_with("bcmr ") {
-            version = Some(line.trim_start_matches("bcmr ").to_string());
+        match line {
+            "---noninteractive---" => section = "noninteractive",
+            "---login---" => section = "login",
+            "---version---" => section = "version",
+            _ => match section {
+                "noninteractive" if line.starts_with('/') => {
+                    noninteractive = Some(line.to_string())
+                }
+                "login" if line.starts_with('/') => login = Some(line.to_string()),
+                "version" if line.starts_with("bcmr ") => {
+                    version = Some(line.trim_start_matches("bcmr ").to_string())
+                }
+                _ => {}
+            },
         }
     }
-    Ok(RemoteProbe {
-        bcmr_path: path,
+    RemoteProbe {
+        noninteractive_path: noninteractive,
+        login_path: login,
         bcmr_version: version,
-    })
+    }
 }
 
 fn classify_remote_bcmr(probe: &RemoteProbe) -> Check {
     let local = env!("CARGO_PKG_VERSION");
-    match (&probe.bcmr_path, &probe.bcmr_version) {
-        (None, _) => Check::fail(
+    match (
+        &probe.noninteractive_path,
+        &probe.login_path,
+        &probe.bcmr_version,
+    ) {
+        (None, None, _) => Check::fail(
             "remote bcmr",
             "not on PATH",
             "run 'bcmr deploy <host>' (or '--path /usr/local/bin/bcmr <host>' if ~/.local/bin is not in non-interactive PATH)",
         ),
-        (Some(path), None) => Check::warn(
+        (None, Some(login), _) => Check::fail(
+            "remote bcmr",
+            format!(
+                "{} (login shell only — fast path will fall back to legacy)",
+                login
+            ),
+            "redeploy to a system path that's on the non-interactive PATH: \
+             bcmr deploy --path /usr/local/bin/bcmr --sudo <host>",
+        ),
+        (Some(path), _, None) => Check::warn(
             "remote bcmr",
             format!("{} (version unknown)", path),
             "the binary did not respond to --version; try 'ssh <host> bcmr --version' to debug",
         ),
-        (Some(path), Some(v)) if v == local => {
+        (Some(path), _, Some(v)) if v == local => {
             Check::ok("remote bcmr", format!("{} v{} (matches local)", path, v))
         }
-        (Some(path), Some(v)) => Check::warn(
+        (Some(path), _, Some(v)) => Check::warn(
             "remote bcmr",
             format!("{} v{} (local v{})", path, v, local),
             "consider 'bcmr deploy <host>' to upgrade — protocol may auto-fall-back on mismatch",
@@ -383,5 +423,59 @@ mod tests {
         assert_eq!(CheckStatus::Warn.glyph(true), "WARN");
         assert_eq!(CheckStatus::Fail.glyph(true), "FAIL");
         assert_eq!(CheckStatus::Ok.glyph(false), "✓");
+    }
+
+    #[test]
+    fn parse_probe_both_paths_match() {
+        let raw = "---noninteractive---\n/usr/local/bin/bcmr\n---login---\n/usr/local/bin/bcmr\n---version---\nbcmr 0.6.0\n";
+        let p = parse_probe_output(raw);
+        assert_eq!(
+            p.noninteractive_path.as_deref(),
+            Some("/usr/local/bin/bcmr")
+        );
+        assert_eq!(p.login_path.as_deref(), Some("/usr/local/bin/bcmr"));
+        assert_eq!(p.bcmr_version.as_deref(), Some("0.6.0"));
+    }
+
+    #[test]
+    fn parse_probe_login_only() {
+        let raw = "---noninteractive---\n---login---\n/home/u/.local/bin/bcmr\n---version---\nbcmr 0.5.20\n";
+        let p = parse_probe_output(raw);
+        assert!(p.noninteractive_path.is_none());
+        assert_eq!(p.login_path.as_deref(), Some("/home/u/.local/bin/bcmr"));
+        assert_eq!(p.bcmr_version.as_deref(), Some("0.5.20"));
+    }
+
+    #[test]
+    fn parse_probe_neither() {
+        let raw = "---noninteractive---\n---login---\n---version---\n";
+        let p = parse_probe_output(raw);
+        assert!(p.noninteractive_path.is_none());
+        assert!(p.login_path.is_none());
+        assert!(p.bcmr_version.is_none());
+    }
+
+    #[test]
+    fn classify_login_only_recommends_system_path_redeploy() {
+        let p = RemoteProbe {
+            noninteractive_path: None,
+            login_path: Some("/home/u/.local/bin/bcmr".into()),
+            bcmr_version: Some("0.6.0".into()),
+        };
+        let c = classify_remote_bcmr(&p);
+        assert_eq!(c.status, CheckStatus::Fail);
+        assert!(c.detail.contains("login shell only"));
+        assert!(c.recommend.unwrap().contains("/usr/local/bin/bcmr"));
+    }
+
+    #[test]
+    fn classify_match_when_both_paths_present() {
+        let p = RemoteProbe {
+            noninteractive_path: Some("/usr/local/bin/bcmr".into()),
+            login_path: Some("/usr/local/bin/bcmr".into()),
+            bcmr_version: Some(env!("CARGO_PKG_VERSION").into()),
+        };
+        let c = classify_remote_bcmr(&p);
+        assert_eq!(c.status, CheckStatus::Ok);
     }
 }
