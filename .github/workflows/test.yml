@@ -121,8 +121,19 @@ jobs:
         shell: bash
         run: |
           echo "verify-test-content" > /tmp/bcmr-test-src/verify.txt
-          cargo run -- copy --verify /tmp/bcmr-test-src/verify.txt /tmp/bcmr-test-dst/
+          # The Done line should advertise the verify pass.
+          out=$(cargo run --quiet -- copy --plain --verify /tmp/bcmr-test-src/verify.txt /tmp/bcmr-test-dst/ 2>&1)
+          echo "$out"
+          echo "$out" | grep -q "verified" || { echo "FAIL: expected 'verified' in Done line under -V"; exit 1; }
           diff /tmp/bcmr-test-src/verify.txt /tmp/bcmr-test-dst/verify.txt
+
+          # And without -V, no 'verified' suffix.
+          rm /tmp/bcmr-test-dst/verify.txt
+          out2=$(cargo run --quiet -- copy --plain /tmp/bcmr-test-src/verify.txt /tmp/bcmr-test-dst/ 2>&1)
+          if echo "$out2" | grep -q "verified"; then
+            echo "FAIL: 'verified' should not appear without -V"
+            exit 1
+          fi
           echo "Copy with verify passed"
 
       - name: Test copy with preserve

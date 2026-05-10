@@ -28,6 +28,8 @@ pub trait ProgressRenderer: Send {
     fn update_worker(&mut self, _slot: usize, _file_name: &str, _file_size: u64, _progress: u64) {}
     fn finish_worker(&mut self, _slot: usize) {}
 
+    fn set_verify_mode(&mut self, _on: bool) {}
+
     fn tick(&mut self) {}
 }
 
@@ -60,6 +62,10 @@ impl ProgressRenderer for PlainTextProgress {
     fn finish(&mut self) -> io::Result<()> {
         println!("{}", self.data.done_summary_line());
         Ok(())
+    }
+
+    fn set_verify_mode(&mut self, on: bool) {
+        self.data.verify_mode = on;
     }
 }
 
