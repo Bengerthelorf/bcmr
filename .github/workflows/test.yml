@@ -437,6 +437,41 @@ jobs:
             echo "FAIL: --watch + --rm should be rejected"; exit 1;
           fi
 
+          # Stale-job lifecycle: a header pointing at a dead pid + no result event
+          # must error within STARTUP_GRACE rather than poll forever.
+          jobs_dir="${XDG_DATA_HOME:-$HOME/.local/share}/bcmr/jobs"
+          mkdir -p "$jobs_dir"
+          stale_id="stale-$$"
+          dead_pid=$(bash -c 'sleep 0.05 & echo $!; wait')
+          printf '{"job_id":"%s","pid":%s,"log":"%s/%s.jsonl"}\n' \
+            "$stale_id" "$dead_pid" "$jobs_dir" "$stale_id" \
+            > "$jobs_dir/$stale_id.jsonl"
+          start=$(date +%s)
+          if timeout 5 cargo run --quiet -- status "$stale_id" --watch 2>&1; then
+            echo "FAIL: --watch should exit non-zero on stale (writer-dead) job"; exit 1;
+          fi
+          end=$(date +%s)
+          if [ $((end - start)) -gt 4 ]; then
+            echo "FAIL: stale job detection took $((end - start))s (expected <2s)"; exit 1;
+          fi
+          rm -f "$jobs_dir/$stale_id.jsonl"
+
+          # Spawn-then-watch race: kicking off --watch before the writer has flushed
+          # its header must wait through STARTUP_GRACE rather than error 'not found'.
+          race_id="race-$$"
+          live_pid=$$
+          (
+            sleep 0.4
+            printf '{"job_id":"%s","pid":%s,"log":"x"}\n{"type":"result","status":"success","duration_secs":0.1,"bytes_total":0}\n' \
+              "$race_id" "$live_pid" > "$jobs_dir/$race_id.jsonl"
+          ) &
+          out=$(timeout 5 cargo run --quiet -- status "$race_id" --watch 2>&1) || true
+          wait
+          echo "$out" | grep -qE 'Done:|"type":"result"' || {
+            echo "FAIL: race --watch missed result; got: $out"; exit 1;
+          }
+          rm -f "$jobs_dir/$race_id.jsonl"
+
           # bcmr status --rm <id> should drop just that job's log.
           rm_out=$(cargo run --quiet -- --json status "$job_id" --rm)
           echo "rm: $rm_out"

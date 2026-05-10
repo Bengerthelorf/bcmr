@@ -3,7 +3,10 @@ use crate::config::is_json_mode;
 use anyhow::{anyhow, Result};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const POLL_INTERVAL: Duration = Duration::from_millis(200);
+const STARTUP_GRACE: Duration = Duration::from_secs(1);
 
 pub(crate) fn status_detail(latest: &str) -> String {
     serde_json::from_str::<serde_json::Value>(latest)
@@ -145,6 +148,11 @@ pub(crate) fn handle_status_command(job_id: &Option<String>, rm: bool, all: bool
 
 pub(crate) async fn watch_job(job_id: &str) -> Result<()> {
     let log = commands::jobs::log_path(job_id);
+
+    let deadline = Instant::now() + STARTUP_GRACE;
+    while !log.exists() && Instant::now() < deadline {
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
     if !log.exists() {
         return Err(anyhow!("job '{}' not found", job_id));
     }
@@ -152,6 +160,7 @@ pub(crate) async fn watch_job(job_id: &str) -> Result<()> {
     let json = is_json_mode();
     let mut offset = 0u64;
     let mut buffer = String::new();
+    let mut header_pid: Option<u32> = None;
     let signal = tokio::signal::ctrl_c();
     tokio::pin!(signal);
 
@@ -159,13 +168,39 @@ pub(crate) async fn watch_job(job_id: &str) -> Result<()> {
         let new = read_new_lines(&log, offset, &mut buffer)?;
         offset = new.new_offset;
         for line in new.lines {
+            if header_pid.is_none() {
+                header_pid = parse_header_pid(&line);
+            }
             print_log_line(&line, json);
             if is_terminal_event(&line) {
                 return Ok(());
             }
         }
+        if let Some(pid) = header_pid {
+            if !commands::jobs::is_pid_alive(pid) {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "type": "watch",
+                            "status": "writer_dead",
+                            "pid": pid,
+                        })
+                    );
+                } else {
+                    eprintln!(
+                        "Error: job pid {} no longer running and no result event was emitted",
+                        pid
+                    );
+                }
+                return Err(anyhow!(
+                    "job '{}' writer died without emitting a result event",
+                    job_id
+                ));
+            }
+        }
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(200)) => {},
+            _ = tokio::time::sleep(POLL_INTERVAL) => {},
             _ = &mut signal => {
                 if !json {
                     eprintln!();
@@ -175,6 +210,12 @@ pub(crate) async fn watch_job(job_id: &str) -> Result<()> {
             }
         }
     }
+}
+
+fn parse_header_pid(line: &str) -> Option<u32> {
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|v| v.get("pid")?.as_u64().map(|p| p as u32))
 }
 
 struct NewLines {
@@ -300,6 +341,17 @@ mod tests {
         ));
         assert!(!is_terminal_event("{\"job_id\":\"abc\"}"));
         assert!(!is_terminal_event("not json"));
+    }
+
+    #[test]
+    fn parse_header_pid_extracts_pid_field() {
+        assert_eq!(
+            parse_header_pid(r#"{"job_id":"abc","pid":4321,"log":"/x"}"#),
+            Some(4321)
+        );
+        assert_eq!(parse_header_pid(r#"{"job_id":"abc"}"#), None);
+        assert_eq!(parse_header_pid(r#"{"type":"progress"}"#), None);
+        assert_eq!(parse_header_pid("not json"), None);
     }
 
     #[test]
