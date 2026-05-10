@@ -150,10 +150,7 @@ impl ServeClient {
             .writer
             .as_mut()
             .ok_or_else(|| BcmrError::InvalidInput("connection closed".into()))?;
-        let tx = self
-            .tx
-            .as_mut()
-            .ok_or_else(BcmrError::send_framing_taken)?;
+        let tx = self.tx.as_mut().ok_or_else(BcmrError::send_framing_taken)?;
         tx.write_message(w, msg).await?;
         w.flush().await?;
         Ok(())

@@ -36,7 +36,10 @@ impl ServeClientPool {
         caps: u8,
         n: usize,
     ) -> Result<Self, BcmrError> {
-        Self::build(n, || ServeClient::connect_direct_with_caps(ssh_target, caps)).await
+        Self::build(n, || {
+            ServeClient::connect_direct_with_caps(ssh_target, caps)
+        })
+        .await
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -208,9 +211,7 @@ impl ServeClientPool {
             .collect();
         futures::future::try_join_all(futs).await?;
 
-        hash_task
-            .await
-            .map_err(BcmrError::hash_task_join_failed)?
+        hash_task.await.map_err(BcmrError::hash_task_join_failed)?
     }
 
     pub async fn striped_get_file(

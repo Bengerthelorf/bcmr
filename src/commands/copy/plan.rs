@@ -54,7 +54,10 @@ pub(super) fn scan_sources(
         if no_deref && is_symlink(src) {
             let target = std::fs::read_link(src).map_err(BcmrError::Io)?;
             let dst_path = if dst_is_dir {
-                dst.join(src.file_name().ok_or_else(BcmrError::invalid_source_file_name)?)
+                dst.join(
+                    src.file_name()
+                        .ok_or_else(BcmrError::invalid_source_file_name)?,
+                )
             } else {
                 dst.to_path_buf()
             };
@@ -71,7 +74,10 @@ pub(super) fn scan_sources(
 
         if src.is_file() {
             let dst_path = if dst_is_dir {
-                dst.join(src.file_name().ok_or_else(BcmrError::invalid_source_file_name)?)
+                dst.join(
+                    src.file_name()
+                        .ok_or_else(BcmrError::invalid_source_file_name)?,
+                )
             } else {
                 dst.to_path_buf()
             };

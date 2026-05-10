@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
 
-use super::file_copy::{self, copy_file, CopyFileOptions};
+use super::file_copy::{copy_file, CopyFileOptions};
 use super::overwrite::{check_overwrite, determine_dry_run_action, is_normal_write};
 use super::plan::{CopyPlan, PlanEntry};
 use super::symlinks::{check_symlink_overwrite, create_symlink_replacing};
@@ -135,7 +135,10 @@ where
 
     if src.is_file() {
         let dst_path = if dst.is_dir() {
-            dst.join(src.file_name().ok_or_else(BcmrError::invalid_source_file_name)?)
+            dst.join(
+                src.file_name()
+                    .ok_or_else(BcmrError::invalid_source_file_name)?,
+            )
         } else {
             dst.to_path_buf()
         };
@@ -297,7 +300,7 @@ pub(crate) async fn preserve_attributes(
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    file_copy::copy_xattrs(src, dst)?;
+    super::file_copy::copy_xattrs(src, dst)?;
 
     Ok(())
 }

@@ -164,28 +164,16 @@ impl ServeClient {
 
     async fn put_streaming_from(&mut self, data: &Path, offset: u64) -> Result<(), BcmrError> {
         let algo = self.algo;
-        let w = self
-            .writer
-            .as_mut()
-            .ok_or_else(BcmrError::writer_taken)?;
-        let tx = self
-            .tx
-            .as_mut()
-            .ok_or_else(BcmrError::send_framing_taken)?;
+        let w = self.writer.as_mut().ok_or_else(BcmrError::writer_taken)?;
+        let tx = self.tx.as_mut().ok_or_else(BcmrError::send_framing_taken)?;
         super::super::serve_client::write_file_data_frames_from(w, tx, data, offset, algo, &|_| {})
             .await
     }
 
     async fn put_streaming(&mut self, data: &Path) -> Result<(), BcmrError> {
         let algo = self.algo;
-        let w = self
-            .writer
-            .as_mut()
-            .ok_or_else(BcmrError::writer_taken)?;
-        let tx = self
-            .tx
-            .as_mut()
-            .ok_or_else(BcmrError::send_framing_taken)?;
+        let w = self.writer.as_mut().ok_or_else(BcmrError::writer_taken)?;
+        let tx = self.tx.as_mut().ok_or_else(BcmrError::send_framing_taken)?;
         write_file_data_frames(w, tx, data, algo, &|_| {}).await
     }
 
@@ -206,14 +194,8 @@ impl ServeClient {
         .await?;
 
         let algo = self.algo;
-        let w = self
-            .writer
-            .as_mut()
-            .ok_or_else(BcmrError::writer_taken)?;
-        let tx = self
-            .tx
-            .as_mut()
-            .ok_or_else(BcmrError::send_framing_taken)?;
+        let w = self.writer.as_mut().ok_or_else(BcmrError::writer_taken)?;
+        let tx = self.tx.as_mut().ok_or_else(BcmrError::send_framing_taken)?;
 
         let mut file = File::open(local).await?;
         file.seek(std::io::SeekFrom::Start(local_offset)).await?;

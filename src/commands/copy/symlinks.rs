@@ -1,7 +1,6 @@
 use crate::cli::Commands;
 use crate::core::error::BcmrError;
 use std::path::Path;
-use tokio::fs;
 
 pub(super) fn check_symlink_overwrite(
     dst: &Path,
@@ -30,7 +29,7 @@ pub(super) async fn create_symlink_replacing(
     target: &Path,
 ) -> std::result::Result<(), BcmrError> {
     if dst.symlink_metadata().is_ok() {
-        fs::remove_file(dst).await?;
+        tokio::fs::remove_file(dst).await?;
     }
     let dst = dst.to_path_buf();
     let target = target.to_path_buf();

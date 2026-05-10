@@ -65,7 +65,10 @@ where
 
     if src.is_file() {
         let dst_path = if dst.is_dir() {
-            dst.join(src.file_name().ok_or_else(BcmrError::invalid_source_file_name)?)
+            dst.join(
+                src.file_name()
+                    .ok_or_else(BcmrError::invalid_source_file_name)?,
+            )
         } else {
             dst.to_path_buf()
         };
