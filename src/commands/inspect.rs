@@ -1,11 +1,11 @@
 use crate::core::error::BcmrError;
 use crate::core::remote::{
-    parse_remote_path, remote_file_hash, remote_stat, remote_total_size, RemotePath,
+    parse_remote_path, remote_file_hash, remote_list_shallow, remote_stat, remote_total_size,
+    RemotePath,
 };
 use crate::ui::utils::format_bytes;
 use anyhow::{anyhow, Result};
 use std::path::Path;
-use tokio::process::Command;
 
 fn require_remote(path: &Path) -> Result<RemotePath> {
     let s = path.to_string_lossy();
@@ -23,10 +23,11 @@ async fn resolved(path: &Path) -> Result<RemotePath> {
 
 pub async fn ls(path: &Path) -> Result<()> {
     let rp = resolved(path).await?;
-    let entries = list_shallow(&rp).await?;
+    let mut entries = remote_list_shallow(&rp).await.map_err(into_anyhow)?;
     if entries.is_empty() {
         return Ok(());
     }
+    entries.sort();
     let max_size_width = entries
         .iter()
         .map(|(_, size, is_dir)| {
@@ -48,51 +49,6 @@ pub async fn ls(path: &Path) -> Result<()> {
         println!("{} {:>w$}  {}", kind, size_str, name, w = max_size_width);
     }
     Ok(())
-}
-
-async fn list_shallow(rp: &RemotePath) -> Result<Vec<(String, u64, bool)>> {
-    // Shallow listing: -maxdepth 1 -mindepth 1, suppress perm errors and
-    // ignore find's nonzero exit that triggers when any child is unreadable.
-    let escaped = rp.path.replace('\'', "'\\''");
-    let cmd = format!(
-        "find '{}' -maxdepth 1 -mindepth 1 -printf '%f\\0%s\\0%y\\0' 2>/dev/null; true",
-        escaped
-    );
-    let output = Command::new("ssh")
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
-            &rp.ssh_target(),
-            &cmd,
-        ])
-        .output()
-        .await?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!(
-            "ssh ls failed for '{}': {}",
-            rp.display(),
-            stderr.trim()
-        ));
-    }
-    let raw = String::from_utf8_lossy(&output.stdout);
-    let fields: Vec<&str> = raw.split('\0').collect();
-    let mut entries = Vec::new();
-    let mut i = 0;
-    while i + 2 < fields.len() {
-        let name = fields[i].to_string();
-        let size: u64 = fields[i + 1].parse().unwrap_or(0);
-        let is_dir = fields[i + 2] == "d";
-        i += 3;
-        if name.is_empty() {
-            continue;
-        }
-        entries.push((name, size, is_dir));
-    }
-    entries.sort();
-    Ok(entries)
 }
 
 pub async fn stat(path: &Path) -> Result<()> {
