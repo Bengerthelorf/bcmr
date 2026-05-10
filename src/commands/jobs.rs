@@ -212,8 +212,7 @@ fn remove_all_jobs_in(dir: &std::path::Path) -> usize {
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
         }
-        // Skip logs whose owning process is still alive — unlinking the file
-        // mid-write loses any data the writer hadn't fsync'd yet.
+        // Unlinking mid-write loses data the writer hadn't fsync'd yet.
         if job_is_active(&path) {
             continue;
         }
@@ -302,6 +301,7 @@ mod tests {
         assert!(dir.path().join("readme.txt").exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_remove_all_jobs_in_skips_active_pid() {
         let dir = tempfile::tempdir().unwrap();
