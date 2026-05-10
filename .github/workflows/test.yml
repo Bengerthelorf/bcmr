@@ -68,35 +68,38 @@ jobs:
         run: |
           # rustup reads $HOME for its toolchain config; build once with the
           # real HOME, then run the binary directly with a temp HOME.
+          # Clear XDG_*_HOME for the HOME-fallback assertions — the runner
+          # may export them, which would override our isolated $FAKE root.
           cargo build --quiet
           BCMR=./target/debug/bcmr
           FAKE=$(mktemp -d)
+          run_isolated() { HOME=$FAKE XDG_DATA_HOME= XDG_CONFIG_HOME= "$@"; }
 
-          path=$(HOME=$FAKE $BCMR completions zsh --install --print)
+          path=$(run_isolated $BCMR completions zsh --install --print)
           test -z "$path" && { echo "FAIL: --print returned empty"; exit 1; }
           test ! -e "$path" || { echo "FAIL: --print should not write file"; exit 1; }
 
           for shell in bash zsh fish; do
-            HOME=$FAKE $BCMR completions $shell --install
+            run_isolated $BCMR completions $shell --install
           done
-          test -s "$FAKE/.local/share/zsh/site-functions/_bcmr"
-          test -s "$FAKE/.local/share/bash-completion/completions/bcmr"
-          test -s "$FAKE/.config/fish/completions/bcmr.fish"
+          test -s "$FAKE/.local/share/zsh/site-functions/_bcmr" || { echo "FAIL: zsh path"; exit 1; }
+          test -s "$FAKE/.local/share/bash-completion/completions/bcmr" || { echo "FAIL: bash path"; exit 1; }
+          test -s "$FAKE/.config/fish/completions/bcmr.fish" || { echo "FAIL: fish path"; exit 1; }
 
-          HOME=$FAKE $BCMR completions zsh --install --uninstall
+          run_isolated $BCMR completions zsh --install --uninstall
           test ! -e "$FAKE/.local/share/zsh/site-functions/_bcmr"
 
-          if HOME=$FAKE $BCMR completions powershell --install 2>/dev/null; then
+          if run_isolated $BCMR completions powershell --install 2>/dev/null; then
             echo "FAIL: --install should reject powershell"
             exit 1
           fi
 
-          if HOME=$FAKE $BCMR completions zsh --install --print --uninstall 2>/dev/null; then
+          if run_isolated $BCMR completions zsh --install --print --uninstall 2>/dev/null; then
             echo "FAIL: --print + --uninstall should be rejected"
             exit 1
           fi
 
-          if HOME=$FAKE $BCMR completions --print 2>/dev/null; then
+          if run_isolated $BCMR completions --print 2>/dev/null; then
             echo "FAIL: --print without --install should be rejected"
             exit 1
           fi
