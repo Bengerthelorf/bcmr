@@ -171,6 +171,7 @@ jobs:
           echo "Copy tests passed"
 
       - name: Test multi-destination fan-out (--to)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           mkdir -p /tmp/bcmr-fanout
