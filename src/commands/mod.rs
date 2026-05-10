@@ -1,4 +1,5 @@
 pub mod check;
+pub mod completions;
 pub mod copy;
 mod copy_strategies;
 pub mod deploy;

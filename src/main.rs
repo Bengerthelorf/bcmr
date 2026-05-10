@@ -177,25 +177,34 @@ async fn main() -> Result<()> {
                 println!("{}", entry);
             }
         }
-        Commands::Completions { shell } => {
+        Commands::Completions {
+            shell,
+            install,
+            print,
+            uninstall,
+        } => {
             let mut cmd = build_completion_command();
             let mut buf = Vec::new();
             clap_complete::generate(*shell, &mut cmd, "bcmr", &mut buf);
             let base = String::from_utf8(buf).expect("clap generated invalid UTF-8");
 
-            if *shell == clap_complete::Shell::PowerShell {
-                let injected = base.replacen(
+            let script = if *shell == clap_complete::Shell::PowerShell {
+                base.replacen(
                     "param($wordToComplete, $commandAst, $cursorPosition)\n",
                     &format!(
                         "param($wordToComplete, $commandAst, $cursorPosition)\n{}\n",
                         POWERSHELL_REMOTE_INJECT
                     ),
                     1,
-                );
-                print!("{}", injected);
+                )
             } else {
-                print!("{}", base);
-                print!("{}", remote_completion_script(shell));
+                format!("{}{}", base, remote_completion_script(shell))
+            };
+
+            if *install {
+                commands::completions::run_install(*shell, &script, *print, *uninstall)?;
+            } else {
+                print!("{}", script);
             }
         }
     }

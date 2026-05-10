@@ -64,12 +64,12 @@ zstd = { version = "0.13", default-features = false }
 # materially past SSH's ~500 MB/s single-stream ceiling.
 ring = "0.17"
 zeroize = { version = "1.8", features = ["derive"] }
+tempfile = "3"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 xattr = "1.5"
 
 [dev-dependencies]
-tempfile = "3"
 proptest = "1.5"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
