@@ -107,10 +107,51 @@ fn check_basename_collisions(sources: &[std::path::PathBuf], force: bool) -> Res
 }
 
 pub(crate) async fn handle_copy_command(args: &Commands) -> Result<()> {
+    let cm = args
+        .copy_move_args()
+        .ok_or_else(|| anyhow::anyhow!("copy requires copy/move args"))?;
+
+    if cm.to.is_empty() {
+        if cm.paths.len() < 2 {
+            bail!("missing destination — pass at least <SRC> <DEST> or use --to <DEST>");
+        }
+        return handle_copy_one(args, None).await;
+    }
+
+    let mut failures = 0usize;
+    for dest in &cm.to {
+        if !is_json_mode() && !args.is_quiet() {
+            eprintln!("→ copying to {}", dest.display());
+        }
+        if let Err(e) = handle_copy_one(args, Some(dest)).await {
+            failures += 1;
+            eprintln!("Error copying to {}: {}", dest.display(), e);
+        }
+    }
+    if failures > 0 {
+        bail!("{} of {} fan-out targets failed", failures, cm.to.len());
+    }
+    Ok(())
+}
+
+async fn handle_copy_one(args: &Commands, dest_override: Option<&std::path::Path>) -> Result<()> {
     use crate::core::remote::parse_remote_path;
 
     let excludes = args.compile_excludes()?;
-    let (sources, dest) = args.get_sources_and_dest().map_err(anyhow::Error::msg)?;
+    let (sources, dest_buf): (&[std::path::PathBuf], std::path::PathBuf) = match dest_override {
+        Some(d) => {
+            let s = args
+                .copy_move_args()
+                .map(|a| a.paths.as_slice())
+                .unwrap_or(&[]);
+            (s, d.to_path_buf())
+        }
+        None => {
+            let (s, d) = args.get_sources_and_dest().map_err(anyhow::Error::msg)?;
+            (s, d.clone())
+        }
+    };
+    let dest: &std::path::Path = dest_buf.as_path();
 
     if let Some(mode) = args.get_reflink_mode() {
         validate_mode(&mode, "reflink")?;
@@ -288,6 +329,62 @@ pub(crate) async fn handle_copy_command(args: &Commands) -> Result<()> {
 }
 
 pub(crate) async fn handle_move_command(args: &Commands) -> Result<()> {
+    use crate::core::remote::{parse_remote_path, remote_remove};
+
+    let cm = args
+        .copy_move_args()
+        .ok_or_else(|| anyhow::anyhow!("move requires copy/move args"))?;
+
+    if cm.to.is_empty() {
+        if cm.paths.len() < 2 {
+            bail!("missing destination — pass at least <SRC> <DEST> or use --to <DEST>");
+        }
+        return handle_move_one(args).await;
+    }
+
+    let mut failures = 0usize;
+    for dest in &cm.to {
+        if !is_json_mode() && !args.is_quiet() {
+            eprintln!("→ moving to {}", dest.display());
+        }
+        if let Err(e) = handle_copy_one(args, Some(dest)).await {
+            failures += 1;
+            eprintln!("Error moving to {}: {}", dest.display(), e);
+        }
+    }
+    if failures > 0 {
+        bail!(
+            "{} of {} fan-out targets failed; sources preserved",
+            failures,
+            cm.to.len()
+        );
+    }
+
+    let recursive = args.is_recursive();
+    let verbose = args.is_verbose() && !is_json_mode();
+    for src in &cm.paths {
+        let s = src.to_string_lossy();
+        if let Some(remote_src) = parse_remote_path(&s) {
+            remote_remove(&remote_src, recursive, false, false).await?;
+            if verbose {
+                println!("removed source {}", remote_src.display());
+            }
+        } else {
+            let md = src.symlink_metadata()?;
+            if md.is_dir() {
+                tokio::fs::remove_dir_all(src).await?;
+            } else {
+                tokio::fs::remove_file(src).await?;
+            }
+            if verbose {
+                println!("removed source '{}'", src.display());
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn handle_move_one(args: &Commands) -> Result<()> {
     use crate::core::remote::parse_remote_path;
 
     let excludes = args.compile_excludes()?;

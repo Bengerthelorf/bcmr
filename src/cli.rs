@@ -159,9 +159,16 @@ impl std::fmt::Display for Shell {
 
 #[derive(Args, Debug)]
 pub struct CopyMoveArgs {
-    /// Source files and destination directory (last argument is the destination)
-    #[arg(required = true, num_args = 2..)]
+    /// Source files and destination directory (last argument is the destination,
+    /// unless --to is given — then all positionals are sources)
+    #[arg(required = true, num_args = 1..)]
     pub paths: Vec<PathBuf>,
+
+    /// Fan-out destination (repeatable). Each --to is an additional copy target;
+    /// all positional paths are sources. Errors are per-target (one failure does
+    /// not abort the others).
+    #[arg(long = "to", value_name = "DEST")]
+    pub to: Vec<PathBuf>,
 
     /// Recursively process directories
     #[arg(short, long)]
@@ -488,7 +495,7 @@ pub enum TestMode {
 }
 
 impl Commands {
-    fn copy_move_args(&self) -> Option<&CopyMoveArgs> {
+    pub fn copy_move_args(&self) -> Option<&CopyMoveArgs> {
         match self {
             Commands::Copy { args, .. } | Commands::Move { args, .. } => Some(args),
             _ => None,
@@ -755,6 +762,7 @@ mod tests {
     fn test_args(paths: Vec<PathBuf>) -> CopyMoveArgs {
         CopyMoveArgs {
             paths,
+            to: Vec::new(),
             recursive: false,
             preserve: false,
             force: false,
