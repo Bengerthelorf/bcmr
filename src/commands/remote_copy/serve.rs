@@ -121,11 +121,8 @@ pub(super) async fn handle_serve_upload(
         crate::config::is_json_mode(),
         crate::commands::copy::cleanup_partial_files,
     )?;
-    {
-        let mut p = runner.progress().lock();
-        p.set_operation_type("Uploading (serve)");
-        p.set_verify_mode(args.is_verify());
-    }
+    runner.set_operation_type("Uploading (serve)");
+    runner.set_verify_mode(args.is_verify());
 
     let multi_source = sources.len() > 1;
     for src in sources {
@@ -359,7 +356,7 @@ pub(super) async fn handle_serve_download(
             }
             if is_dir && args.is_recursive() {
                 let entries = pool.first_mut().list(&rp.path).await?;
-                let dir_name = rp.path.rsplit('/').next().unwrap_or(&rp.path);
+                let dir_name = rp.file_name();
                 let local_base = dest.join(dir_name);
                 items.push(DownloadItem {
                     remote_path: String::new(),
@@ -396,7 +393,7 @@ pub(super) async fn handle_serve_download(
             } else if !is_dir {
                 total_size += size;
                 let local = if dest.is_dir() {
-                    dest.join(rp.path.rsplit('/').next().unwrap_or(&rp.path))
+                    dest.join(rp.file_name())
                 } else {
                     dest.to_path_buf()
                 };
@@ -417,11 +414,8 @@ pub(super) async fn handle_serve_download(
         crate::config::is_json_mode(),
         crate::commands::copy::cleanup_partial_files,
     )?;
-    {
-        let mut p = runner.progress().lock();
-        p.set_operation_type("Downloading (serve)");
-        p.set_verify_mode(args.is_verify());
-    }
+    runner.set_operation_type("Downloading (serve)");
+    runner.set_verify_mode(args.is_verify());
 
     let use_stripe = args.use_direct_tcp() && pool.len() > 1 && !args.is_verify();
     let mut big_files: Vec<(String, PathBuf, u64)> = Vec::new();

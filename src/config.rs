@@ -408,7 +408,6 @@ mod tests {
             resolve_path_alias("@proj/sub/file.bin", &paths).unwrap(),
             "host:/data/sub/file.bin"
         );
-        // No trailing slash on target also works.
         paths.insert("dst".to_string(), "host:/var".to_string());
         assert_eq!(
             resolve_path_alias("@dst/log", &paths).unwrap(),

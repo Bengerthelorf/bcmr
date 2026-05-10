@@ -2,11 +2,9 @@ use crate::cli::{Commands, TestMode};
 use crate::core::error::BcmrError;
 use crate::core::traversal;
 use crate::ui::display::{print_dry_run, ActionType};
-use crate::ui::progress::ProgressRenderer;
+use crate::ui::runner::ProgressHandle;
 
-use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs;
 
@@ -175,7 +173,7 @@ pub async fn remove_path(
     is_dir: bool,
     cli: &Commands,
     excludes: &[regex::Regex],
-    progress_state: Arc<Mutex<ProgressState>>,
+    progress: ProgressHandle,
     progress_callback: impl Fn(u64) + Send + Sync,
     on_new_file: impl Fn(&str, u64) + Send + Sync,
 ) -> std::result::Result<(), BcmrError> {
@@ -245,7 +243,7 @@ pub async fn remove_path(
             }
 
             if entry_path != path {
-                progress_state.lock().inc_processed();
+                progress.inc_items_processed();
             }
 
             if cli.is_verbose() && !cli.is_dry_run() {
@@ -271,7 +269,7 @@ pub async fn remove_path(
         }
 
         fs::remove_file(path).await?;
-        progress_state.lock().inc_processed();
+        progress.inc_items_processed();
 
         if cli.is_verbose() {
             println!("removed {}", path.display());
@@ -281,36 +279,18 @@ pub async fn remove_path(
     Ok(())
 }
 
-pub struct ProgressState {
-    progress: Arc<Mutex<Box<dyn ProgressRenderer>>>,
-}
-
-impl ProgressState {
-    pub fn new(total_items: usize, progress: Arc<Mutex<Box<dyn ProgressRenderer>>>) -> Self {
-        progress.lock().set_total_items(total_items);
-        Self { progress }
-    }
-
-    pub fn inc_processed(&mut self) {
-        self.progress.lock().inc_items_processed();
-    }
-}
-
 type FileCallback = Box<dyn Fn(&str, u64) + Send + Sync>;
 
 pub async fn remove_paths(
     paths: &[PathBuf],
     cli: &Commands,
     excludes: &[regex::Regex],
-    progress: Arc<Mutex<Box<dyn ProgressRenderer>>>,
+    progress: ProgressHandle,
     progress_callback: impl Fn(u64) + Send + Sync + Clone + 'static,
     on_new_file: FileCallback,
     total_items: usize,
 ) -> std::result::Result<(), BcmrError> {
-    let progress_state = Arc::new(Mutex::new(ProgressState::new(
-        total_items,
-        Arc::clone(&progress),
-    )));
+    progress.set_total_items(total_items);
 
     for path in paths {
         remove_path(
@@ -318,7 +298,7 @@ pub async fn remove_paths(
             path.is_dir(),
             cli,
             excludes,
-            Arc::clone(&progress_state),
+            progress.clone(),
             progress_callback.clone(),
             &*on_new_file,
         )

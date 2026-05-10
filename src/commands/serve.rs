@@ -116,11 +116,15 @@ pub async fn run_listen(root: Option<PathBuf>, addr: std::net::SocketAddr) -> Re
     stdout.flush().await?;
 
     loop {
-        let (stream, _peer) = listener.accept().await?;
+        let (stream, peer) = listener.accept().await?;
         let root = root.clone();
         tokio::spawn(async move {
             let (mut reader, mut writer) = stream.into_split();
-            let _ = session::run_session(&mut reader, &mut writer, &root, false, false, None).await;
+            if let Err(e) =
+                session::run_session(&mut reader, &mut writer, &root, false, false, None).await
+            {
+                eprintln!("bcmr serve: session from {peer} failed: {e}");
+            }
         });
     }
 }

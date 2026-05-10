@@ -10,23 +10,25 @@ pub struct ServeClientPool {
 }
 
 impl ServeClientPool {
+    async fn build<F, Fut>(n: usize, mut connector: F) -> Result<Self, BcmrError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<ServeClient, BcmrError>>,
+    {
+        if n == 0 {
+            return Err(BcmrError::InvalidInput("pool size must be >= 1".into()));
+        }
+        let futures: Vec<_> = (0..n).map(|_| connector()).collect();
+        let clients = futures::future::try_join_all(futures).await?;
+        Ok(Self { clients })
+    }
+
     pub async fn connect_with_caps(
         ssh_target: &str,
         caps: u8,
         n: usize,
     ) -> Result<Self, BcmrError> {
-        if n == 0 {
-            return Err(BcmrError::InvalidInput("pool size must be >= 1".into()));
-        }
-        let target = ssh_target.to_owned();
-        let futures: Vec<_> = (0..n)
-            .map(|_| {
-                let t = target.clone();
-                async move { ServeClient::connect_with_caps(&t, caps).await }
-            })
-            .collect();
-        let clients = futures::future::try_join_all(futures).await?;
-        Ok(Self { clients })
+        Self::build(n, || ServeClient::connect_with_caps(ssh_target, caps)).await
     }
 
     pub async fn connect_direct_with_caps(
@@ -34,42 +36,19 @@ impl ServeClientPool {
         caps: u8,
         n: usize,
     ) -> Result<Self, BcmrError> {
-        if n == 0 {
-            return Err(BcmrError::InvalidInput("pool size must be >= 1".into()));
-        }
-        let target = ssh_target.to_owned();
-        let futures: Vec<_> = (0..n)
-            .map(|_| {
-                let t = target.clone();
-                async move { ServeClient::connect_direct_with_caps(&t, caps).await }
-            })
-            .collect();
-        let clients = futures::future::try_join_all(futures).await?;
-        Ok(Self { clients })
+        Self::build(n, || ServeClient::connect_direct_with_caps(ssh_target, caps)).await
     }
 
     #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     pub async fn connect_direct_local(n: usize) -> Result<Self, BcmrError> {
-        if n == 0 {
-            return Err(BcmrError::InvalidInput("pool size must be >= 1".into()));
-        }
-        let futures: Vec<_> = (0..n)
-            .map(|_| ServeClient::connect_direct_local())
-            .collect();
-        let clients = futures::future::try_join_all(futures).await?;
-        Ok(Self { clients })
+        Self::build(n, ServeClient::connect_direct_local).await
     }
 
     #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     pub async fn connect_local(n: usize) -> Result<Self, BcmrError> {
-        if n == 0 {
-            return Err(BcmrError::InvalidInput("pool size must be >= 1".into()));
-        }
-        let futures: Vec<_> = (0..n).map(|_| ServeClient::connect_local()).collect();
-        let clients = futures::future::try_join_all(futures).await?;
-        Ok(Self { clients })
+        Self::build(n, ServeClient::connect_local).await
     }
 
     pub fn len(&self) -> usize {
@@ -203,7 +182,7 @@ impl ServeClientPool {
         remote: &str,
     ) -> Result<[u8; 32], BcmrError> {
         if self.clients.is_empty() {
-            return Err(BcmrError::InvalidInput("pool is empty".into()));
+            return Err(BcmrError::pool_empty());
         }
         let file_size = tokio::fs::metadata(local).await?.len();
         self.request_truncate(remote, file_size).await?;
@@ -231,7 +210,7 @@ impl ServeClientPool {
 
         hash_task
             .await
-            .map_err(|e| BcmrError::InvalidInput(format!("hash task join: {e}")))?
+            .map_err(BcmrError::hash_task_join_failed)?
     }
 
     pub async fn striped_get_file(
@@ -241,7 +220,7 @@ impl ServeClientPool {
         remote_size: u64,
     ) -> Result<[u8; 32], BcmrError> {
         if self.clients.is_empty() {
-            return Err(BcmrError::InvalidInput("pool is empty".into()));
+            return Err(BcmrError::pool_empty());
         }
         let f = tokio::fs::OpenOptions::new()
             .write(true)
@@ -274,7 +253,7 @@ impl ServeClientPool {
 
         spawn_blake3_file(local.to_path_buf())
             .await
-            .map_err(|e| BcmrError::InvalidInput(format!("hash task join: {e}")))?
+            .map_err(BcmrError::hash_task_join_failed)?
     }
 
     async fn request_truncate(&mut self, remote: &str, size: u64) -> Result<(), BcmrError> {

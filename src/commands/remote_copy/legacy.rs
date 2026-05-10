@@ -69,11 +69,8 @@ pub(super) async fn handle_remote_upload(
         crate::config::is_json_mode(),
         crate::commands::copy::cleanup_partial_files,
     )?;
-    {
-        let mut p = runner.progress().lock();
-        p.set_operation_type("Uploading");
-        p.set_verify_mode(args.is_verify());
-    }
+    runner.set_operation_type("Uploading");
+    runner.set_verify_mode(args.is_verify());
     let multi_source = sources.len() > 1;
 
     if parallel > 1 {
@@ -96,7 +93,7 @@ pub(super) async fn handle_remote_upload(
             }
         }
 
-        run_parallel_transfers(items, parallel, runner.progress(), &opts)
+        run_parallel_transfers(items, parallel, runner.handle(), &opts)
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
     } else {
@@ -165,7 +162,7 @@ pub(super) async fn handle_remote_download(
         for (rsrc, _) in &remote_sources {
             let info = remote::remote_stat(rsrc).await?;
             if info.is_dir && args.is_recursive() {
-                let dir_name = rsrc.path.rsplit('/').next().unwrap_or(&rsrc.path);
+                let dir_name = rsrc.file_name();
                 let local_dir = if dest_local.is_dir() {
                     dest_local.join(dir_name)
                 } else {
@@ -190,7 +187,7 @@ pub(super) async fn handle_remote_download(
                 }
             } else {
                 let local_path = if dest_local.is_dir() {
-                    dest_local.join(rsrc.path.rsplit('/').next().unwrap_or(&rsrc.path))
+                    dest_local.join(rsrc.file_name())
                 } else {
                     dest_local.to_path_buf()
                 };
@@ -209,11 +206,8 @@ pub(super) async fn handle_remote_download(
         crate::config::is_json_mode(),
         crate::commands::copy::cleanup_partial_files,
     )?;
-    {
-        let mut p = runner.progress().lock();
-        p.set_operation_type("Downloading");
-        p.set_verify_mode(args.is_verify());
-    }
+    runner.set_operation_type("Downloading");
+    runner.set_verify_mode(args.is_verify());
 
     if parallel > 1 {
         runner.set_parallel_mode(parallel);
@@ -225,7 +219,7 @@ pub(super) async fn handle_remote_download(
                 if !args.is_recursive() {
                     bail!("Remote source '{}' is a directory. Use -r flag.", rsrc);
                 }
-                let dir_name = rsrc.path.rsplit('/').next().unwrap_or(&rsrc.path);
+                let dir_name = rsrc.file_name();
                 let local_dir = if dest_local.is_dir() {
                     dest_local.join(dir_name)
                 } else {
@@ -261,7 +255,7 @@ pub(super) async fn handle_remote_download(
                 }
             } else {
                 let local_path = if dest_local.is_dir() {
-                    dest_local.join(rsrc.path.rsplit('/').next().unwrap_or(&rsrc.path))
+                    dest_local.join(rsrc.file_name())
                 } else {
                     dest_local.to_path_buf()
                 };
@@ -274,7 +268,7 @@ pub(super) async fn handle_remote_download(
             }
         }
 
-        run_parallel_transfers(items, parallel, runner.progress(), &opts)
+        run_parallel_transfers(items, parallel, runner.handle(), &opts)
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
     } else {
@@ -288,7 +282,7 @@ pub(super) async fn handle_remote_download(
                 if !args.is_recursive() {
                     bail!("Remote source '{}' is a directory. Use -r flag.", rsrc);
                 }
-                let dir_name = rsrc.path.rsplit('/').next().unwrap_or(&rsrc.path);
+                let dir_name = rsrc.file_name();
                 let local_dir = if dest_local.is_dir() {
                     dest_local.join(dir_name)
                 } else {
@@ -311,7 +305,7 @@ pub(super) async fn handle_remote_download(
                 .await?;
             } else {
                 let local_path = if dest_local.is_dir() {
-                    dest_local.join(rsrc.path.rsplit('/').next().unwrap_or(&rsrc.path))
+                    dest_local.join(rsrc.file_name())
                 } else {
                     dest_local.to_path_buf()
                 };

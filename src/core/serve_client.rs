@@ -153,7 +153,7 @@ impl ServeClient {
         let tx = self
             .tx
             .as_mut()
-            .ok_or_else(|| BcmrError::InvalidInput("send framing taken".into()))?;
+            .ok_or_else(BcmrError::send_framing_taken)?;
         tx.write_message(w, msg).await?;
         w.flush().await?;
         Ok(())

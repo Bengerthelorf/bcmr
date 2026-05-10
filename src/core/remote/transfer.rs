@@ -15,8 +15,7 @@ pub async fn download_file(
     opts: &RemoteTransferOptions,
     worker_id: Option<usize>,
 ) -> Result<(), BcmrError> {
-    let file_name = remote.path.rsplit('/').next().unwrap_or(&remote.path);
-    (cb.on_new_file)(file_name, file_size);
+    (cb.on_new_file)(remote.file_name(), file_size);
 
     if let Some(parent) = local_dst.parent() {
         if !parent.exists() {

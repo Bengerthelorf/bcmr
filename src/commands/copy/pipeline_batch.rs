@@ -5,9 +5,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
 
+use super::exec::{preserve_attributes, ProgressCallback};
 use super::file_copy::{copy_file, CopyFileOptions};
 use super::overwrite::check_overwrite;
-use super::{preserve_attributes, scan_sources, PlanEntry, ProgressCallback};
+use super::plan::{scan_sources, PlanEntry};
+use super::symlinks::{check_symlink_overwrite, create_symlink_replacing};
 
 enum ScanMessage {
     Entry(PlanEntry),
@@ -123,8 +125,8 @@ where
                     ref target,
                     ..
                 } => {
-                    super::check_symlink_overwrite(dst, cli)?;
-                    super::create_symlink_replacing(dst, target).await?;
+                    check_symlink_overwrite(dst, cli)?;
+                    create_symlink_replacing(dst, target).await?;
                     if verbose {
                         eprintln!("'{}' -> '{}' (symlink)", target.display(), dst.display());
                     }

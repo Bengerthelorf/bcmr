@@ -42,3 +42,33 @@ pub enum BcmrError {
     #[error("Cryptographic failure: {0}")]
     CryptoFailure(String),
 }
+
+impl BcmrError {
+    pub fn invalid_source_file_name() -> Self {
+        BcmrError::InvalidInput("Invalid source file name".into())
+    }
+
+    pub fn invalid_source_dir_name() -> Self {
+        BcmrError::InvalidInput("Invalid source directory name".into())
+    }
+
+    pub fn invalid_remote_path<D: std::fmt::Display>(path: D) -> Self {
+        BcmrError::InvalidInput(format!("Invalid remote path: {path}"))
+    }
+
+    pub fn pool_empty() -> Self {
+        BcmrError::InvalidInput("pool is empty".into())
+    }
+
+    pub fn send_framing_taken() -> Self {
+        BcmrError::InvalidInput("send framing taken".into())
+    }
+
+    pub fn writer_taken() -> Self {
+        BcmrError::InvalidInput("writer already taken".into())
+    }
+
+    pub fn hash_task_join_failed<E: std::fmt::Display>(e: E) -> Self {
+        BcmrError::InvalidInput(format!("hash task join: {e}"))
+    }
+}

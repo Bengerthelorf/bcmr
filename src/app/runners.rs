@@ -20,13 +20,10 @@ pub(crate) fn start_scanning_runner(
         true,
         commands::copy::cleanup_partial_files,
     )?;
-    {
-        let mut p = runner.progress().lock();
-        p.set_operation_type(operation);
-        p.set_scanning(true);
-        if let Some(name) = first_display {
-            p.set_current_file(name, 0);
-        }
+    runner.set_operation_type(operation);
+    runner.set_scanning(true);
+    if let Some(name) = first_display {
+        runner.set_current_file(name, 0);
     }
     Ok(Some(runner))
 }
@@ -40,14 +37,11 @@ pub(crate) fn resume_or_new_runner(
     silent: bool,
 ) -> Result<ProgressRunner> {
     if let Some(r) = early {
-        {
-            let mut p = r.progress().lock();
-            p.set_total_bytes(total_size);
-            p.set_scanning(false);
-            p.set_verify_mode(args.is_verify());
-            if let Some(name) = first_display {
-                p.set_current_file(name, total_size);
-            }
+        r.set_total_bytes(total_size);
+        r.set_scanning(false);
+        r.set_verify_mode(args.is_verify());
+        if let Some(name) = first_display {
+            r.set_current_file(name, total_size);
         }
         return Ok(r);
     }
@@ -58,13 +52,10 @@ pub(crate) fn resume_or_new_runner(
         is_json_mode(),
         commands::copy::cleanup_partial_files,
     )?;
-    {
-        let mut p = r.progress().lock();
-        p.set_operation_type(operation);
-        p.set_verify_mode(args.is_verify());
-        if let Some(name) = first_display {
-            p.set_current_file(name, total_size);
-        }
+    r.set_operation_type(operation);
+    r.set_verify_mode(args.is_verify());
+    if let Some(name) = first_display {
+        r.set_current_file(name, total_size);
     }
     Ok(r)
 }

@@ -169,15 +169,16 @@ async fn collect_both(
     let dest_str = dest.to_string_lossy();
 
     let remote_src = if is_remote_src {
-        Some(parse_remote_path(&src_str).ok_or_else(|| {
-            BcmrError::InvalidInput(format!("Invalid remote path: {}", src.display()))
-        })?)
+        Some(
+            parse_remote_path(&src_str)
+                .ok_or_else(|| BcmrError::invalid_remote_path(src.display()))?,
+        )
     } else {
         None
     };
 
     let src_name = if let Some(ref rp) = remote_src {
-        rp.path.rsplit('/').next().unwrap_or(&rp.path).to_string()
+        rp.file_name().to_string()
     } else {
         src.file_name()
             .unwrap_or_default()
@@ -226,9 +227,8 @@ async fn collect_both(
     };
 
     let dst_entries = if is_remote_dest {
-        let rdest = parse_remote_path(&dest_str).ok_or_else(|| {
-            BcmrError::InvalidInput(format!("Invalid remote path: {}", dest.display()))
-        })?;
+        let rdest = parse_remote_path(&dest_str)
+            .ok_or_else(|| BcmrError::invalid_remote_path(dest.display()))?;
         let rdest_is_dir = remote_is_dir(&rdest, serve).await.unwrap_or(false);
         let rdest_sub = if rdest_is_dir {
             rdest.join(&src_name)
@@ -288,9 +288,8 @@ async fn collect_both(
     };
 
     let dst_root = if is_remote_dest {
-        let rdest = parse_remote_path(&dest_str).ok_or_else(|| {
-            BcmrError::InvalidInput(format!("Invalid remote path: {}", dest.display()))
-        })?;
+        let rdest = parse_remote_path(&dest_str)
+            .ok_or_else(|| BcmrError::invalid_remote_path(dest.display()))?;
         let rdest_is_dir = remote_is_dir(&rdest, serve).await.unwrap_or(false);
         match (rdest_is_dir, src_is_dir) {
             (true, true) => SideRoot::RemoteDir(rdest.join(&src_name)),

@@ -10,7 +10,6 @@ use crate::output;
 use crate::ui::runner::ProgressRunner;
 use crate::ui::utils::format_bytes;
 use anyhow::{bail, Result};
-use std::sync::Arc;
 
 #[cfg(unix)]
 fn validate_source_kind(src: &std::path::Path) -> Result<()> {
@@ -280,28 +279,25 @@ async fn handle_copy_one(args: &Commands, dest_override: Option<&std::path::Path
             commands::copy::cleanup_partial_files,
         )?;
 
-        {
-            let mut p = runner.progress().lock();
-            p.set_operation_type("Copying");
-            p.set_scanning(true);
-            p.set_verify_mode(args.is_verify());
-            if let Some(first) = sources.first() {
-                let display_name = first.file_name().unwrap_or_default().to_string_lossy();
-                p.set_current_file(&display_name, 0);
-            }
+        runner.set_operation_type("Copying");
+        runner.set_scanning(true);
+        runner.set_verify_mode(args.is_verify());
+        if let Some(first) = sources.first() {
+            let display_name = first.file_name().unwrap_or_default().to_string_lossy();
+            runner.set_current_file(&display_name, 0);
         }
 
         let total_cb = {
-            let p = Arc::clone(runner.progress());
-            move |total: u64| p.lock().set_total_bytes(total)
+            let h = runner.handle();
+            move |total: u64| h.set_total_bytes(total)
         };
         let scan_done_cb = {
-            let p = Arc::clone(runner.progress());
-            move || p.lock().set_scanning(false)
+            let h = runner.handle();
+            move || h.set_scanning(false)
         };
         let files_found_cb = {
-            let p = Arc::clone(runner.progress());
-            move |count: u64| p.lock().set_files_found(count)
+            let h = runner.handle();
+            move |count: u64| h.set_files_found(count)
         };
 
         let result = commands::copy::pipeline_copy(
@@ -665,7 +661,7 @@ pub(crate) async fn handle_remove_command(args: &Commands) -> Result<()> {
             &local_paths,
             args,
             &excludes,
-            Arc::clone(runner.progress()),
+            runner.handle(),
             runner.inc_callback(),
             Box::new(runner.file_callback()),
             files_to_remove.len(),
@@ -718,7 +714,7 @@ pub(crate) async fn handle_remove_command(args: &Commands) -> Result<()> {
         &local_paths,
         args,
         &excludes,
-        Arc::clone(runner.progress()),
+        runner.handle(),
         runner.inc_callback(),
         Box::new(runner.file_callback()),
         files_to_remove.len(),

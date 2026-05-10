@@ -64,14 +64,11 @@ where
     }
 
     if src.is_file() {
-        let dst_path =
-            if dst.is_dir() {
-                dst.join(src.file_name().ok_or_else(|| {
-                    BcmrError::InvalidInput("Invalid source file name".to_string())
-                })?)
-            } else {
-                dst.to_path_buf()
-            };
+        let dst_path = if dst.is_dir() {
+            dst.join(src.file_name().ok_or_else(BcmrError::invalid_source_file_name)?)
+        } else {
+            dst.to_path_buf()
+        };
 
         if dst_path.exists() && !cli.is_force() {
             return Err(BcmrError::TargetExists(dst_path));
@@ -127,7 +124,7 @@ where
     } else if recursive && src.is_dir() {
         let src_name = src
             .file_name()
-            .ok_or_else(|| BcmrError::InvalidInput("Invalid source directory name".to_string()))?;
+            .ok_or_else(BcmrError::invalid_source_dir_name)?;
         let new_dst = if dst.is_dir() {
             dst.join(src_name)
         } else {

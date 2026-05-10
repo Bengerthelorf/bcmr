@@ -2,7 +2,7 @@ use crate::cli::Commands;
 use crate::config::CONFIG;
 use crate::core::error::BcmrError;
 use crate::core::remote::{self, parse_remote_path, RemotePath};
-use crate::ui::progress::ProgressRenderer;
+use crate::ui::runner::ProgressHandle;
 use anyhow::Result;
 use parking_lot::Mutex;
 use std::path::PathBuf;
@@ -49,16 +49,19 @@ fn should_compress(items: &[TransferItem]) -> bool {
     let (mut compressible, mut total) = (0u64, 0u64);
     for item in items {
         total += item.size;
-        let ext = std::path::Path::new(if item.is_upload {
+        let path_str = if item.is_upload {
             item.local_path.to_str().unwrap_or("")
         } else {
             &item.remote.path
-        })
-        .extension()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_lowercase();
-        if !COMPRESSED_EXTENSIONS.contains(&ext.as_str()) {
+        };
+        let ext = std::path::Path::new(path_str)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default();
+        let already_compressed = COMPRESSED_EXTENSIONS
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(ext));
+        if !already_compressed {
             compressible += item.size;
         }
     }
@@ -68,7 +71,7 @@ fn should_compress(items: &[TransferItem]) -> bool {
 pub(super) async fn run_parallel_transfers(
     items: Vec<TransferItem>,
     parallel: usize,
-    progress: &Arc<Mutex<Box<dyn ProgressRenderer>>>,
+    progress: ProgressHandle,
     opts: &remote::RemoteTransferOptions,
 ) -> Result<(), BcmrError> {
     let semaphore = Arc::new(tokio::sync::Semaphore::new(parallel));
@@ -79,7 +82,7 @@ pub(super) async fn run_parallel_transfers(
     for item in items {
         let sem = Arc::clone(&semaphore);
         let pool = Arc::clone(&slot_pool);
-        let prog = Arc::clone(progress);
+        let prog = progress.clone();
         let errs = Arc::clone(&errors);
         let task_opts = opts.clone();
 
@@ -100,35 +103,31 @@ pub(super) async fn run_parallel_transfers(
                     .to_string_lossy()
                     .to_string()
             } else {
-                item.remote
-                    .path
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&item.remote.path)
-                    .to_string()
+                item.remote.file_name().to_string()
             };
 
             let worker_bytes = Arc::new(AtomicU64::new(0));
             let fsize = item.size;
 
             let wb = Arc::clone(&worker_bytes);
-            let p = Arc::clone(&prog);
+            let p = prog.clone();
             let fname = file_name.clone();
             let progress_cb = move |n: u64| {
                 let total = wb.fetch_add(n, AtomicOrdering::Relaxed) + n;
-                let mut guard = p.lock();
-                guard.inc_current(n);
-                guard.update_worker(slot, &fname, fsize, total);
+                p.with(|r| {
+                    r.inc_current(n);
+                    r.update_worker(slot, &fname, fsize, total);
+                });
             };
 
-            let p2 = Arc::clone(&prog);
+            let p2 = prog.clone();
             let noop_file_cb = move |name: &str, size: u64| {
-                p2.lock().update_worker(slot, name, size, 0);
+                p2.update_worker(slot, name, size, 0);
             };
 
-            let p_skip = Arc::clone(&prog);
+            let p_skip = prog.clone();
             let skip_cb = move |n: u64| {
-                p_skip.lock().inc_skipped(n);
+                p_skip.inc_skipped(n);
             };
 
             let result = if item.is_upload {
@@ -164,7 +163,7 @@ pub(super) async fn run_parallel_transfers(
                 errs.lock().push(e.to_string());
             }
 
-            prog.lock().finish_worker(slot);
+            prog.finish_worker(slot);
             pool.lock().push(slot);
         }));
     }

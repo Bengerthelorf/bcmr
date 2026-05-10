@@ -167,11 +167,11 @@ impl ServeClient {
         let w = self
             .writer
             .as_mut()
-            .ok_or_else(|| BcmrError::InvalidInput("writer already taken".into()))?;
+            .ok_or_else(BcmrError::writer_taken)?;
         let tx = self
             .tx
             .as_mut()
-            .ok_or_else(|| BcmrError::InvalidInput("send framing taken".into()))?;
+            .ok_or_else(BcmrError::send_framing_taken)?;
         super::super::serve_client::write_file_data_frames_from(w, tx, data, offset, algo, &|_| {})
             .await
     }
@@ -181,11 +181,11 @@ impl ServeClient {
         let w = self
             .writer
             .as_mut()
-            .ok_or_else(|| BcmrError::InvalidInput("writer already taken".into()))?;
+            .ok_or_else(BcmrError::writer_taken)?;
         let tx = self
             .tx
             .as_mut()
-            .ok_or_else(|| BcmrError::InvalidInput("send framing taken".into()))?;
+            .ok_or_else(BcmrError::send_framing_taken)?;
         write_file_data_frames(w, tx, data, algo, &|_| {}).await
     }
 
@@ -209,11 +209,11 @@ impl ServeClient {
         let w = self
             .writer
             .as_mut()
-            .ok_or_else(|| BcmrError::InvalidInput("writer already taken".into()))?;
+            .ok_or_else(BcmrError::writer_taken)?;
         let tx = self
             .tx
             .as_mut()
-            .ok_or_else(|| BcmrError::InvalidInput("send framing taken".into()))?;
+            .ok_or_else(BcmrError::send_framing_taken)?;
 
         let mut file = File::open(local).await?;
         file.seek(std::io::SeekFrom::Start(local_offset)).await?;

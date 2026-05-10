@@ -29,9 +29,7 @@ pub async fn check_overwrites(
 
         if src.is_file() {
             let dst_path = if dst_is_dir {
-                dst.join(src.file_name().ok_or_else(|| {
-                    BcmrError::InvalidInput("Invalid source file name".to_string())
-                })?)
+                dst.join(src.file_name().ok_or_else(BcmrError::invalid_source_file_name)?)
             } else {
                 dst.to_path_buf()
             };
@@ -43,9 +41,9 @@ pub async fn check_overwrites(
                 });
             }
         } else if recursive && src.is_dir() {
-            let src_name = src.file_name().ok_or_else(|| {
-                BcmrError::InvalidInput("Invalid source directory name".to_string())
-            })?;
+            let src_name = src
+                .file_name()
+                .ok_or_else(BcmrError::invalid_source_dir_name)?;
             let new_dst = if dst_is_dir {
                 dst.join(src_name)
             } else {

@@ -51,6 +51,10 @@ impl RemotePath {
         format!("{}:{}", target, self.path)
     }
 
+    pub fn file_name(&self) -> &str {
+        self.path.rsplit('/').next().unwrap_or(&self.path)
+    }
+
     pub fn join(&self, subpath: &str) -> Self {
         let path = if self.path.ends_with('/') {
             format!("{}{}", self.path, subpath)
@@ -303,7 +307,6 @@ mod tests {
         };
         assert_eq!(r2.display(), "me@[fe80::1%eth0]:/foo");
 
-        // Round-trip: display output should re-parse to the same value.
         let parsed = parse_remote_path(&r.display()).unwrap();
         assert_eq!(parsed.host, r.host);
         assert_eq!(parsed.path, r.path);
