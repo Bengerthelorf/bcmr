@@ -40,6 +40,22 @@ pub struct Config {
     pub update_check: UpdateCheck,
     #[serde(default)]
     pub paths: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub host: std::collections::HashMap<String, HostDefaults>,
+    #[serde(default)]
+    pub profile: std::collections::HashMap<String, ProfileDefaults>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct HostDefaults {
+    #[serde(default)]
+    pub default_args: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ProfileDefaults {
+    #[serde(default)]
+    pub default_args: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -163,6 +179,8 @@ impl Default for Config {
             transfer: TransferConfig::default(),
             update_check: UpdateCheck::default(),
             paths: std::collections::HashMap::new(),
+            host: std::collections::HashMap::new(),
+            profile: std::collections::HashMap::new(),
         }
     }
 }

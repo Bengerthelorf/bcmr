@@ -669,7 +669,27 @@ impl Commands {
 }
 
 pub fn parse_args() -> Cli {
-    Cli::parse()
+    let raw: Vec<String> = std::env::args().collect();
+    // CONFIG is Lazy and reads $BCMR_CONFIG; propagate --config before the
+    // first deref so host/profile defaults come from the file the user named.
+    if let Some(path) = pre_scan_config_path(&raw) {
+        std::env::set_var("BCMR_CONFIG", path);
+    }
+    let injected = crate::app::argv_inject::inject_defaults(raw, &crate::config::CONFIG);
+    Cli::parse_from(injected)
+}
+
+fn pre_scan_config_path(argv: &[String]) -> Option<String> {
+    let mut iter = argv.iter().peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "--config" {
+            return iter.next().cloned();
+        }
+        if let Some(rest) = arg.strip_prefix("--config=") {
+            return Some(rest.to_string());
+        }
+    }
+    None
 }
 
 fn parse_test_mode(s: &str) -> Result<TestMode, String> {
