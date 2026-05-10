@@ -169,10 +169,7 @@ impl Default for Config {
 
 pub static CONFIG: Lazy<Config> = Lazy::new(|| Config::new().unwrap_or_else(|_| Config::default()));
 
-pub fn resolve_path_alias(
-    input: &str,
-    paths: &std::collections::HashMap<String, String>,
-) -> Option<String> {
+pub fn parse_alias_token(input: &str) -> Option<(&str, &str)> {
     let bytes = input.as_bytes();
     if bytes.first() != Some(&b'@') {
         return None;
@@ -185,9 +182,31 @@ pub fn resolve_path_alias(
     if name.is_empty() {
         return None;
     }
+    Some((name, &input[suffix_start..]))
+}
+
+pub fn is_valid_alias_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+pub fn resolve_path_alias(
+    input: &str,
+    paths: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    let (name, suffix) = parse_alias_token(input)?;
     let target = paths.get(name)?;
-    let suffix = &input[suffix_start..];
-    Some(format!("{}{}", target.trim_end_matches('/'), suffix))
+    if suffix.is_empty() {
+        Some(target.clone())
+    } else {
+        Some(format!("{}{}", target.trim_end_matches('/'), suffix))
+    }
 }
 
 impl Config {
@@ -334,10 +353,33 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_path_alias_substitutes_bare_alias() {
+    fn test_resolve_path_alias_preserves_trailing_slash_for_bare_alias() {
         let mut paths = std::collections::HashMap::new();
         paths.insert("proj".to_string(), "host:/data/".to_string());
-        assert_eq!(resolve_path_alias("@proj", &paths).unwrap(), "host:/data");
+        assert_eq!(resolve_path_alias("@proj", &paths).unwrap(), "host:/data/");
+        paths.insert("flat".to_string(), "host:/var".to_string());
+        assert_eq!(resolve_path_alias("@flat", &paths).unwrap(), "host:/var");
+    }
+
+    #[test]
+    fn test_is_valid_alias_name() {
+        assert!(is_valid_alias_name("proj"));
+        assert!(is_valid_alias_name("Proj_2"));
+        assert!(is_valid_alias_name("a-b-c"));
+        assert!(is_valid_alias_name("_underscore"));
+        assert!(!is_valid_alias_name(""));
+        assert!(!is_valid_alias_name("1leading-digit"));
+        assert!(!is_valid_alias_name("with space"));
+        assert!(!is_valid_alias_name("with/slash"));
+        assert!(!is_valid_alias_name("with:colon"));
+    }
+
+    #[test]
+    fn test_parse_alias_token() {
+        assert_eq!(parse_alias_token("@proj"), Some(("proj", "")));
+        assert_eq!(parse_alias_token("@proj/x/y"), Some(("proj", "/x/y")));
+        assert_eq!(parse_alias_token("local"), None);
+        assert_eq!(parse_alias_token("@"), None);
     }
 
     #[test]
