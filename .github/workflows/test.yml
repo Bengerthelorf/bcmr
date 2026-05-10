@@ -311,6 +311,40 @@ jobs:
           rm -rf "$tmp"
           echo "Path bookmark tests passed"
 
+      - name: Test profile + per-host default args
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          tmp=$(mktemp -d)
+          cat > "$tmp/cfg.toml" <<EOF
+          [profile.verify]
+          default_args = ["-V"]
+          EOF
+          echo "profile-test" > "$tmp/src.txt"
+
+          # Without profile: no 'verified' suffix.
+          out_no=$(cargo run --quiet -- --config "$tmp/cfg.toml" copy --plain "$tmp/src.txt" "$tmp/no.txt" 2>&1)
+          if echo "$out_no" | grep -q "verified"; then
+            echo "FAIL: 'verified' should not appear without profile"; exit 1;
+          fi
+
+          # --profile: 'verified' appears (profile injects -V).
+          out_p=$(cargo run --quiet -- --config "$tmp/cfg.toml" --profile verify copy --plain "$tmp/src.txt" "$tmp/p.txt" 2>&1)
+          echo "$out_p" | grep -q "verified" || { echo "FAIL: --profile verify should inject -V"; exit 1; }
+
+          # BCMR_PROFILE env: same.
+          out_e=$(BCMR_PROFILE=verify cargo run --quiet -- --config "$tmp/cfg.toml" copy --plain "$tmp/src.txt" "$tmp/e.txt" 2>&1)
+          echo "$out_e" | grep -q "verified" || { echo "FAIL: BCMR_PROFILE should inject -V"; exit 1; }
+
+          # Unknown profile: silent no-op.
+          out_u=$(cargo run --quiet -- --config "$tmp/cfg.toml" --profile missing copy --plain "$tmp/src.txt" "$tmp/u.txt" 2>&1)
+          if echo "$out_u" | grep -q "verified"; then
+            echo "FAIL: unknown profile should not inject anything"; exit 1;
+          fi
+
+          rm -rf "$tmp"
+          echo "Profile defaults tests passed"
+
       - name: Test exclude patterns
         shell: bash
         run: |

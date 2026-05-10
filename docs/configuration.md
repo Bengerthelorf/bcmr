@@ -159,6 +159,49 @@ bcmr copy report.pdf  @backup/today/  # → nas:/backups/today/
 
 Aliases work in every position that accepts a path: source list, destination, `bcmr check`, `bcmr remove`.
 
+## Per-Host Default Flags
+
+Apply a fixed set of flags whenever a transfer involves a particular host:
+
+```toml
+[host."lab"]
+default_args = ["-p", "--compress", "zstd", "--reflink", "force"]
+
+[host."slow_link"]
+default_args = ["--bwlimit", "200K"]
+```
+
+```sh
+bcmr copy ./project/ lab:dst/
+# resolves to: bcmr copy -p --compress zstd --reflink force ./project/ lab:dst/
+```
+
+The host name matched is whatever appears in the `host:` portion of any source or destination argument (first one found wins). Explicit CLI flags appear after the injected defaults, so a user-typed `--compress none` overrides a host's `default_args = ["--compress", "zstd"]`.
+
+## Profiles
+
+Named bundles activated by `--profile <name>` or `BCMR_PROFILE=<name>`:
+
+```toml
+[profile.work]
+default_args = ["-p", "-V"]
+
+[profile.home]
+default_args = ["-p"]
+```
+
+```sh
+bcmr --profile work copy ./report.pdf host:dst/
+# resolves to: bcmr copy -p -V ./report.pdf host:dst/
+
+BCMR_PROFILE=home bcmr copy ./report.pdf host:dst/
+# resolves to: bcmr copy -p ./report.pdf host:dst/
+```
+
+**Precedence (left wins):** `explicit user flags > host defaults > profile defaults > built-in defaults`. The injection ordering is `profile, host, user`, all left-to-right; clap parses earlier-then-later, so user flags win.
+
+Unknown `--profile <name>` (no matching `[profile.<name>]` table) is a silent no-op — the rest of the command runs unchanged.
+
 ## Environment Variables
 
 | Variable | Default | Description |
