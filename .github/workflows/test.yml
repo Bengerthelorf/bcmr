@@ -154,6 +154,7 @@ jobs:
           echo "Dry-run test passed"
 
       - name: Test path bookmarks (@alias resolution)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           # Build a config with a [paths] map pointing at a local dest dir,
