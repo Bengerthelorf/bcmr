@@ -2,6 +2,7 @@ pub mod check;
 pub mod copy;
 mod copy_strategies;
 pub mod deploy;
+pub mod doctor;
 pub mod init;
 pub mod jobs;
 pub mod r#move;

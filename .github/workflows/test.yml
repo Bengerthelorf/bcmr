@@ -364,6 +364,7 @@ jobs:
           cargo run -- init --help
           cargo run -- update --help
           cargo run -- completions --help
+          cargo run -- doctor --help
           echo "Help/version tests passed"
 
       - name: Test no-args common-usage hint
@@ -380,3 +381,43 @@ jobs:
           err=$(cargo run --quiet -- cp 2>&1 || true)
           echo "$err" | grep -q "copy" || { echo "FAIL: did-you-mean did not suggest 'copy' for 'cp'"; exit 1; }
           echo "no-args + did-you-mean tests passed"
+
+      - name: Test bcmr doctor (local + JSON shape)
+        shell: bash
+        run: |
+          # Plain run with no host args should exit 0 on a healthy CI runner.
+          out=$(cargo run --quiet -- doctor)
+          echo "$out"
+          echo "$out" | grep -q "Local:" || { echo "FAIL: missing 'Local:' header"; exit 1; }
+          echo "$out" | grep -q "config file" || { echo "FAIL: missing config file check"; exit 1; }
+          echo "$out" | grep -q "jobs dir" || { echo "FAIL: missing jobs dir check"; exit 1; }
+          echo "$out" | grep -q "Pass host arguments" || { echo "FAIL: missing host hint"; exit 1; }
+
+          # JSON shape: single object with the four documented top-level keys.
+          js=$(cargo run --quiet -- --json doctor)
+          echo "$js"
+          echo "$js" | grep -q '"bcmr_version"' || { echo "FAIL: missing bcmr_version"; exit 1; }
+          echo "$js" | grep -q '"local"' || { echo "FAIL: missing local array"; exit 1; }
+          echo "$js" | grep -q '"hosts"' || { echo "FAIL: missing hosts array"; exit 1; }
+          echo "$js" | grep -q '"ok":true' || { echo "FAIL: missing ok=true on healthy local"; exit 1; }
+
+          # Unreachable host should make the run exit non-zero.
+          if cargo run --quiet -- doctor this-host-does-not-resolve.invalid 2>/dev/null; then
+            echo "FAIL: doctor against unreachable host should exit non-zero"
+            exit 1
+          fi
+
+          # --config <PATH> should be honored — point at a file with valid TOML
+          # and confirm doctor names it back in the report. We assert the
+          # basename only because mktemp on Windows Git Bash returns a Unix-
+          # style path while Rust prints the canonical Windows path.
+          tmp=$(mktemp)
+          echo '[progress]' > "$tmp"
+          echo 'style = "plain"' >> "$tmp"
+          out2=$(cargo run --quiet -- --config "$tmp" doctor)
+          echo "$out2"
+          base=$(basename "$tmp")
+          echo "$out2" | grep -q "$base" || { echo "FAIL: --config basename '$base' not surfaced"; exit 1; }
+          rm -f "$tmp"
+
+          echo "doctor smoke tests passed"

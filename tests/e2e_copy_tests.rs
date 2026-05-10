@@ -1158,6 +1158,37 @@ fn e2e_config_override_layers_on_top_of_defaults() {
 }
 
 #[test]
+fn e2e_doctor_no_args_emits_local_checks() {
+    let (ok, stdout, _stderr) = run_bcmr(&["doctor"]);
+    assert!(ok, "doctor with no host should exit 0 on a healthy local");
+    assert!(stdout.contains("Local:"), "got: {stdout}");
+    assert!(stdout.contains("config file"), "got: {stdout}");
+    assert!(stdout.contains("jobs dir"), "got: {stdout}");
+    assert!(stdout.contains("color env"), "got: {stdout}");
+    assert!(
+        stdout.contains("Pass host arguments"),
+        "missing host hint, got: {stdout}"
+    );
+}
+
+#[test]
+fn e2e_doctor_unreachable_host_fails_with_exit_1() {
+    let (ok, _stdout, _stderr) = run_bcmr(&["doctor", "this-host-does-not-resolve.invalid"]);
+    assert!(!ok, "doctor against unreachable host should exit non-zero");
+}
+
+#[test]
+fn e2e_doctor_json_emits_structured_report() {
+    let (ok, stdout, _stderr) = run_bcmr(&["--json", "doctor"]);
+    assert!(ok);
+    let trimmed = stdout.trim();
+    assert!(trimmed.starts_with('{'), "got: {stdout}");
+    for token in ["\"bcmr_version\"", "\"local\"", "\"hosts\"", "\"ok\":true"] {
+        assert!(trimmed.contains(token), "missing {token} in JSON: {stdout}");
+    }
+}
+
+#[test]
 fn e2e_same_host_remote_to_remote_copy_refuses() {
     let (ok, _stdout, stderr) = run_bcmr(&[
         "copy",

@@ -13,6 +13,8 @@ pub use ops::{
     resolve_remote_home, validate_ssh_connection,
 };
 pub use resume::{check_resume_state, ResumeDecision};
+#[allow(unused_imports)]
+pub(crate) use ssh_cmd::ssh_error_message;
 pub use transfer::{
     download_directory, download_file, ensure_remote_tree, upload_directory, upload_file,
 };

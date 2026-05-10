@@ -169,6 +169,9 @@ async fn main() -> Result<()> {
             let remote_path = path.as_deref().unwrap_or("~/.local/bin/bcmr");
             commands::deploy::run(target, remote_path, *sudo).await?;
         }
+        Commands::Doctor { hosts } => {
+            commands::doctor::run(hosts, is_json_mode()).await?;
+        }
         Commands::CompleteRemote { partial } => {
             for entry in crate::core::remote::complete_remote_path(partial).await {
                 println!("{}", entry);

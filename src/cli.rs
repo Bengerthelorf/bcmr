@@ -337,6 +337,13 @@ pub enum Commands {
         shell: clap_complete::Shell,
     },
 
+    /// Diagnose local + remote setup (ssh / config / bcmr presence)
+    Doctor {
+        /// Optional remote hosts (user@host) to probe
+        #[arg(value_name = "HOST")]
+        hosts: Vec<String>,
+    },
+
     #[command(hide = true)]
     Serve {
         /// Restrict all paths to this directory (defaults to $HOME)
