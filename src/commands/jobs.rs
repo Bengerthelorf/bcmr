@@ -34,6 +34,9 @@ pub fn new_job_id() -> String {
 }
 
 pub fn jobs_dir() -> PathBuf {
+    if let Some(custom) = std::env::var_os("BCMR_JOBS_DIR") {
+        return PathBuf::from(custom);
+    }
     let base = directories::BaseDirs::new()
         .map(|d| d.data_local_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("/tmp"));

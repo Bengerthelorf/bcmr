@@ -472,6 +472,12 @@ jobs:
           # contain a terminal "result" line after the job finishes.
           set -eu
 
+          # Pin jobs dir so the test and bcmr agree across platforms
+          # (default differs on macOS via the `directories` crate).
+          export BCMR_JOBS_DIR="$(mktemp -d)/bcmr/jobs"
+          mkdir -p "$BCMR_JOBS_DIR"
+          jobs_dir="$BCMR_JOBS_DIR"
+
           root=/tmp/bcmr-json-bg
           rm -rf "$root"
           mkdir -p "$root"
@@ -545,8 +551,6 @@ jobs:
 
           # Stale-job lifecycle: a header pointing at a dead pid + no result event
           # must error within STARTUP_GRACE rather than poll forever.
-          jobs_dir="${XDG_DATA_HOME:-$HOME/.local/share}/bcmr/jobs"
-          mkdir -p "$jobs_dir"
           stale_id="stale-$$"
           dead_pid=$(bash -c 'sleep 0.05 & echo $!; wait')
           printf '{"job_id":"%s","pid":%s,"log":"%s/%s.jsonl"}\n' \

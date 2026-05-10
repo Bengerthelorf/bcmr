@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
-const STARTUP_GRACE: Duration = Duration::from_secs(2);
+const STARTUP_GRACE: Duration = Duration::from_secs(1);
 
 pub(crate) fn status_detail(latest: &str) -> String {
     serde_json::from_str::<serde_json::Value>(latest)
