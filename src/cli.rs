@@ -594,7 +594,12 @@ impl Commands {
     pub fn local_jobs(&self) -> usize {
         self.copy_move_args()
             .and_then(|a| a.jobs)
-            .unwrap_or_else(|| num_cpus::get().clamp(1, 8))
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(1)
+                    .clamp(1, 8)
+            })
     }
 
     pub fn compression_caps(&self) -> u8 {
