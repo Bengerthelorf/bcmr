@@ -239,8 +239,8 @@ mod tests {
             .unwrap();
 
         let mut recv = u64::MAX;
-        let err = decrypt_message(&mut in_out, &key, Direction::ClientToServer, &mut recv)
-            .unwrap_err();
+        let err =
+            decrypt_message(&mut in_out, &key, Direction::ClientToServer, &mut recv).unwrap_err();
         assert!(matches!(err, BcmrError::CryptoFailure(_)));
     }
 

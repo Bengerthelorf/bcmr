@@ -124,16 +124,28 @@ pub async fn run_listen(root: Option<PathBuf>, addr: std::net::SocketAddr) -> Re
         .await?;
     stdout.flush().await?;
 
+    let mut sessions = tokio::task::JoinSet::new();
+    let shutdown = tokio::signal::ctrl_c();
+    tokio::pin!(shutdown);
     loop {
-        let (stream, peer) = listener.accept().await?;
-        let root = root.clone();
-        tokio::spawn(async move {
-            let (mut reader, mut writer) = stream.into_split();
-            if let Err(e) =
-                session::run_session(&mut reader, &mut writer, &root, false, false, None).await
-            {
-                eprintln!("bcmr serve: session from {peer} failed: {e}");
+        tokio::select! {
+            accept = listener.accept() => {
+                let (stream, peer) = accept?;
+                let root = root.clone();
+                sessions.spawn(async move {
+                    let (mut reader, mut writer) = stream.into_split();
+                    if let Err(e) =
+                        session::run_session(&mut reader, &mut writer, &root, false, false, None).await
+                    {
+                        eprintln!("bcmr serve: session from {peer} failed: {e}");
+                    }
+                });
             }
-        });
+            _ = &mut shutdown => {
+                eprintln!("bcmr serve: shutdown requested, draining {} session(s)", sessions.len());
+                while sessions.join_next().await.is_some() {}
+                return Ok(());
+            }
+        }
     }
 }
