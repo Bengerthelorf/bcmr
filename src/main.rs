@@ -149,8 +149,16 @@ async fn main() -> Result<()> {
             rm,
             all,
             gc,
+            watch,
         } => {
-            handle_status_command(job_id, *rm, *all, *gc);
+            if *watch {
+                let id = job_id
+                    .as_deref()
+                    .expect("clap requires job_id with --watch");
+                app::status::watch_job(id).await?;
+            } else {
+                handle_status_command(job_id, *rm, *all, *gc);
+            }
         }
         Commands::Init { .. } => handle_init_command(&cli.command)?,
         Commands::Update { check } => {
