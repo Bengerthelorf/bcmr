@@ -23,6 +23,8 @@ ENVIRONMENT:
   BCMR_CAS_CAP_MB               CAS size cap in MB
   BCMR_DEBUG_SSH_STDERR=1       surface ssh stderr for debugging
   BCMR_RENDEZVOUS_TIMEOUT_SECS  direct-TCP rendezvous timeout (seconds)
+  BCMR_SSH_NO_MULTIPLEX=1       disable ControlMaster (one TCP connect per process;
+                                avoids OpenSSH MaxSessions exhaustion at high parallelism)
   BCMR_UNSAFE_LAN_LISTEN=1      opt-in to LAN listen on 'bcmr serve' (requires peer-auth)
   NO_COLOR                      any non-empty value disables colored output
   TERM=dumb                     selects plain renderer
@@ -126,6 +128,11 @@ pub struct Cli {
     /// Use this config file instead of ~/.config/bcmr/config.toml (layered on top of defaults)
     #[arg(long, global = true, value_name = "PATH")]
     pub config: Option<PathBuf>,
+
+    /// Use a named profile from config (overrides BCMR_PROFILE)
+    // argv_inject consumes --profile before clap parses; declared here only so it shows in --help.
+    #[arg(long, global = true, value_name = "NAME")]
+    pub profile: Option<String>,
 
     #[arg(long = "_bg", hide = true)]
     pub _bg: Option<String>,
@@ -710,13 +717,67 @@ impl Commands {
 
 pub fn parse_args() -> Cli {
     let raw: Vec<String> = std::env::args().collect();
+    // We can't set propagate_version: clap would auto-assign -V to every
+    // subcommand, colliding with --verify. Hand-roll detection so users still
+    // get `bcmr <sub> --version`.
+    if subcommand_version_requested(&raw) {
+        println!("bcmr {}", env!("CARGO_PKG_VERSION"));
+        std::process::exit(0);
+    }
     // CONFIG is Lazy and reads $BCMR_CONFIG; propagate --config before the
     // first deref so host/profile defaults come from the file the user named.
+    // For explicit --config, fail loudly on missing/invalid file — silent
+    // fallback would silently disable the user's bookmarks/profiles.
     if let Some(path) = pre_scan_config_path(&raw) {
+        if let Err(msg) = validate_explicit_config(&path) {
+            eprintln!("Error: {msg}");
+            std::process::exit(64);
+        }
         std::env::set_var("BCMR_CONFIG", path);
     }
-    let injected = crate::app::argv_inject::inject_defaults(raw, &crate::config::CONFIG);
+    let injected = crate::app::argv_inject::inject_defaults(raw, &crate::config::CONFIG)
+        .unwrap_or_else(|e| {
+            eprintln!("Error: {e}");
+            std::process::exit(64);
+        });
     Cli::parse_from(injected)
+}
+
+fn validate_explicit_config(path: &str) -> Result<(), String> {
+    let p = std::path::Path::new(path);
+    if !p.exists() {
+        return Err(format!("--config file not found: {path}"));
+    }
+    config::Config::builder()
+        .add_source(config::File::from(p.to_path_buf()))
+        .build()
+        .map_err(|e| format!("--config '{path}' is not valid: {e}"))?;
+    Ok(())
+}
+
+fn subcommand_version_requested(argv: &[String]) -> bool {
+    // Sync with Cli's global value-taking flags (--json is bool, excluded).
+    const TOP_LEVEL_FLAGS_WITH_VALUE: &[&str] = &["--config", "--profile", "--_bg"];
+    let mut i = 1;
+    while i < argv.len() {
+        let a = &argv[i];
+        if a == "--" {
+            return false;
+        }
+        if a.starts_with('-') {
+            let takes_value = !a.contains('=') && TOP_LEVEL_FLAGS_WITH_VALUE.contains(&a.as_str());
+            i += if takes_value { 2 } else { 1 };
+            continue;
+        }
+        if a == "help" {
+            return false;
+        }
+        return argv[i + 1..]
+            .iter()
+            .take_while(|t| t.as_str() != "--")
+            .any(|t| t == "--version");
+    }
+    false
 }
 
 fn pre_scan_config_path(argv: &[String]) -> Option<String> {
@@ -754,6 +815,48 @@ fn parse_test_mode(s: &str) -> Result<TestMode, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn argv(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn subcommand_version_requested_basic() {
+        assert!(subcommand_version_requested(&argv(&["bcmr", "copy", "--version"])));
+        assert!(subcommand_version_requested(&argv(&["bcmr", "ls", "--version"])));
+        assert!(!subcommand_version_requested(&argv(&["bcmr", "--version"])));
+        assert!(!subcommand_version_requested(&argv(&["bcmr"])));
+    }
+
+    #[test]
+    fn subcommand_version_requested_skips_help_and_dashdash() {
+        assert!(!subcommand_version_requested(&argv(&[
+            "bcmr", "help", "copy", "--version"
+        ])));
+        assert!(!subcommand_version_requested(&argv(&[
+            "bcmr", "copy", "--", "--version"
+        ])));
+    }
+
+    #[test]
+    fn subcommand_version_requested_handles_global_flag_values() {
+        assert!(subcommand_version_requested(&argv(&[
+            "bcmr",
+            "--config",
+            "/some/path",
+            "copy",
+            "--version"
+        ])));
+        assert!(subcommand_version_requested(&argv(&[
+            "bcmr", "--json", "copy", "--version"
+        ])));
+        assert!(subcommand_version_requested(&argv(&[
+            "bcmr",
+            "--config=/some/path",
+            "ls",
+            "--version"
+        ])));
+    }
 
     #[test]
     fn test_parse_test_mode_delay() {
