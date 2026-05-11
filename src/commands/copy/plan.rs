@@ -30,6 +30,20 @@ pub struct CopyPlan {
     pub overwrites: Vec<FileToOverwrite>,
 }
 
+fn is_dst_self_or_under_src(src: &Path, dst: &Path) -> std::io::Result<bool> {
+    let src_canon = src.canonicalize()?;
+    let mut probe = dst.to_path_buf();
+    while !probe.exists() {
+        if !probe.pop() {
+            return Ok(false);
+        }
+    }
+    // probe was produced by popping components from dst, so it's a lexical prefix.
+    let suffix = dst.strip_prefix(&probe).unwrap();
+    let dst_canon = probe.canonicalize()?.join(suffix);
+    Ok(dst_canon == src_canon || dst_canon.starts_with(&src_canon))
+}
+
 pub(super) fn scan_sources(
     sources: &[PathBuf],
     dst: &Path,
@@ -99,6 +113,14 @@ pub(super) fn scan_sources(
             } else {
                 dst.to_path_buf()
             };
+
+            if is_dst_self_or_under_src(src, &new_dst)? {
+                return Err(BcmrError::InvalidInput(format!(
+                    "cannot copy directory '{}' into itself ('{}')",
+                    src.display(),
+                    new_dst.display()
+                )));
+            }
 
             on_entry(
                 PlanEntry::CreateDir {
@@ -342,6 +364,63 @@ mod scan_tests {
             .filter(|e| matches!(e, PlanEntry::CopyFile { .. }))
             .collect();
         assert_eq!(copy_entries.len(), 1);
+    }
+
+    #[test]
+    fn scan_recursive_rejects_dst_equal_to_src() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("over");
+        std::fs::create_dir(&src).unwrap();
+        write(&src.join("file.txt"), b"data");
+
+        let err = scan_sources(
+            std::slice::from_ref(&src),
+            &src,
+            true,
+            false,
+            &[],
+            |_, _| Ok(()),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err}").contains("into itself"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn scan_recursive_rejects_dst_under_src() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("over");
+        std::fs::create_dir(&src).unwrap();
+        let dst = src.join("sub");
+
+        let err = scan_sources(
+            std::slice::from_ref(&src),
+            &dst,
+            true,
+            false,
+            &[],
+            |_, _| Ok(()),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err}").contains("into itself"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn scan_recursive_allows_sibling_dst() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("over");
+        std::fs::create_dir(&src).unwrap();
+        write(&src.join("file.txt"), b"data");
+        let dst = dir.path().join("elsewhere");
+        std::fs::create_dir(&dst).unwrap();
+
+        let entries = collect(&src, &dst, true, false);
+        assert!(!entries.is_empty());
     }
 
     #[test]

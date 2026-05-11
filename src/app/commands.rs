@@ -105,10 +105,24 @@ fn check_basename_collisions(sources: &[std::path::PathBuf], force: bool) -> Res
     bail!("{}", msg);
 }
 
+fn reject_dash_sentinel(cm: &crate::cli::CopyMoveArgs) -> Result<()> {
+    for p in cm.paths.iter().chain(cm.to.iter()) {
+        if p.as_os_str() == "-" {
+            bail!(
+                "bcmr does not support stdin/stdout pipes via '-'. \
+                 Use a regular file path or '/dev/stdin' / '/dev/stdout'."
+            );
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn handle_copy_command(args: &Commands) -> Result<()> {
     let cm = args
         .copy_move_args()
         .ok_or_else(|| anyhow::anyhow!("copy requires copy/move args"))?;
+
+    reject_dash_sentinel(cm)?;
 
     if cm.to.is_empty() {
         if cm.paths.len() < 2 {
@@ -330,6 +344,8 @@ pub(crate) async fn handle_move_command(args: &Commands) -> Result<()> {
     let cm = args
         .copy_move_args()
         .ok_or_else(|| anyhow::anyhow!("move requires copy/move args"))?;
+
+    reject_dash_sentinel(cm)?;
 
     if cm.to.is_empty() {
         if cm.paths.len() < 2 {

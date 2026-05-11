@@ -80,7 +80,8 @@ impl RemotePath {
 
     pub fn reject_unsafe(&self) -> Result<(), crate::core::error::BcmrError> {
         let p = std::path::Path::new(&self.path);
-        let mut has_named_component = false;
+        let mut has_named = false;
+        let mut has_root = false;
         for c in p.components() {
             match c {
                 std::path::Component::ParentDir => {
@@ -90,14 +91,17 @@ impl RemotePath {
                         self
                     )));
                 }
-                std::path::Component::Normal(_) => has_named_component = true,
+                std::path::Component::Normal(_) => has_named = true,
+                std::path::Component::RootDir => has_root = true,
                 _ => {}
             }
         }
-        if !has_named_component {
+        // Reject bare filesystem root (`host:/`); allow `.`/`./` (scp's
+        // shorthand for the login dir).
+        if has_root && !has_named {
             return Err(crate::core::error::BcmrError::InvalidInput(format!(
-                "remote path '{}' resolves to the login dir or root — refusing for safety \
-                 (use a non-empty named path)",
+                "remote path '{}' resolves to filesystem root — refusing for safety \
+                 (use a named path under it)",
                 self
             )));
         }
@@ -392,11 +396,24 @@ mod tests {
     }
 
     #[test]
-    fn reject_unsafe_blocks_login_dir_and_root() {
-        assert!(rp("").reject_unsafe().is_err());
-        assert!(rp(".").reject_unsafe().is_err());
-        assert!(rp("./").reject_unsafe().is_err());
+    fn reject_unsafe_blocks_root_only() {
         assert!(rp("/").reject_unsafe().is_err());
+        // bare `.`/`./`/`""` now treated as scp's "login dir" shorthand
+        rp("").reject_unsafe().expect("empty allowed");
+        rp(".").reject_unsafe().expect(". allowed");
+        rp("./").reject_unsafe().expect("./ allowed");
+    }
+
+    #[test]
+    fn reject_unsafe_allows_login_dir_shorthand() {
+        for s in ["host:", "host:.", "host:./"] {
+            let r = parse_remote_path(s).unwrap_or_else(|| panic!("{s} should parse"));
+            r.reject_unsafe()
+                .unwrap_or_else(|e| panic!("{s} should pass reject_unsafe: {e}"));
+        }
+        // bare `/` still rejected
+        let r = parse_remote_path("host:/").unwrap();
+        assert!(r.reject_unsafe().is_err());
     }
 
     #[test]
