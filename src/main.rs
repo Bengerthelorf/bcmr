@@ -231,53 +231,66 @@ async fn main() -> Result<()> {
 }
 
 fn expand_path_bookmarks(cmd: &mut Commands) -> Result<()> {
-    use std::path::PathBuf;
-    let paths = match cmd {
-        Commands::Copy { args, .. } | Commands::Move { args, .. } => &mut args.paths,
-        Commands::Check { paths, .. } => paths,
-        Commands::Remove { paths, .. } => paths,
-        _ => return Ok(()),
-    };
-    let table = &config::CONFIG.paths;
-    for p in paths.iter_mut() {
-        let s = p.to_string_lossy();
-        let Some((name, _suffix)) = config::parse_alias_token(&s) else {
-            continue;
-        };
-        if !config::is_valid_alias_name(name) {
-            anyhow::bail!(
-                "invalid alias name '@{name}'; alias names must match [A-Za-z_][A-Za-z0-9_-]*. \
-                 To copy a literal file whose name starts with '@', use './{}'",
-                &s
-            );
-        }
-        match config::resolve_path_alias(&s, table) {
-            Some(resolved) => *p = PathBuf::from(resolved),
-            None => {
-                let suggestion = nearest_alias(name, table.keys());
-                let known: Vec<&str> = table.keys().map(String::as_str).collect();
-                let mut msg = format!("unknown path alias '@{name}'");
-                if let Some(near) = suggestion {
-                    msg.push_str(&format!(" — did you mean '@{near}'?"));
-                }
-                if known.is_empty() {
-                    msg.push_str(
-                        "\nNo aliases configured. Add a [paths] table to ~/.config/bcmr/config.toml.",
-                    );
-                } else {
-                    let mut sorted = known;
-                    sorted.sort_unstable();
-                    msg.push_str(&format!("\nKnown aliases: {}", sorted.join(", ")));
-                }
-                msg.push_str(&format!(
-                    "\nTo refer to a literal file named '@{name}', use './{}'",
-                    &s
-                ));
-                anyhow::bail!("{msg}");
+    match cmd {
+        Commands::Copy { args, .. } | Commands::Move { args, .. } => {
+            for p in args.paths.iter_mut().chain(args.to.iter_mut()) {
+                resolve_bookmark(p)?;
             }
         }
+        Commands::Check { paths, .. } | Commands::Remove { paths, .. } => {
+            for p in paths.iter_mut() {
+                resolve_bookmark(p)?;
+            }
+        }
+        Commands::Ls { path }
+        | Commands::Stat { path }
+        | Commands::Du { path }
+        | Commands::Hash { path } => resolve_bookmark(path)?,
+        _ => {}
     }
     Ok(())
+}
+
+fn resolve_bookmark(p: &mut std::path::PathBuf) -> Result<()> {
+    let s = p.to_string_lossy();
+    let Some((name, _suffix)) = config::parse_alias_token(&s) else {
+        return Ok(());
+    };
+    if !config::is_valid_alias_name(name) {
+        anyhow::bail!(
+            "invalid alias name '@{name}'; alias names must match [A-Za-z_][A-Za-z0-9_-]*. \
+             To refer to a literal file whose name starts with '@', use './{}'",
+            &s
+        );
+    }
+    let table = &config::CONFIG.paths;
+    match config::resolve_path_alias(&s, table) {
+        Some(resolved) => {
+            *p = std::path::PathBuf::from(resolved);
+            Ok(())
+        }
+        None => {
+            let suggestion = nearest_alias(name, table.keys());
+            let mut msg = format!("unknown path alias '@{name}'");
+            if let Some(near) = suggestion {
+                msg.push_str(&format!(" — did you mean '@{near}'?"));
+            }
+            if table.is_empty() {
+                msg.push_str(
+                    "\nNo aliases configured. Add a [paths] table to ~/.config/bcmr/config.toml.",
+                );
+            } else {
+                let mut sorted: Vec<&str> = table.keys().map(String::as_str).collect();
+                sorted.sort_unstable();
+                msg.push_str(&format!("\nKnown aliases: {}", sorted.join(", ")));
+            }
+            msg.push_str(&format!(
+                "\nTo refer to a literal file named '@{name}', use './{}'",
+                &s
+            ));
+            anyhow::bail!("{msg}");
+        }
+    }
 }
 
 fn nearest_alias<'a>(
