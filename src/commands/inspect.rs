@@ -3,8 +3,10 @@ use crate::core::remote::{
     parse_remote_path, remote_file_hash, remote_list_shallow, remote_stat, remote_total_size,
     RemotePath,
 };
+use crate::config::is_json_mode;
 use crate::ui::utils::format_bytes;
 use anyhow::{anyhow, Result};
+use serde_json::json;
 use std::path::Path;
 
 fn require_remote(path: &Path) -> Result<RemotePath> {
@@ -23,11 +25,40 @@ async fn resolved(path: &Path) -> Result<RemotePath> {
 
 pub async fn ls(path: &Path) -> Result<()> {
     let rp = resolved(path).await?;
-    let mut entries = remote_list_shallow(&rp).await.map_err(into_anyhow)?;
-    if entries.is_empty() {
+    let info = remote_stat(&rp).await.map_err(into_anyhow)?;
+    if !info.is_dir {
+        if is_json_mode() {
+            println!(
+                "{}",
+                json!({
+                    "path": rp.display(),
+                    "entries": [{"type": "file", "size": info.size, "name": rp.file_name()}],
+                })
+            );
+        } else {
+            println!("- {}  {}", format_bytes(info.size as f64), rp.file_name());
+        }
         return Ok(());
     }
+    let mut entries = remote_list_shallow(&rp).await.map_err(into_anyhow)?;
     entries.sort();
+    if is_json_mode() {
+        let entries_json: Vec<_> = entries
+            .iter()
+            .map(|(name, size, is_dir)| {
+                json!({
+                    "type": if *is_dir { "directory" } else { "file" },
+                    "size": size,
+                    "name": name,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            json!({"path": rp.display(), "entries": entries_json})
+        );
+        return Ok(());
+    }
     let max_size_width = entries
         .iter()
         .map(|(_, size, is_dir)| {
@@ -55,6 +86,13 @@ pub async fn stat(path: &Path) -> Result<()> {
     let rp = resolved(path).await?;
     let info = remote_stat(&rp).await.map_err(into_anyhow)?;
     let kind = if info.is_dir { "directory" } else { "file" };
+    if is_json_mode() {
+        println!(
+            "{}",
+            json!({"path": rp.display(), "type": kind, "size": info.size})
+        );
+        return Ok(());
+    }
     if info.is_dir {
         println!("{}: {}", rp.display(), kind);
     } else {
@@ -72,7 +110,18 @@ pub async fn stat(path: &Path) -> Result<()> {
 pub async fn du(path: &Path) -> Result<()> {
     let rp = resolved(path).await?;
     let total = remote_total_size(&rp, true).await.map_err(into_anyhow)?;
-    println!("{}\t{}", format_bytes(total as f64), rp.display());
+    if is_json_mode() {
+        println!(
+            "{}",
+            json!({
+                "path": rp.display(),
+                "bytes": total,
+                "human": format_bytes(total as f64),
+            })
+        );
+    } else {
+        println!("{}\t{}", format_bytes(total as f64), rp.display());
+    }
     Ok(())
 }
 
@@ -86,7 +135,14 @@ pub async fn hash(path: &Path) -> Result<()> {
         ));
     }
     let hex = remote_file_hash(&rp, None).await.map_err(into_anyhow)?;
-    println!("{}  {}", hex, rp.display());
+    if is_json_mode() {
+        println!(
+            "{}",
+            json!({"path": rp.display(), "hash": hex, "algo": "blake3"})
+        );
+    } else {
+        println!("{}  {}", hex, rp.display());
+    }
     Ok(())
 }
 

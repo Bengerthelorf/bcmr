@@ -36,11 +36,11 @@ pub async fn remote_file_size(remote: &RemotePath) -> Result<Option<u64>, BcmrEr
 }
 
 pub async fn remote_stat(remote: &RemotePath) -> Result<RemoteFileInfo, BcmrError> {
+    let escaped = shell_escape(&remote.path);
     let output = ssh_command(&remote.ssh_target())
         .arg(format!(
-            "stat -c '%F %s' '{}' 2>/dev/null || stat -f '%HT %z' '{}'",
-            shell_escape(&remote.path),
-            shell_escape(&remote.path)
+            "LC_ALL=C stat -c '%F %s' '{0}' 2>/dev/null || LC_ALL=C stat -f '%HT %z' '{0}'",
+            escaped
         ))
         .output()
         .await?;
@@ -55,7 +55,6 @@ pub async fn remote_stat(remote: &RemotePath) -> Result<RemoteFileInfo, BcmrErro
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let line = stdout.trim();
-
     let is_dir = line.to_lowercase().starts_with("directory");
     let size: u64 = line
         .rsplit_once(' ')
@@ -79,24 +78,27 @@ pub async fn remote_total_size(remote: &RemotePath, recursive: bool) -> Result<u
         )));
     }
 
+    let escaped = shell_escape(&remote.path);
     let output = ssh_command(&remote.ssh_target())
-        .arg(format!(
-            "find '{}' -type f -exec stat -c '%s' {{}} + 2>/dev/null || find '{}' -type f -exec stat -f '%z' {{}} +",
-            shell_escape(&remote.path), shell_escape(&remote.path)
-        ))
+        .arg(format!("LC_ALL=C du -sk '{}' 2>/dev/null", escaped))
         .output()
         .await?;
 
     if !output.status.success() {
-        return Ok(0);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(BcmrError::InvalidInput(ssh_error_message(
+            &stderr,
+            &format!("Cannot compute size of remote path '{}'", remote),
+        )));
     }
 
-    let total: u64 = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|l| l.trim().parse::<u64>().ok())
-        .sum();
+    let kbs: u64 = String::from_utf8_lossy(&output.stdout)
+        .split_ascii_whitespace()
+        .next()
+        .and_then(|t| t.parse::<u64>().ok())
+        .unwrap_or(0);
 
-    Ok(total)
+    Ok(kbs * 1024)
 }
 
 pub async fn remote_list_files(remote: &RemotePath) -> Result<Vec<(String, u64, bool)>, BcmrError> {
