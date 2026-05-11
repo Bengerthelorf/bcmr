@@ -23,17 +23,32 @@ pub(super) fn is_interactive() -> bool {
 }
 
 pub(super) fn ssh_base_args(target: &str) -> Vec<String> {
-    let cp = control_path(target);
-    let mut args = vec![
-        "-o".into(),
-        format!("ControlPath={}", cp),
-        "-o".into(),
-        "ControlMaster=auto".into(),
-        "-o".into(),
-        "ControlPersist=300".into(),
-        "-o".into(),
-        "ConnectTimeout=10".into(),
-    ];
+    let mut args = if std::env::var_os("BCMR_SSH_NO_MULTIPLEX").is_some() {
+        // Each ssh invocation opens its own TCP connection — avoids the
+        // OpenSSH MaxSessions cap (default 10) that bites parallel `bcmr copy`
+        // processes funneling through a single mux master. ControlMaster=no
+        // overrides the user's ~/.ssh/config if it globally enables muxing.
+        vec![
+            "-o".into(),
+            "ControlMaster=no".into(),
+            "-o".into(),
+            "ControlPath=none".into(),
+            "-o".into(),
+            "ConnectTimeout=10".into(),
+        ]
+    } else {
+        let cp = control_path(target);
+        vec![
+            "-o".into(),
+            format!("ControlPath={}", cp),
+            "-o".into(),
+            "ControlMaster=auto".into(),
+            "-o".into(),
+            "ControlPersist=300".into(),
+            "-o".into(),
+            "ConnectTimeout=10".into(),
+        ]
+    };
     if !is_interactive() {
         args.extend(["-o".into(), "BatchMode=yes".into()]);
     }
@@ -63,7 +78,18 @@ pub(super) fn shell_escape(s: &str) -> String {
 
 pub(crate) fn ssh_error_message(stderr: &str, context: &str) -> String {
     let stderr_lower = stderr.to_lowercase();
-    if stderr_lower.contains("connection refused") {
+    if stderr_lower.contains("session open refused")
+        || stderr_lower.contains("mux_client_request_session")
+    {
+        format!(
+            "{}: SSH session open refused — the host's MaxSessions limit \
+             (default 10) is exhausted by parallel bcmr processes. \
+             Use `bcmr copy --to host:a --to host:b ... /src` for fan-out from \
+             a single process, or set BCMR_SSH_NO_MULTIPLEX=1 to open one \
+             connection per process",
+            context
+        )
+    } else if stderr_lower.contains("connection refused") {
         format!(
             "{}: SSH connection refused (is sshd running on the host?)",
             context
