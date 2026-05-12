@@ -6,7 +6,12 @@ pub(super) static SSH_COMPRESS: AtomicBool = AtomicBool::new(false);
 pub(super) fn control_path(target: &str) -> String {
     let dir = std::env::temp_dir().join("bcmr-ssh");
     let _ = std::fs::create_dir_all(&dir);
-    dir.join(format!("{}.sock", target.replace(['@', ':', '/'], "_")))
+    // Hash for sun_path's ~108-byte limit and to avoid `a@b` vs `a:b`
+    // sanitizing to the same name. 128 bits keeps birthday collisions
+    // astronomical at this scale.
+    let digest = blake3::hash(target.as_bytes());
+    let short = &digest.to_hex()[..32];
+    dir.join(format!("{}.sock", short))
         .to_string_lossy()
         .to_string()
 }

@@ -190,6 +190,17 @@ pub async fn remote_file_hash(
         .stdout
         .take()
         .ok_or_else(|| BcmrError::InvalidInput("Failed to capture SSH stdout".to_string()))?;
+    let stderr_pipe = child.stderr.take();
+
+    // Drain stderr in parallel — > ~64 KB of diagnostics blocks the remote
+    // writer and deadlocks `child.wait()` if we only read after the loop.
+    let stderr_task: tokio::task::JoinHandle<String> = tokio::spawn(async move {
+        let mut buf = String::new();
+        if let Some(mut pipe) = stderr_pipe {
+            let _ = pipe.read_to_string(&mut buf).await;
+        }
+        buf
+    });
 
     let mut hasher = blake3::Hasher::new();
     let mut buffer = vec![0u8; 4 * 1024 * 1024];
@@ -202,10 +213,11 @@ pub async fn remote_file_hash(
     }
 
     let status = child.wait().await?;
+    let stderr_buf = stderr_task.await.unwrap_or_default();
     if !status.success() {
-        return Err(BcmrError::InvalidInput(format!(
-            "Failed to hash remote file '{}'",
-            remote
+        return Err(BcmrError::InvalidInput(ssh_error_message(
+            &stderr_buf,
+            &format!("Failed to hash remote file '{}'", remote),
         )));
     }
 
