@@ -6,11 +6,14 @@ pub(super) static SSH_COMPRESS: AtomicBool = AtomicBool::new(false);
 pub(super) fn control_path(target: &str) -> String {
     let dir = std::env::temp_dir().join("bcmr-ssh");
     let _ = std::fs::create_dir_all(&dir);
-    // Hash for sun_path's ~108-byte limit and to avoid `a@b` vs `a:b`
-    // sanitizing to the same name. 128 bits keeps birthday collisions
-    // astronomical at this scale.
+    // Hash to (a) avoid `a@b` vs `a:b` sanitizing to the same name and
+    // (b) keep the path inside macOS's 104-byte sun_path budget — OpenSSH
+    // appends ~17 chars (`.XXXXXXXXXXXXXXXX`) for the MUX listener, and
+    // $TMPDIR on macOS can be ~50 chars by itself. 16 hex (64 bits) leaves
+    // a comfortable buffer while still giving ~2^32 distinct targets
+    // before a 50% birthday collision — far past anything personal use hits.
     let digest = blake3::hash(target.as_bytes());
-    let short = &digest.to_hex()[..32];
+    let short = &digest.to_hex()[..16];
     dir.join(format!("{}.sock", short))
         .to_string_lossy()
         .to_string()
@@ -110,5 +113,41 @@ pub(crate) fn ssh_error_message(stderr: &str, context: &str) -> String {
         format!("{}: SSH connection timed out", context)
     } else {
         format!("{}: {}", context, stderr.trim())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_path_distinguishes_collision_pairs() {
+        assert_ne!(control_path("user@host"), control_path("user:host"));
+        assert_ne!(control_path("a@b"), control_path("a:b"));
+        assert_ne!(control_path("a@b"), control_path("a/b"));
+    }
+
+    #[test]
+    fn control_path_fits_unix_sun_path_with_mux_suffix() {
+        // OpenSSH appends `.XXXXXXXXXXXXXXXX` (17 chars) to the configured
+        // ControlPath when opening the MUX listener. macOS sun_path is 104
+        // bytes — the tightest mainstream Unix; Linux is 108. Use the macOS
+        // budget so the assertion holds on every supported platform.
+        const SUN_PATH_LIMIT: usize = 104;
+        const OPENSSH_MUX_SUFFIX: usize = 17;
+        for target in [
+            "host",
+            "user@host",
+            "user@host:port",
+            "verylonguser_name@subdomain.example.com",
+        ] {
+            let path = control_path(target);
+            let total = path.len() + OPENSSH_MUX_SUFFIX;
+            assert!(
+                total <= SUN_PATH_LIMIT,
+                "control_path({target:?}) + mux suffix = {total} bytes, \
+                 exceeds sun_path budget {SUN_PATH_LIMIT}: {path}"
+            );
+        }
     }
 }
