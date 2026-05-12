@@ -342,11 +342,12 @@ jobs:
           out_e=$(BCMR_PROFILE=verify cargo run --quiet -- --config "$tmp/cfg.toml" copy --plain "$tmp/src.txt" "$tmp/e.txt" 2>&1)
           echo "$out_e" | grep -q "verified" || { echo "FAIL: BCMR_PROFILE should inject -V"; exit 1; }
 
-          # Unknown profile: silent no-op.
-          out_u=$(cargo run --quiet -- --config "$tmp/cfg.toml" --profile missing copy --plain "$tmp/src.txt" "$tmp/u.txt" 2>&1)
-          if echo "$out_u" | grep -q "verified"; then
-            echo "FAIL: unknown profile should not inject anything"; exit 1;
+          # Unknown profile: errors loud (exit non-zero) with a "known: ..." hint.
+          if cargo run --quiet -- --config "$tmp/cfg.toml" --profile missing copy --plain "$tmp/src.txt" "$tmp/u.txt" 2>"$tmp/u.err"; then
+            echo "FAIL: unknown profile must error, not silently no-op"; exit 1;
           fi
+          grep -q "unknown profile 'missing'" "$tmp/u.err" || { echo "FAIL: stderr missing unknown-profile diagnostic"; cat "$tmp/u.err"; exit 1; }
+          [ ! -e "$tmp/u.txt" ] || { echo "FAIL: dst should not be created when --profile errors"; exit 1; }
 
           rm -rf "$tmp"
           echo "Profile defaults tests passed"
