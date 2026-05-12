@@ -1117,13 +1117,13 @@ fn e2e_quiet_long_form_also_suppresses() {
 }
 
 #[test]
-fn e2e_config_override_does_not_crash_on_missing() {
+fn e2e_config_override_errors_loud_on_missing() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("s.bin");
     let dst = dir.path().join("d.bin");
     fs::write(&src, b"x").unwrap();
 
-    let (ok, _stdout, _stderr) = run_bcmr(&[
+    let (ok, _stdout, stderr) = run_bcmr(&[
         "--config",
         "/nonexistent/bcmr-test.toml",
         "copy",
@@ -1131,8 +1131,15 @@ fn e2e_config_override_does_not_crash_on_missing() {
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
     ]);
-    assert!(ok, "missing config path should not break the command");
-    assert!(dst.exists());
+    assert!(
+        !ok,
+        "explicit --config to a missing path must fail (silent fallback would disable bookmarks/profiles)"
+    );
+    assert!(
+        stderr.contains("not found"),
+        "stderr should name the missing-file reason, got: {stderr}"
+    );
+    assert!(!dst.exists());
 }
 
 #[test]
