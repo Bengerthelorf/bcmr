@@ -24,10 +24,12 @@ pub(super) fn is_interactive() -> bool {
 
 pub(super) fn ssh_base_args(target: &str) -> Vec<String> {
     let mut args = if std::env::var_os("BCMR_SSH_NO_MULTIPLEX").is_some() {
-        // Each ssh invocation opens its own TCP connection — avoids the
-        // OpenSSH MaxSessions cap (default 10) that bites parallel `bcmr copy`
-        // processes funneling through a single mux master. ControlMaster=no
-        // overrides the user's ~/.ssh/config if it globally enables muxing.
+        // Each ssh invocation opens its own TCP — only useful when the server
+        // has been tuned to accept many parallel unauthenticated handshakes
+        // (sshd's MaxStartups defaults to 10:30:60, which probabilistically
+        // drops new connections above 10 in flight). Without that tuning this
+        // mode is a net regression vs the default mux at high parallelism;
+        // see BCMR_SSH_NO_MULTIPLEX in `bcmr --help`.
         vec![
             "-o".into(),
             "ControlMaster=no".into(),
@@ -84,9 +86,9 @@ pub(crate) fn ssh_error_message(stderr: &str, context: &str) -> String {
         format!(
             "{}: SSH session open refused — the host's MaxSessions limit \
              (default 10) is exhausted by parallel bcmr processes. \
-             Use `bcmr copy --to host:a --to host:b ... /src` for fan-out from \
-             a single process, or set BCMR_SSH_NO_MULTIPLEX=1 to open one \
-             connection per process",
+             Use `bcmr copy --to host:a --to host:b ... /src` for fan-out \
+             from a single process (one TCP connection, server-side limits \
+             apply once), or raise sshd's MaxSessions on the remote",
             context
         )
     } else if stderr_lower.contains("connection refused") {

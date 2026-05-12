@@ -23,8 +23,11 @@ ENVIRONMENT:
   BCMR_CAS_CAP_MB               CAS size cap in MB
   BCMR_DEBUG_SSH_STDERR=1       surface ssh stderr for debugging
   BCMR_RENDEZVOUS_TIMEOUT_SECS  direct-TCP rendezvous timeout (seconds)
-  BCMR_SSH_NO_MULTIPLEX=1       disable ControlMaster (one TCP connect per process;
-                                avoids OpenSSH MaxSessions exhaustion at high parallelism)
+  BCMR_SSH_NO_MULTIPLEX=1       disable ControlMaster (one TCP per process).
+                                Only helps if the remote's sshd has been tuned
+                                (e.g. MaxStartups N:0:N to disable throttling);
+                                with default MaxStartups 10:30:60 this is worse
+                                than the default muxed path at parallelism >10.
   BCMR_UNSAFE_LAN_LISTEN=1      opt-in to LAN listen on 'bcmr serve' (requires peer-auth)
   NO_COLOR                      any non-empty value disables colored output
   TERM=dumb                     selects plain renderer
@@ -626,8 +629,8 @@ impl Commands {
     }
 
     pub fn protocol_caps(&self) -> u8 {
-        use crate::core::protocol::{CAP_DEDUP, CAP_FAST, CAP_SYNC};
-        let mut caps = self.compression_caps() | CAP_DEDUP;
+        use crate::core::protocol::{CAP_DEDUP, CAP_FAST, CAP_PUT_OFFSET, CAP_SYNC};
+        let mut caps = self.compression_caps() | CAP_DEDUP | CAP_PUT_OFFSET;
         if self.copy_move_args().is_some_and(|a| a.fast) {
             caps |= CAP_FAST;
         }
@@ -1052,5 +1055,23 @@ mod tests {
         let caps = cmd_sync_fast.protocol_caps();
         assert_eq!(caps & CAP_SYNC, CAP_SYNC, "--sync sets CAP_SYNC");
         assert_eq!(caps & CAP_FAST, CAP_FAST, "--fast still sets CAP_FAST");
+    }
+
+    #[test]
+    fn test_protocol_caps_advertises_put_offset() {
+        use crate::core::protocol::CAP_PUT_OFFSET;
+        let cmd = Commands::Copy {
+            args: test_args(vec![PathBuf::from("dst")]),
+            reflink: None,
+            sparse: None,
+            parallel: None,
+        };
+        assert_eq!(
+            cmd.protocol_caps() & CAP_PUT_OFFSET,
+            CAP_PUT_OFFSET,
+            "client must advertise CAP_PUT_OFFSET so the server-negotiated \
+             intersection keeps it; otherwise `-C` resume silently falls back \
+             to full re-upload",
+        );
     }
 }
