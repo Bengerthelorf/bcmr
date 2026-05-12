@@ -69,6 +69,61 @@ async fn serve_root_jail_rejects_escape() {
 }
 
 #[tokio::test]
+async fn serve_relative_path_resolves_to_root_not_cwd() {
+    use bcmr::core::protocol::{read_message, write_message, Message, PROTOCOL_VERSION};
+    use std::process::Stdio;
+
+    let root = tempfile::tempdir().unwrap();
+    let unrelated_cwd = tempfile::tempdir().unwrap();
+
+    let marker_in_root = root.path().join("marker.bin");
+    std::fs::write(&marker_in_root, b"in-root-1234").unwrap();
+    let decoy_in_cwd = unrelated_cwd.path().join("marker.bin");
+    std::fs::write(&decoy_in_cwd, b"DECOY-must-not-resolve-here").unwrap();
+
+    let mut cmd = tokio::process::Command::new(common::bcmr_bin());
+    cmd.args(["serve", "--root", root.path().to_str().unwrap()])
+        .current_dir(unrelated_cwd.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = cmd.spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+
+    write_message(
+        &mut stdin,
+        &Message::Hello {
+            version: PROTOCOL_VERSION,
+            caps: 0,
+        },
+    )
+    .await
+    .unwrap();
+    let _welcome = read_message(&mut stdout).await.unwrap();
+
+    write_message(
+        &mut stdin,
+        &Message::Stat {
+            path: "marker.bin".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let reply = read_message(&mut stdout).await.unwrap().unwrap();
+    match reply {
+        Message::StatResponse { size, .. } => assert_eq!(
+            size, 12,
+            "relative `marker.bin` must resolve under --root (12 bytes), not cwd (27 bytes)"
+        ),
+        other => panic!("expected StatResponse, got {other:?}"),
+    }
+
+    drop(stdin);
+    let _ = child.wait().await;
+}
+
+#[tokio::test]
 async fn serve_put_size_bound_rejects_oversized() {
     let dir = tempfile::tempdir().unwrap();
     let dst = dir.path().join("capped.bin");
@@ -122,6 +177,69 @@ async fn serve_put_size_bound_rejects_oversized() {
         }
         other => panic!("expected Error, got {other:?}"),
     }
+
+    drop(stdin);
+    let _ = child.wait().await;
+}
+
+#[tokio::test]
+async fn serve_put_dedup_rejects_block_size_mismatch() {
+    use bcmr::core::protocol::{read_message, write_message, Message, PROTOCOL_VERSION};
+
+    let dir = tempfile::tempdir().unwrap();
+    let dst = dir.path().join("dedup.bin");
+
+    let ServeChild {
+        mut child,
+        mut stdin,
+        mut stdout,
+    } = spawn_serve(dir.path().to_str().unwrap());
+
+    write_message(
+        &mut stdin,
+        &Message::Hello {
+            version: PROTOCOL_VERSION,
+            caps: 0,
+        },
+    )
+    .await
+    .unwrap();
+    let _welcome = read_message(&mut stdout).await.unwrap();
+
+    write_message(
+        &mut stdin,
+        &Message::Put {
+            path: dst.to_string_lossy().into_owned(),
+            size: 100,
+            offset: 0,
+        },
+    )
+    .await
+    .unwrap();
+    write_message(
+        &mut stdin,
+        &Message::HaveBlocks {
+            block_size: 1024,
+            hashes: vec![[0u8; 32]],
+        },
+    )
+    .await
+    .unwrap();
+
+    let reply = read_message(&mut stdout).await.unwrap().unwrap();
+    match reply {
+        Message::Error { message } => {
+            assert!(
+                message.contains("block_size") && message.contains("CHUNK_SIZE"),
+                "expected block_size/CHUNK_SIZE mismatch error, got: {message}"
+            );
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+    assert!(
+        !dst.exists(),
+        "destination must not exist after rejected mismatched block_size"
+    );
 
     drop(stdin);
     let _ = child.wait().await;
