@@ -729,8 +729,6 @@ pub fn parse_args() -> Cli {
     }
     // CONFIG is Lazy and reads $BCMR_CONFIG; propagate --config before the
     // first deref so host/profile defaults come from the file the user named.
-    // For explicit --config, fail loudly on missing/invalid file — silent
-    // fallback would silently disable the user's bookmarks/profiles.
     if let Some(path) = pre_scan_config_path(&raw) {
         if let Err(msg) = validate_explicit_config(&path) {
             eprintln!("Error: {msg}");

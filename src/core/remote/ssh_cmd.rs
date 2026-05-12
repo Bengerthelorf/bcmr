@@ -24,12 +24,6 @@ pub(super) fn is_interactive() -> bool {
 
 pub(super) fn ssh_base_args(target: &str) -> Vec<String> {
     let mut args = if std::env::var_os("BCMR_SSH_NO_MULTIPLEX").is_some() {
-        // Each ssh invocation opens its own TCP — only useful when the server
-        // has been tuned to accept many parallel unauthenticated handshakes
-        // (sshd's MaxStartups defaults to 10:30:60, which probabilistically
-        // drops new connections above 10 in flight). Without that tuning this
-        // mode is a net regression vs the default mux at high parallelism;
-        // see BCMR_SSH_NO_MULTIPLEX in `bcmr --help`.
         vec![
             "-o".into(),
             "ControlMaster=no".into(),

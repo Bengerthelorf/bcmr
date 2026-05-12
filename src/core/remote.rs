@@ -398,7 +398,6 @@ mod tests {
     #[test]
     fn reject_unsafe_blocks_root_only() {
         assert!(rp("/").reject_unsafe().is_err());
-        // bare `.`/`./`/`""` now treated as scp's "login dir" shorthand
         rp("").reject_unsafe().expect("empty allowed");
         rp(".").reject_unsafe().expect(". allowed");
         rp("./").reject_unsafe().expect("./ allowed");
@@ -411,7 +410,6 @@ mod tests {
             r.reject_unsafe()
                 .unwrap_or_else(|e| panic!("{s} should pass reject_unsafe: {e}"));
         }
-        // bare `/` still rejected
         let r = parse_remote_path("host:/").unwrap();
         assert!(r.reject_unsafe().is_err());
     }
