@@ -31,8 +31,6 @@ fn config_fail_fast_on_malformed_toml() {
 
 #[test]
 fn config_absent_file_loads_defaults_without_failing() {
-    // BCMR_CONFIG pointing at a non-existent file is a no-op (defaults win),
-    // not a parse error — only an existing-but-malformed file triggers exit 2.
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("does_not_exist.toml");
 

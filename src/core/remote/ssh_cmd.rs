@@ -6,12 +6,9 @@ pub(super) static SSH_COMPRESS: AtomicBool = AtomicBool::new(false);
 pub(super) fn control_path(target: &str) -> String {
     let dir = std::env::temp_dir().join("bcmr-ssh");
     let _ = std::fs::create_dir_all(&dir);
-    // Hash to (a) avoid `a@b` vs `a:b` sanitizing to the same name and
-    // (b) keep the path inside macOS's 104-byte sun_path budget — OpenSSH
-    // appends ~17 chars (`.XXXXXXXXXXXXXXXX`) for the MUX listener, and
-    // $TMPDIR on macOS can be ~50 chars by itself. 16 hex (64 bits) leaves
-    // a comfortable buffer while still giving ~2^32 distinct targets
-    // before a 50% birthday collision — far past anything personal use hits.
+    // 16 hex (64 bits) — enough to keep `a@b` vs `a:b` distinct, short
+    // enough that $TMPDIR + `bcmr-ssh/` + name + `.sock` + OpenSSH's
+    // `.XXXXXXXXXXXXXXXX` MUX suffix fits macOS's 104-byte sun_path.
     let digest = blake3::hash(target.as_bytes());
     let short = &digest.to_hex()[..16];
     dir.join(format!("{}.sock", short))
@@ -129,10 +126,8 @@ mod tests {
 
     #[test]
     fn control_path_fits_unix_sun_path_with_mux_suffix() {
-        // OpenSSH appends `.XXXXXXXXXXXXXXXX` (17 chars) to the configured
-        // ControlPath when opening the MUX listener. macOS sun_path is 104
-        // bytes — the tightest mainstream Unix; Linux is 108. Use the macOS
-        // budget so the assertion holds on every supported platform.
+        // macOS is the tightest at 104 bytes (Linux is 108) — assert against
+        // the macOS budget so this fires on every supported platform.
         const SUN_PATH_LIMIT: usize = 104;
         const OPENSSH_MUX_SUFFIX: usize = 17;
         for target in [
