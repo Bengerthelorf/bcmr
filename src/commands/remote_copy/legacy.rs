@@ -67,7 +67,7 @@ pub(super) async fn handle_remote_upload(
         is_plain_mode(args),
         args.is_quiet(),
         crate::config::is_json_mode(),
-        crate::commands::copy::cleanup_partial_files,
+        crate::core::cleanup::cleanup_partial_files,
     )?;
     runner.set_operation_type("Uploading");
     runner.set_verify_mode(args.is_verify());
@@ -204,7 +204,7 @@ pub(super) async fn handle_remote_download(
         is_plain_mode(args),
         args.is_quiet(),
         crate::config::is_json_mode(),
-        crate::commands::copy::cleanup_partial_files,
+        crate::core::cleanup::cleanup_partial_files,
     )?;
     runner.set_operation_type("Downloading");
     runner.set_verify_mode(args.is_verify());

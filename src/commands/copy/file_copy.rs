@@ -7,7 +7,7 @@ use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 
 use super::exec::ProgressCallback;
-use super::temp_guard::TempFileGuard;
+use crate::core::cleanup::TempFileGuard;
 
 fn temp_path_for(dst: &Path) -> PathBuf {
     let name = dst.file_name().unwrap_or_default().to_string_lossy();

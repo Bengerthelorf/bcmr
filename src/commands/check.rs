@@ -1,3 +1,4 @@
+use crate::core::checksum::bytes_to_hex;
 use crate::core::error::BcmrError;
 use crate::core::remote::{self, parse_remote_path, RemotePath};
 use crate::core::serve_client::ServeClient;
@@ -458,7 +459,7 @@ async fn hash_remote(
 ) -> Result<String, BcmrError> {
     if let Some(client) = serve.as_mut() {
         let bytes = client.hash(&target.path, 0, None).await?;
-        return Ok(bytes.iter().map(|b| format!("{:02x}", b)).collect());
+        return Ok(bytes_to_hex(&bytes));
     }
     remote::remote_file_hash(&target, None).await
 }

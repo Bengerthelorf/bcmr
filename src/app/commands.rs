@@ -290,7 +290,7 @@ async fn handle_copy_one(args: &Commands, dest_override: Option<&std::path::Path
             is_plain_mode(args),
             args.is_quiet(),
             is_json_mode(),
-            commands::copy::cleanup_partial_files,
+            crate::core::cleanup::cleanup_partial_files,
         )?;
 
         runner.set_operation_type("Copying");

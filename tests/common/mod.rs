@@ -61,7 +61,7 @@ pub fn create_file(path: &Path, size: usize) {
 }
 
 pub fn bytes_to_hex(hash: &[u8; 32]) -> String {
-    hash.iter().map(|b| format!("{:02x}", b)).collect()
+    bcmr::core::checksum::bytes_to_hex(hash)
 }
 
 pub fn cas_test_lock() -> std::sync::MutexGuard<'static, ()> {

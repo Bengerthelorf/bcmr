@@ -87,7 +87,7 @@ fn arb_message() -> impl Strategy<Value = Message> {
             }
         }),
         arb_hash().prop_map(|h| Message::HashResponse {
-            hash: h.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
+            hash: bcmr::core::checksum::bytes_to_hex(&h),
         }),
         prop::collection::vec(arb_list_entry(), 0..16)
             .prop_map(|entries| Message::ListResponse { entries }),

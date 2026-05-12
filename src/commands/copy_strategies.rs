@@ -5,7 +5,7 @@ use crate::core::session::{Session, CHECKPOINT_INTERVAL_BLOCKS, COPY_BLOCK_SIZE}
 use std::path::Path;
 use tokio::fs;
 
-use super::copy::TempFileGuard;
+use crate::core::cleanup::TempFileGuard;
 
 pub struct FinalizeParams<'a> {
     pub write_target: &'a Path,

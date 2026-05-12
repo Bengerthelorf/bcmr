@@ -5,6 +5,10 @@ use std::path::Path;
 
 const BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
+pub fn bytes_to_hex(bytes: &[u8; 32]) -> String {
+    blake3::Hash::from_bytes(*bytes).to_hex().to_string()
+}
+
 pub fn calculate_hash(path: &Path) -> io::Result<String> {
     let mut file = File::open(path)?;
     let mut hasher = Hasher::new();

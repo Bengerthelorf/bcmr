@@ -1,5 +1,6 @@
 use super::{is_plain_mode, transfer_options_from_cli, STRIPING_MIN_FILE_SIZE};
 use crate::cli::Commands;
+use crate::core::checksum::bytes_to_hex;
 use crate::core::remote::{check_resume_state, parse_remote_path, RemotePath, ResumeDecision};
 use crate::core::serve_client::{FileTransfer, ServeClientPool};
 use crate::ui::runner::ProgressRunner;
@@ -40,7 +41,7 @@ async fn upload_resume_offset(
         local_size,
         async move || {
             let bytes = pool_hash(pool, &remote_str, None).await?;
-            Ok(hex_of(&bytes))
+            Ok(bytes_to_hex(&bytes))
         },
         async move || {
             let p = local_clone.clone();
@@ -67,10 +68,6 @@ async fn pool_hash(
     limit: Option<u64>,
 ) -> Result<[u8; 32], crate::core::error::BcmrError> {
     pool.first_mut().hash(remote, 0, limit).await
-}
-
-fn hex_of(b: &[u8; 32]) -> String {
-    b.iter().map(|x| format!("{:02x}", x)).collect()
 }
 
 fn to_upload_decision(d: ResumeDecision) -> UploadDecision {
@@ -119,7 +116,7 @@ pub(super) async fn handle_serve_upload(
         is_plain_mode(args),
         args.is_quiet(),
         crate::config::is_json_mode(),
-        crate::commands::copy::cleanup_partial_files,
+        crate::core::cleanup::cleanup_partial_files,
     )?;
     runner.set_operation_type("Uploading (serve)");
     runner.set_verify_mode(args.is_verify());
@@ -180,8 +177,7 @@ pub(super) async fn handle_serve_upload(
                     })
                     .await??;
                     let remote_hash = pool.first_mut().hash(&remote_path, 0, None).await?;
-                    let remote_hex: String =
-                        remote_hash.iter().map(|b| format!("{:02x}", b)).collect();
+                    let remote_hex = bytes_to_hex(&remote_hash);
                     if remote_hex != local_hash {
                         pool.close().await?;
                         return runner.finish_err(format!("hash mismatch for {}", src.display()));
@@ -195,8 +191,7 @@ pub(super) async fn handle_serve_upload(
                         crate::core::checksum::calculate_hash(&p)
                     })
                     .await??;
-                    let server_hex: String =
-                        server_hash.iter().map(|b| format!("{:02x}", b)).collect();
+                    let server_hex = bytes_to_hex(&server_hash);
                     if server_hex != local_hash {
                         pool.close().await?;
                         return runner.finish_err(format!("hash mismatch for {}", src.display()));
@@ -284,7 +279,7 @@ async fn serve_upload_dir(
             let local_hash =
                 tokio::task::spawn_blocking(move || crate::core::checksum::calculate_hash(&p))
                     .await??;
-            let server_hex: String = server_hash.iter().map(|b| format!("{:02x}", b)).collect();
+            let server_hex = bytes_to_hex(server_hash);
             if server_hex != local_hash {
                 bail!("hash mismatch for {}", local_path.display());
             }
@@ -412,7 +407,7 @@ pub(super) async fn handle_serve_download(
         is_plain_mode(args),
         args.is_quiet(),
         crate::config::is_json_mode(),
-        crate::commands::copy::cleanup_partial_files,
+        crate::core::cleanup::cleanup_partial_files,
     )?;
     runner.set_operation_type("Downloading (serve)");
     runner.set_verify_mode(args.is_verify());
@@ -477,7 +472,7 @@ pub(super) async fn handle_serve_download(
                 tokio::task::spawn_blocking(move || crate::core::checksum::calculate_hash(&p))
                     .await??;
             let remote_hash = pool.first_mut().hash(&item.remote_path, 0, None).await?;
-            let remote_hex: String = remote_hash.iter().map(|b| format!("{:02x}", b)).collect();
+            let remote_hex = bytes_to_hex(&remote_hash);
             if remote_hex != local_hash {
                 pool.close().await?;
                 return runner

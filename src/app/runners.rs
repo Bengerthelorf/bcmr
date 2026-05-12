@@ -1,5 +1,4 @@
 use crate::cli::Commands;
-use crate::commands;
 use crate::commands::remote_copy::is_plain_mode;
 use crate::config::is_json_mode;
 use crate::ui::runner::ProgressRunner;
@@ -18,7 +17,7 @@ pub(crate) fn start_scanning_runner(
         is_plain_mode(args),
         args.is_quiet(),
         true,
-        commands::copy::cleanup_partial_files,
+        crate::core::cleanup::cleanup_partial_files,
     )?;
     runner.set_operation_type(operation);
     runner.set_scanning(true);
@@ -50,7 +49,7 @@ pub(crate) fn resume_or_new_runner(
         is_plain_mode(args),
         silent,
         is_json_mode(),
-        commands::copy::cleanup_partial_files,
+        crate::core::cleanup::cleanup_partial_files,
     )?;
     r.set_operation_type(operation);
     r.set_verify_mode(args.is_verify());
