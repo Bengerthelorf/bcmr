@@ -264,7 +264,7 @@ where
                     Err(anyhow::anyhow!(
                         "CAP_DIRECT_TCP not negotiated on this session"
                     ))
-                } else if rendezvous_tasks.len() >= MAX_RENDEZVOUS_PER_SESSION {
+                } else if rendezvous_tasks.live_len() >= MAX_RENDEZVOUS_PER_SESSION {
                     Err(anyhow::anyhow!(
                         "too many concurrent direct-TCP rendezvous requests \
                          on this session (limit {MAX_RENDEZVOUS_PER_SESSION})"

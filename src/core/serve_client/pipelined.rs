@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::core::cleanup::TempFileGuard;
 use crate::core::compress;
 use crate::core::error::BcmrError;
 use crate::core::framing::SendHalf;
@@ -181,6 +182,7 @@ impl ServeClient {
                     break;
                 }
             };
+            let mut dst_guard = Some(TempFileGuard::new(ft.local.clone()));
             on_file_start(i, &ft.local, ft.size);
 
             let mut received: u64 = 0;
@@ -251,6 +253,9 @@ impl ServeClient {
                             }
                         }
                         drop(dst);
+                        if let Some(mut g) = dst_guard.take() {
+                            g.disarm();
+                        }
                         break;
                     }
                     Ok(Message::Error { message }) => {

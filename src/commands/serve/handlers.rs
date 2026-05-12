@@ -1,4 +1,5 @@
 use crate::core::cas;
+use crate::core::cleanup::{unique_id, TempFileGuard};
 use crate::core::compress;
 use crate::core::framing::Framing;
 use crate::core::protocol::{CompressionAlgo, ListEntry, Message};
@@ -318,12 +319,19 @@ where
     }
     ensure_parent_dir(path).await?;
 
-    let mut file = if offset == 0 {
-        write_open(path, true).await?
+    // offset==0 stages to a sibling temp + rename so a mid-PUT crash can't
+    // leave a half-written file at `path`; offset>0 is a resume.
+    let (mut file, mut temp_guard) = if offset == 0 {
+        let temp_path = format!("{path}.bcmr.put.{}.tmp", unique_id());
+        let f = write_open(&temp_path, true).await?;
+        (
+            f,
+            Some(TempFileGuard::new(std::path::PathBuf::from(temp_path))),
+        )
     } else {
         let mut f = write_open(path, false).await?;
         f.seek(std::io::SeekFrom::Start(offset)).await?;
-        f
+        (f, None)
     };
     let mut hasher = if offset == 0 {
         Some(blake3::Hasher::new())
@@ -337,7 +345,15 @@ where
     let mut next: Option<Message> = first;
 
     if offset == 0 {
-        if let Some(Message::HaveBlocks { hashes, .. }) = next {
+        if let Some(Message::HaveBlocks { block_size, hashes }) = next {
+            if block_size as usize != CHUNK_SIZE {
+                bail!(
+                    "put: client block_size {} does not match server CHUNK_SIZE {} — \
+                     dedup would misalign CAS boundaries",
+                    block_size,
+                    CHUNK_SIZE
+                );
+            }
             if let Some(cap) = cas::cap_bytes() {
                 let _ = tokio::task::spawn_blocking(move || cas::evict_to_cap(cap)).await;
             }
@@ -426,6 +442,11 @@ where
         file.sync_all().await?;
     }
     drop(file);
+
+    if let Some(mut g) = temp_guard.take() {
+        tokio::fs::rename(g.path(), path).await?;
+        g.disarm();
+    }
 
     let hash = hasher.map(|h| h.finalize().to_hex().to_string());
     Ok(Message::Ok { hash })

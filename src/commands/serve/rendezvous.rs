@@ -31,8 +31,13 @@ impl RendezvousTasks {
         self.handles.push(h);
     }
 
-    pub(super) fn len(&self) -> usize {
+    pub(super) fn live_len(&mut self) -> usize {
+        self.reap_finished();
         self.handles.len()
+    }
+
+    fn reap_finished(&mut self) {
+        self.handles.retain(|h| !h.is_finished());
     }
 
     pub(super) async fn drain_gracefully(mut self) {
@@ -92,6 +97,10 @@ pub(super) fn handle_open_direct_channel(
     ))
 }
 
+// Far above any legitimate burst (the 2 s auth timeout drains slots fast)
+// but finite so a runaway loop can't pile up tasks.
+const MAX_PARALLEL_AUTH: usize = 64;
+
 async fn run_rendezvous(
     listener: tokio::net::TcpListener,
     session_key: zeroize::Zeroizing<[u8; 32]>,
@@ -99,17 +108,23 @@ async fn run_rendezvous(
 ) {
     let deadline = tokio::time::Instant::now() + rendezvous_accept_timeout();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<tokio::net::TcpStream>(1);
+    let mut auth_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
     let authed: Option<tokio::net::TcpStream> = loop {
         tokio::select! {
             biased;
             winner = rx.recv() => break winner,
             _ = tokio::time::sleep_until(deadline) => break None,
+            Some(_) = auth_tasks.join_next(), if !auth_tasks.is_empty() => {}
             accept_res = listener.accept() => match accept_res {
                 Ok((stream, _peer)) => {
+                    if auth_tasks.len() >= MAX_PARALLEL_AUTH {
+                        drop(stream);
+                        continue;
+                    }
                     let sk = zeroize::Zeroizing::new(*session_key);
                     let tx = tx.clone();
-                    tokio::spawn(async move {
+                    auth_tasks.spawn(async move {
                         let mut stream = stream;
                         if verify_auth_hello(&mut stream, &sk).await {
                             let _ = tx.send(stream).await;
@@ -126,6 +141,7 @@ async fn run_rendezvous(
 
     drop(listener);
     drop(tx);
+    auth_tasks.shutdown().await;
 
     if let Some(stream) = authed {
         if let Err(e) = run_direct_session(stream, &session_key, &root).await {

@@ -33,15 +33,23 @@ pub(super) fn validate_path(raw: &str, root: &Path) -> Result<PathBuf> {
     if raw.contains('\0') {
         bail!("path contains null byte");
     }
-    let path = Path::new(raw);
+    let raw_path = Path::new(raw);
 
-    for component in path.components() {
+    for component in raw_path.components() {
         if matches!(component, std::path::Component::ParentDir) {
             bail!("path contains '..'");
         }
     }
 
-    let canonical = canonicalize_with_ancestor(path)?;
+    // Anchor relative paths to `root`, not the process cwd: SSH launches
+    // `bcmr serve` at $HOME, which differs from `--root`.
+    let resolved = if raw_path.is_absolute() {
+        raw_path.to_path_buf()
+    } else {
+        root.join(raw_path)
+    };
+
+    let canonical = canonicalize_with_ancestor(&resolved)?;
     if !canonical.starts_with(root) {
         bail!(
             "path {} escapes server root {}",
@@ -142,8 +150,18 @@ pub async fn run_listen(root: Option<PathBuf>, addr: std::net::SocketAddr) -> Re
                 });
             }
             _ = &mut shutdown => {
-                eprintln!("bcmr serve: shutdown requested, draining {} session(s)", sessions.len());
-                while sessions.join_next().await.is_some() {}
+                let n = sessions.len();
+                eprintln!("bcmr serve: shutdown requested, draining {n} session(s) (10s budget)");
+                let drained = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    async { while sessions.join_next().await.is_some() {} },
+                )
+                .await;
+                if drained.is_err() {
+                    eprintln!("bcmr serve: drain timed out, aborting {} live session(s)", sessions.len());
+                    sessions.abort_all();
+                    while sessions.join_next().await.is_some() {}
+                }
                 return Ok(());
             }
         }
