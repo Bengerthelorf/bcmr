@@ -72,7 +72,7 @@ pub(super) async fn run_parallel_transfers(
     items: Vec<TransferItem>,
     parallel: usize,
     progress: ProgressHandle,
-    opts: &remote::RemoteTransferOptions,
+    opts: &remote::TransferOptions,
 ) -> Result<(), BcmrError> {
     let semaphore = Arc::new(tokio::sync::Semaphore::new(parallel));
     let slot_pool: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new((0..parallel).rev().collect()));
@@ -140,7 +140,6 @@ pub(super) async fn run_parallel_transfers(
                         on_new_file: &noop_file_cb,
                     },
                     &task_opts,
-                    Some(slot),
                 )
                 .await
             } else {
@@ -154,7 +153,6 @@ pub(super) async fn run_parallel_transfers(
                     },
                     item.size,
                     &task_opts,
-                    Some(slot),
                 )
                 .await
             };

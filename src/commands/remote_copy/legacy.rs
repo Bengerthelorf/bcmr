@@ -109,7 +109,6 @@ pub(super) async fn handle_remote_upload(
                         on_new_file: &runner.file_callback(),
                     },
                     &opts,
-                    None,
                 )
                 .await?;
             } else if src.is_dir() && args.is_recursive() {
@@ -319,7 +318,6 @@ pub(super) async fn handle_remote_download(
                     },
                     info.size,
                     &opts,
-                    None,
                 )
                 .await?;
             }

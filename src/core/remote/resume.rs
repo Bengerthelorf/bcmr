@@ -1,4 +1,4 @@
-use super::RemoteTransferOptions;
+use super::TransferOptions;
 use crate::core::error::BcmrError;
 
 #[derive(Debug)]
@@ -9,7 +9,7 @@ pub struct ResumeDecision {
 }
 
 pub async fn check_resume_state(
-    opts: &RemoteTransferOptions,
+    opts: &TransferOptions,
     existing_size: Option<u64>,
     source_size: u64,
     existing_full_hash: impl AsyncFnOnce() -> Result<String, BcmrError>,
@@ -85,7 +85,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_resume_state_same_size_requires_hash_match() {
-        let opts = RemoteTransferOptions {
+        let opts = TransferOptions {
             resume: true,
             ..Default::default()
         };
@@ -108,7 +108,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_resume_state_shorter_prefix_requires_hash_match() {
-        let opts = RemoteTransferOptions {
+        let opts = TransferOptions {
             resume: true,
             ..Default::default()
         };
@@ -131,7 +131,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_resume_state_matching_prefix_allows_append() {
-        let opts = RemoteTransferOptions {
+        let opts = TransferOptions {
             resume: true,
             ..Default::default()
         };
@@ -154,7 +154,7 @@ mod tests {
 
     #[tokio::test]
     async fn append_refuses_when_existing_larger_than_source() {
-        let opts = RemoteTransferOptions {
+        let opts = TransferOptions {
             append: true,
             ..Default::default()
         };
@@ -173,7 +173,7 @@ mod tests {
 
     #[tokio::test]
     async fn append_refuses_when_prefix_diverges() {
-        let opts = RemoteTransferOptions {
+        let opts = TransferOptions {
             append: true,
             ..Default::default()
         };
@@ -192,7 +192,7 @@ mod tests {
 
     #[tokio::test]
     async fn append_refuses_when_same_size_but_different_content() {
-        let opts = RemoteTransferOptions {
+        let opts = TransferOptions {
             append: true,
             ..Default::default()
         };
@@ -211,7 +211,7 @@ mod tests {
 
     #[tokio::test]
     async fn resume_still_overwrites_on_mismatch() {
-        let opts = RemoteTransferOptions {
+        let opts = TransferOptions {
             resume: true,
             ..Default::default()
         };

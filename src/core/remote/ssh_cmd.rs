@@ -54,10 +54,6 @@ pub(super) fn ssh_base_args(target: &str) -> Vec<String> {
     args
 }
 
-pub(super) fn make_ssh_cmd(target: &str, _worker_id: Option<usize>) -> Command {
-    ssh_command(target)
-}
-
 pub(super) fn ssh_command(target: &str) -> Command {
     let args = ssh_base_args(target);
     let mut cmd = Command::new("ssh");

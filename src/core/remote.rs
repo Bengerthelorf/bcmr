@@ -213,8 +213,6 @@ pub struct TransferOptions {
     pub sync: bool,
 }
 
-pub type RemoteTransferOptions = TransferOptions;
-
 pub struct TransferCallbacks<'a> {
     pub on_progress: &'a (dyn Fn(u64) + Send + Sync),
     pub on_skip: &'a (dyn Fn(u64) + Send + Sync),

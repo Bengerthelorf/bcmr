@@ -1,8 +1,8 @@
 use super::attrs::{apply_remote_attrs_locally, preserve_remote_attrs, verify_remote_file};
 use super::ops::{remote_file_hash, remote_file_size, remote_list_files};
 use super::resume::check_resume_state;
-use super::ssh_cmd::{make_ssh_cmd, shell_escape, ssh_command, ssh_error_message};
-use super::{RemotePath, RemoteTransferOptions, TransferCallbacks};
+use super::ssh_cmd::{shell_escape, ssh_command, ssh_error_message};
+use super::{RemotePath, TransferCallbacks, TransferOptions};
 use crate::core::error::BcmrError;
 use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -12,8 +12,7 @@ pub async fn download_file(
     local_dst: &Path,
     cb: TransferCallbacks<'_>,
     file_size: u64,
-    opts: &RemoteTransferOptions,
-    worker_id: Option<usize>,
+    opts: &TransferOptions,
 ) -> Result<(), BcmrError> {
     (cb.on_new_file)(remote.file_name(), file_size);
 
@@ -68,7 +67,7 @@ pub async fn download_file(
         format!("cat '{}'", shell_escape(&remote.path))
     };
 
-    let mut child = make_ssh_cmd(&remote.ssh_target(), worker_id)
+    let mut child = ssh_command(&remote.ssh_target())
         .arg(ssh_cmd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -161,8 +160,7 @@ pub async fn upload_file(
     local_src: &Path,
     remote: &RemotePath,
     cb: TransferCallbacks<'_>,
-    opts: &RemoteTransferOptions,
-    worker_id: Option<usize>,
+    opts: &TransferOptions,
 ) -> Result<(), BcmrError> {
     let file_size = local_src.metadata()?.len();
     let file_name = local_src
@@ -174,7 +172,7 @@ pub async fn upload_file(
 
     if let Some(parent) = remote.path.rsplit_once('/') {
         if !parent.0.is_empty() {
-            let mkdir_out = make_ssh_cmd(&remote.ssh_target(), worker_id)
+            let mkdir_out = ssh_command(&remote.ssh_target())
                 .arg(format!("mkdir -p '{}'", shell_escape(parent.0)))
                 .output()
                 .await?;
@@ -227,7 +225,7 @@ pub async fn upload_file(
     }
 
     let cat_op = if decision.use_append_mode { ">>" } else { ">" };
-    let mut child = make_ssh_cmd(&remote.ssh_target(), worker_id)
+    let mut child = ssh_command(&remote.ssh_target())
         .arg(format!("cat {} '{}'", cat_op, shell_escape(&remote.path)))
         .stdin(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -298,7 +296,7 @@ pub async fn download_directory(
     local_dst: &Path,
     cb: TransferCallbacks<'_>,
     excludes: &[regex::Regex],
-    opts: &RemoteTransferOptions,
+    opts: &TransferOptions,
 ) -> Result<(), BcmrError> {
     let entries = remote_list_files(remote).await?;
 
@@ -338,7 +336,6 @@ pub async fn download_directory(
             },
             *size,
             opts,
-            None,
         )
         .await?;
     }
@@ -393,7 +390,7 @@ pub async fn upload_directory(
     remote: &RemotePath,
     cb: TransferCallbacks<'_>,
     excludes: &[regex::Regex],
-    opts: &RemoteTransferOptions,
+    opts: &TransferOptions,
 ) -> Result<(), BcmrError> {
     use crate::core::traversal;
 
@@ -458,7 +455,6 @@ pub async fn upload_directory(
                 on_new_file: cb.on_new_file,
             },
             opts,
-            None,
         )
         .await?;
     }
