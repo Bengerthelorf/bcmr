@@ -185,7 +185,13 @@ impl Default for Config {
     }
 }
 
-pub static CONFIG: Lazy<Config> = Lazy::new(|| Config::new().unwrap_or_else(|_| Config::default()));
+pub static CONFIG: Lazy<Config> = Lazy::new(|| {
+    Config::new().unwrap_or_else(|e| {
+        eprintln!("bcmr: failed to parse configuration: {e}");
+        eprintln!("bcmr: check ~/.config/bcmr/config.{{toml,yaml}} or $BCMR_CONFIG");
+        std::process::exit(2);
+    })
+});
 
 pub fn parse_alias_token(input: &str) -> Option<(&str, &str)> {
     let bytes = input.as_bytes();
