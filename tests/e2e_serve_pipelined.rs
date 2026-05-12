@@ -77,7 +77,10 @@ async fn serve_pipelined_put_many_files_succeeds() {
 
     let probe_path = dst_dir.join("f_0.bin");
     let (probe_size, _, _) = client.stat(probe_path.to_str().unwrap()).await.unwrap();
-    assert!(probe_size > 0);
+    assert_eq!(
+        probe_size, 1024,
+        "first file should be exactly its declared size"
+    );
     client.close().await.unwrap();
 }
 
@@ -139,7 +142,10 @@ async fn serve_pipelined_get_many_files_succeeds() {
     }
 
     let (probe_size, _, _) = client.stat(srcs[0].to_str().unwrap()).await.unwrap();
-    assert!(probe_size > 0);
+    assert_eq!(
+        probe_size, 2048,
+        "first source should be exactly its declared size"
+    );
     client.close().await.unwrap();
 }
 

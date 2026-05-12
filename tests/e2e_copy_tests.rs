@@ -269,8 +269,11 @@ fn e2e_resume_detects_source_change() {
     session.add_block([0xAA; 32], bcmr::core::session::COPY_BLOCK_SIZE);
     session.save().unwrap();
 
-    std::thread::sleep(std::time::Duration::from_secs(1));
+    // Force mtime forward so the resume detector sees a source change;
+    // wall-clock sleep is flaky on slow CI and adds 1 s per test run.
     create_random_file(&src, 80 * 1024 * 1024);
+    let advanced = filetime::FileTime::from_unix_time((src_mtime + 1) as i64, 0);
+    filetime::set_file_mtime(&src, advanced).unwrap();
 
     {
         let mut f = fs::File::create(&dst).unwrap();
