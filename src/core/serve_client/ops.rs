@@ -15,35 +15,35 @@ use super::{
 
 impl ServeClient {
     pub async fn stat(&mut self, path: &str) -> Result<(u64, u64, bool), BcmrError> {
-        self.send(&Message::Stat {
-            path: path.to_owned(),
-        })
-        .await?;
-        match self.recv().await? {
-            Message::StatResponse {
-                size,
-                mtime,
-                is_dir,
-            } => Ok((size, mtime as u64, is_dir)),
-            Message::Error { message } => Err(BcmrError::InvalidInput(message)),
-            other => Err(BcmrError::InvalidInput(format!(
-                "unexpected stat response: {other:?}"
-            ))),
-        }
+        self.request_one(
+            "stat",
+            &Message::Stat {
+                path: path.to_owned(),
+            },
+            |m| match m {
+                Message::StatResponse {
+                    size,
+                    mtime,
+                    is_dir,
+                } => Ok((size, mtime as u64, is_dir)),
+                other => Err(other),
+            },
+        )
+        .await
     }
 
     pub async fn list(&mut self, path: &str) -> Result<Vec<ListEntry>, BcmrError> {
-        self.send(&Message::List {
-            path: path.to_owned(),
-        })
-        .await?;
-        match self.recv().await? {
-            Message::ListResponse { entries } => Ok(entries),
-            Message::Error { message } => Err(BcmrError::InvalidInput(message)),
-            other => Err(BcmrError::InvalidInput(format!(
-                "unexpected list response: {other:?}"
-            ))),
-        }
+        self.request_one(
+            "list",
+            &Message::List {
+                path: path.to_owned(),
+            },
+            |m| match m {
+                Message::ListResponse { entries } => Ok(entries),
+                other => Err(other),
+            },
+        )
+        .await
     }
 
     pub async fn hash(
@@ -52,19 +52,21 @@ impl ServeClient {
         offset: u64,
         limit: Option<u64>,
     ) -> Result<[u8; 32], BcmrError> {
-        self.send(&Message::Hash {
-            path: path.to_owned(),
-            offset,
-            limit,
-        })
-        .await?;
-        match self.recv().await? {
-            Message::HashResponse { hash } => decode_hex32(&hash),
-            Message::Error { message } => Err(BcmrError::InvalidInput(message)),
-            other => Err(BcmrError::InvalidInput(format!(
-                "unexpected hash response: {other:?}"
-            ))),
-        }
+        let hex = self
+            .request_one(
+                "hash",
+                &Message::Hash {
+                    path: path.to_owned(),
+                    offset,
+                    limit,
+                },
+                |m| match m {
+                    Message::HashResponse { hash } => Ok(hash),
+                    other => Err(other),
+                },
+            )
+            .await?;
+        decode_hex32(&hex)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -125,16 +127,14 @@ impl ServeClient {
         }
         self.send(&Message::Done).await?;
 
-        match self.recv().await? {
-            Message::Ok { hash: Some(h) } => decode_hex32(&h),
-            Message::Ok { hash: None } => {
-                Err(BcmrError::InvalidInput("put response missing hash".into()))
-            }
-            Message::Error { message } => Err(BcmrError::InvalidInput(message)),
-            other => Err(BcmrError::InvalidInput(format!(
-                "unexpected put response: {other:?}"
-            ))),
-        }
+        let hex = self
+            .recv_expect("put", |m| match m {
+                Message::Ok { hash } => Ok(hash),
+                other => Err(other),
+            })
+            .await?;
+        let hex = hex.ok_or_else(|| BcmrError::InvalidInput("put response missing hash".into()))?;
+        decode_hex32(&hex)
     }
 
     pub async fn put_at(&mut self, path: &str, data: &Path, offset: u64) -> Result<(), BcmrError> {
@@ -153,13 +153,11 @@ impl ServeClient {
         .await?;
         self.put_streaming_from(data, offset).await?;
         self.send(&Message::Done).await?;
-        match self.recv().await? {
+        self.recv_expect("put_at", |m| match m {
             Message::Ok { .. } => Ok(()),
-            Message::Error { message } => Err(BcmrError::InvalidInput(message)),
-            other => Err(BcmrError::InvalidInput(format!(
-                "unexpected put_at response: {other:?}"
-            ))),
-        }
+            other => Err(other),
+        })
+        .await
     }
 
     async fn put_streaming_from(&mut self, data: &Path, offset: u64) -> Result<(), BcmrError> {
@@ -216,13 +214,11 @@ impl ServeClient {
         tx.write_message(w, &Message::Done).await?;
         w.flush().await?;
 
-        match self.recv().await? {
+        self.recv_expect("PutChunked", |m| match m {
             Message::Ok { .. } => Ok(()),
-            Message::Error { message } => Err(BcmrError::InvalidInput(message)),
-            other => Err(BcmrError::InvalidInput(format!(
-                "unexpected reply to PutChunked: {other:?}"
-            ))),
-        }
+            other => Err(other),
+        })
+        .await
     }
 
     pub async fn get_chunked(
@@ -308,15 +304,12 @@ impl ServeClient {
         })
         .await?;
 
-        let bits = match self.recv().await? {
-            Message::MissingBlocks { bits } => bits,
-            Message::Error { message } => return Err(BcmrError::InvalidInput(message)),
-            other => {
-                return Err(BcmrError::InvalidInput(format!(
-                    "expected MissingBlocks, got {other:?}"
-                )))
-            }
-        };
+        let bits = self
+            .recv_expect("MissingBlocks", |m| match m {
+                Message::MissingBlocks { bits } => Ok(bits),
+                other => Err(other),
+            })
+            .await?;
 
         let mut file = File::open(data).await?;
         let mut buf = vec![0u8; DEDUP_BLOCK_SIZE];
@@ -379,39 +372,39 @@ impl ServeClient {
     }
 
     pub async fn mkdir(&mut self, path: &str) -> Result<(), BcmrError> {
-        self.send(&Message::Mkdir {
-            path: path.to_owned(),
-        })
-        .await?;
-        match self.recv().await? {
-            Message::Ok { .. } => Ok(()),
-            Message::Error { message } => Err(BcmrError::InvalidInput(message)),
-            other => Err(BcmrError::InvalidInput(format!(
-                "unexpected mkdir response: {other:?}"
-            ))),
-        }
+        self.request_one(
+            "mkdir",
+            &Message::Mkdir {
+                path: path.to_owned(),
+            },
+            |m| match m {
+                Message::Ok { .. } => Ok(()),
+                other => Err(other),
+            },
+        )
+        .await
     }
 
     #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     pub async fn resume_check(&mut self, path: &str) -> Result<(u64, Option<[u8; 32]>), BcmrError> {
-        self.send(&Message::Resume {
-            path: path.to_owned(),
-        })
-        .await?;
-        match self.recv().await? {
-            Message::ResumeResponse { size, block_hash } => {
-                let hash = match block_hash {
-                    Some(h) => Some(decode_hex32(&h)?),
-                    None => None,
-                };
-                Ok((size, hash))
-            }
-            Message::Error { message } => Err(BcmrError::InvalidInput(message)),
-            other => Err(BcmrError::InvalidInput(format!(
-                "unexpected resume response: {other:?}"
-            ))),
-        }
+        let (size, block_hash) = self
+            .request_one(
+                "resume",
+                &Message::Resume {
+                    path: path.to_owned(),
+                },
+                |m| match m {
+                    Message::ResumeResponse { size, block_hash } => Ok((size, block_hash)),
+                    other => Err(other),
+                },
+            )
+            .await?;
+        let hash = match block_hash {
+            Some(h) => Some(decode_hex32(&h)?),
+            None => None,
+        };
+        Ok((size, hash))
     }
 
     pub async fn close(mut self) -> Result<(), BcmrError> {

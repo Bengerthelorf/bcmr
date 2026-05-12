@@ -259,18 +259,18 @@ impl ServeClientPool {
 
     async fn request_truncate(&mut self, remote: &str, size: u64) -> Result<(), BcmrError> {
         self.clients[0]
-            .send(&Message::Truncate {
-                path: remote.to_owned(),
-                size,
-            })
-            .await?;
-        match self.clients[0].recv().await? {
-            Message::Ok { .. } => Ok(()),
-            Message::Error { message } => Err(BcmrError::InvalidInput(message)),
-            other => Err(BcmrError::InvalidInput(format!(
-                "unexpected reply to Truncate: {other:?}"
-            ))),
-        }
+            .request_one(
+                "Truncate",
+                &Message::Truncate {
+                    path: remote.to_owned(),
+                    size,
+                },
+                |m| match m {
+                    Message::Ok { .. } => Ok(()),
+                    other => Err(other),
+                },
+            )
+            .await
     }
 
     pub async fn close(mut self) -> Result<(), BcmrError> {

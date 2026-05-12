@@ -167,6 +167,29 @@ impl ServeClient {
             .await?
             .ok_or_else(|| BcmrError::InvalidInput("server closed connection unexpectedly".into()))
     }
+
+    async fn recv_expect<T>(
+        &mut self,
+        label: &'static str,
+        extract: impl FnOnce(Message) -> Result<T, Message>,
+    ) -> Result<T, BcmrError> {
+        match self.recv().await? {
+            Message::Error { message } => Err(BcmrError::InvalidInput(message)),
+            msg => extract(msg).map_err(|other| {
+                BcmrError::InvalidInput(format!("unexpected {label} response: {other:?}"))
+            }),
+        }
+    }
+
+    async fn request_one<T>(
+        &mut self,
+        label: &'static str,
+        request: &Message,
+        extract: impl FnOnce(Message) -> Result<T, Message>,
+    ) -> Result<T, BcmrError> {
+        self.send(request).await?;
+        self.recv_expect(label, extract).await
+    }
 }
 
 impl Transport {

@@ -164,15 +164,12 @@ impl ServeClient {
             poisoned: false,
         };
 
-        let nonce = match client.recv().await? {
-            Message::AuthChallenge { nonce } => nonce,
-            other => {
-                return Err(BcmrError::InvalidInput(format!(
-                    "expected AuthChallenge, got {:?}",
-                    other
-                )));
-            }
-        };
+        let nonce = client
+            .recv_expect("AuthChallenge", |m| match m {
+                Message::AuthChallenge { nonce } => Ok(nonce),
+                other => Err(other),
+            })
+            .await?;
         let mac = *auth_hello_mac(&session_key, &nonce).as_bytes();
         client.send(&Message::AuthHello { mac }).await?;
         client
