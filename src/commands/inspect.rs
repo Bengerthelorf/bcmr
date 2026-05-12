@@ -1,9 +1,9 @@
+use crate::config::is_json_mode;
 use crate::core::error::BcmrError;
 use crate::core::remote::{
     parse_remote_path, remote_file_hash, remote_list_shallow, remote_stat, remote_total_size,
     RemotePath,
 };
-use crate::config::is_json_mode;
 use crate::ui::utils::format_bytes;
 use anyhow::{anyhow, Result};
 use serde_json::json;
@@ -53,10 +53,7 @@ pub async fn ls(path: &Path) -> Result<()> {
                 })
             })
             .collect();
-        println!(
-            "{}",
-            json!({"path": rp.display(), "entries": entries_json})
-        );
+        println!("{}", json!({"path": rp.display(), "entries": entries_json}));
         return Ok(());
     }
     let max_size_width = entries

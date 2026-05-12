@@ -382,10 +382,7 @@ mod scan_tests {
             |_, _| Ok(()),
         )
         .unwrap_err();
-        assert!(
-            format!("{err}").contains("into itself"),
-            "got: {err}"
-        );
+        assert!(format!("{err}").contains("into itself"), "got: {err}");
     }
 
     #[test]
@@ -404,10 +401,7 @@ mod scan_tests {
             |_, _| Ok(()),
         )
         .unwrap_err();
-        assert!(
-            format!("{err}").contains("into itself"),
-            "got: {err}"
-        );
+        assert!(format!("{err}").contains("into itself"), "got: {err}");
     }
 
     #[test]

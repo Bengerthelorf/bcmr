@@ -822,8 +822,16 @@ mod tests {
 
     #[test]
     fn subcommand_version_requested_basic() {
-        assert!(subcommand_version_requested(&argv(&["bcmr", "copy", "--version"])));
-        assert!(subcommand_version_requested(&argv(&["bcmr", "ls", "--version"])));
+        assert!(subcommand_version_requested(&argv(&[
+            "bcmr",
+            "copy",
+            "--version"
+        ])));
+        assert!(subcommand_version_requested(&argv(&[
+            "bcmr",
+            "ls",
+            "--version"
+        ])));
         assert!(!subcommand_version_requested(&argv(&["bcmr", "--version"])));
         assert!(!subcommand_version_requested(&argv(&["bcmr"])));
     }
@@ -831,10 +839,16 @@ mod tests {
     #[test]
     fn subcommand_version_requested_skips_help_and_dashdash() {
         assert!(!subcommand_version_requested(&argv(&[
-            "bcmr", "help", "copy", "--version"
+            "bcmr",
+            "help",
+            "copy",
+            "--version"
         ])));
         assert!(!subcommand_version_requested(&argv(&[
-            "bcmr", "copy", "--", "--version"
+            "bcmr",
+            "copy",
+            "--",
+            "--version"
         ])));
     }
 
@@ -848,7 +862,10 @@ mod tests {
             "--version"
         ])));
         assert!(subcommand_version_requested(&argv(&[
-            "bcmr", "--json", "copy", "--version"
+            "bcmr",
+            "--json",
+            "copy",
+            "--version"
         ])));
         assert!(subcommand_version_requested(&argv(&[
             "bcmr",

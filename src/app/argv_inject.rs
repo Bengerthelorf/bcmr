@@ -278,14 +278,7 @@ mod tests {
         let out = inject_defaults(argv, &cfg).unwrap();
         assert_eq!(
             out,
-            s(&[
-                "bcmr",
-                "copy",
-                "--compress",
-                "lz4",
-                "src",
-                "lab:dst/",
-            ])
+            s(&["bcmr", "copy", "--compress", "lz4", "src", "lab:dst/",])
         );
     }
 
