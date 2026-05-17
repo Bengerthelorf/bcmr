@@ -44,7 +44,7 @@ parking_lot = "0.12.5"
 filetime = "0.2.28"
 libc = "0.2.186"
 config = { version = "0.15.22", default-features = false, features = ["toml", "yaml"] }
-toml = "0.8"
+toml = "1.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
 directories = "6.0.0"
