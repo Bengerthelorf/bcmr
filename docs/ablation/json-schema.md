@@ -80,7 +80,7 @@ Success:
 Error:
 
 ```json
-{"type":"result","status":"error","operation":"Uploading (serve)","bytes_total":1048576,"duration_secs":0.521,"error":"connection closed by peer"}
+{"type":"result","status":"error","operation":"Uploading (serve)","bytes_total":1048576,"duration_secs":0.521,"error":"connection closed by peer","error_kind":"io_error"}
 ```
 
 | Field             | Type     | Stable? | Notes                                                                          |
@@ -94,6 +94,7 @@ Error:
 | `bytes_skipped`   | number   | ✅       | Bytes skipped via `--append` / `--update`. Omitted when `0`.                   |
 | `verified`        | bool     | ✅       | `true` when the run was invoked with `-V/--verify`. Omitted when `false`.      |
 | `error`           | string   | ✅       | Human-readable error. Present only when `status="error"`.                      |
+| `error_kind`      | string   | ✅       | Categorical: `source_not_found`, `already_exists`, `permission_denied`, `cancelled`, `is_directory`, `verification_failed`, `invalid_input`, `io_error`. Present only when `status="error"`. |
 
 ## `bcmr check --json`
 
@@ -121,7 +122,7 @@ Error:
 | `missing`     | array       | Files present in dest but not in source. Omitted when empty.                |
 | `summary`     | object      | Always present. Counts and `total_bytes` of added + modified bytes.         |
 | `error`       | string      | Present only on `status="error"`.                                           |
-| `error_kind`  | string      | Present only on `status="error"`. Categorical: `invalid_input`, `io`, etc.  |
+| `error_kind`  | string      | Present only on `status="error"`. Same vocabulary as the NDJSON result event's `error_kind`. |
 
 `FileDiff` entries always carry `path` (relative) and `is_dir`. The size fields are situational: `src_size` for added entries, `dst_size` for missing entries, both for modified entries when they differ. `size` is a legacy convenience that mirrors the active size field.
 

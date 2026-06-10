@@ -100,22 +100,57 @@ impl CommandOutput {
     }
 }
 
-fn error_kind_from(err: &dyn std::error::Error) -> String {
-    let msg = err.to_string();
+fn error_kind_from(err: &anyhow::Error) -> String {
+    use crate::core::error::BcmrError;
+    for cause in err.chain() {
+        if let Some(b) = cause.downcast_ref::<BcmrError>() {
+            match b {
+                BcmrError::SourceNotFound(_) => return "source_not_found".into(),
+                BcmrError::TargetExists(_) => return "already_exists".into(),
+                BcmrError::Cancelled => return "cancelled".into(),
+                BcmrError::VerificationError(_) => return "verification_failed".into(),
+                BcmrError::Io(e) => return io_error_kind(e).into(),
+                // InvalidInput and the rest carry their detail in the message;
+                // fall through to the string heuristics below.
+                _ => break,
+            }
+        }
+        if let Some(e) = cause.downcast_ref::<std::io::Error>() {
+            return io_error_kind(e).into();
+        }
+    }
+    kind_from_message(&format!("{:#}", err)).into()
+}
+
+/// Heuristic categorisation for errors that only exist as formatted text
+/// (remote stderr, NDJSON result events, InvalidInput detail).
+pub fn kind_from_message(msg: &str) -> &'static str {
     if msg.contains("not found") {
-        "source_not_found".into()
+        "source_not_found"
     } else if msg.contains("already exists") {
-        "already_exists".into()
+        "already_exists"
     } else if msg.contains("Permission denied") || msg.contains("permission denied") {
-        "permission_denied".into()
-    } else if msg.contains("cancelled") || msg.contains("Cancelled") {
-        "cancelled".into()
+        "permission_denied"
+    } else if msg.contains("cancelled") || msg.contains("Cancelled") || msg == "interrupted" {
+        "cancelled"
     } else if msg.contains("Is a directory") || msg.contains("is a directory") {
-        "is_directory".into()
+        "is_directory"
+    } else if msg.contains("hash mismatch") || msg.contains("Verification failed") {
+        "verification_failed"
     } else if msg.contains("Invalid input") {
-        "invalid_input".into()
+        "invalid_input"
     } else {
-        "io_error".into()
+        "io_error"
+    }
+}
+
+fn io_error_kind(e: &std::io::Error) -> &'static str {
+    use std::io::ErrorKind;
+    match e.kind() {
+        ErrorKind::NotFound => "source_not_found",
+        ErrorKind::PermissionDenied => "permission_denied",
+        ErrorKind::AlreadyExists => "already_exists",
+        _ => "io_error",
     }
 }
 
@@ -173,7 +208,7 @@ pub fn print_check_human(r: &CheckResult) {
 }
 
 pub fn error_output(command: &str, err: &anyhow::Error) -> CommandOutput {
-    let kind = error_kind_from(err.as_ref());
+    let kind = error_kind_from(err);
     let msg = format!("{:#}", err);
     match command {
         "check" => CommandOutput::Check(CheckResult::error(msg, kind)),

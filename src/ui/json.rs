@@ -90,6 +90,8 @@ struct ResultLine<'a> {
     verified: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_kind: Option<&'static str>,
 }
 
 const EMIT_INTERVAL_MS: u128 = 200;
@@ -235,6 +237,7 @@ impl ProgressRenderer for JsonProgress {
             reflink_count: (self.data.reflink_count > 0).then_some(self.data.reflink_count),
             verified: self.data.verify_mode,
             error: None,
+            error_kind: None,
         };
 
         self.writer.write_line_strict(&line)
@@ -258,6 +261,7 @@ impl ProgressRenderer for JsonProgress {
             reflink_count: (self.data.reflink_count > 0).then_some(self.data.reflink_count),
             verified: self.data.verify_mode,
             error: Some(msg),
+            error_kind: Some(crate::output::kind_from_message(msg)),
         };
 
         self.writer.write_line_strict(&line)
