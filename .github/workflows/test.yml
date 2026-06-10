@@ -458,6 +458,8 @@ jobs:
           cat "$log"
           grep -q '"status":"error"' "$log" \
             || { echo "FAIL: error path did not write error result"; exit 1; }
+          grep -q '"error_kind":"is_directory"' "$log" \
+            || { echo "FAIL: error result missing categorical error_kind"; exit 1; }
           cargo run --quiet -- status "$jid" --json | grep -q '"state":"failed"' \
             || { echo "FAIL: status did not report failed"; exit 1; }
 
@@ -684,6 +686,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: rustsec/audit-check@v2.0.0
+      - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          command: check advisories bans licenses sources
