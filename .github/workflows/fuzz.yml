@@ -12,15 +12,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
-      - uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/cargo-fuzz
-            ~/.cargo/registry
-            fuzz/target
-          key: fuzz-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-      - name: Install cargo-fuzz
-        run: which cargo-fuzz || cargo install cargo-fuzz
+          workspaces: fuzz
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
       - name: Fuzz decode_message
         run: cargo +nightly fuzz run decode_message -- -max_total_time=180
       - name: Upload crash artifacts
