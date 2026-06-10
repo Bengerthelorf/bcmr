@@ -2,11 +2,16 @@ use crate::commands;
 use crate::config::is_json_mode;
 use crate::ui::utils::format_bytes;
 use anyhow::Result;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
 pub(crate) fn prompt_yes_no(message: &str) -> Result<bool> {
     if is_json_mode() {
         return Ok(true);
+    }
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!(
+            "confirmation required but stdin is not a terminal — pass -y to skip the prompt"
+        );
     }
     print!("{} [y/N] ", message);
     io::stdout().flush()?;

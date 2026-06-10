@@ -115,7 +115,13 @@ async fn confirm_remove(
         execute,
         terminal::{disable_raw_mode, enable_raw_mode},
     };
-    use std::io::{self, Write};
+    use std::io::{self, IsTerminal, Write};
+
+    if !io::stdin().is_terminal() {
+        return Err(BcmrError::InvalidInput(
+            "-i requires a terminal for prompts; stdin is not a TTY (use -y or -f instead)".into(),
+        ));
+    }
 
     let mut stdout = io::stdout();
     if restore_raw {
