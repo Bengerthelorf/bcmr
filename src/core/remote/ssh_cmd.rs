@@ -17,18 +17,14 @@ pub(super) fn control_path(target: &str) -> String {
 }
 
 pub(super) fn is_interactive() -> bool {
-    #[cfg(unix)]
-    {
-        unsafe { libc::isatty(libc::STDIN_FILENO) != 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
 }
 
 pub(super) fn ssh_base_args(target: &str) -> Vec<String> {
-    let mut args = if std::env::var_os("BCMR_SSH_NO_MULTIPLEX").is_some() {
+    // Win32-OpenSSH has no mux support — ControlMaster errors out on Windows.
+    let no_multiplex = cfg!(windows) || std::env::var_os("BCMR_SSH_NO_MULTIPLEX").is_some();
+    let mut args = if no_multiplex {
         vec![
             "-o".into(),
             "ControlMaster=no".into(),
