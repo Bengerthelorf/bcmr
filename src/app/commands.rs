@@ -190,12 +190,18 @@ async fn handle_copy_one(args: &Commands, dest_override: Option<&std::path::Path
     }
 
     if !args.is_recursive() {
+        let verb = if matches!(args, Commands::Move { .. }) {
+            "move"
+        } else {
+            "copy"
+        };
         for src in sources {
             if let Ok(md) = src.symlink_metadata() {
                 if md.is_dir() {
                     bail!(
-                        "Source '{}' is a directory. Use -r flag for recursive copy.",
-                        src.display()
+                        "Source '{}' is a directory. Use -r flag for recursive {}.",
+                        src.display(),
+                        verb
                     );
                 }
             }

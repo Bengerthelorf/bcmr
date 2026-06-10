@@ -230,7 +230,18 @@ pub async fn remove_path(
 
             if !cli.is_dry_run() {
                 if ft.is_dir() {
-                    fs::remove_dir(entry_path).await?;
+                    if let Err(e) = fs::remove_dir(entry_path).await {
+                        // Exclusions and interactive skips intentionally leave
+                        // children behind; keeping the parent is the expected
+                        // outcome, not an error.
+                        if e.kind() != std::io::ErrorKind::DirectoryNotEmpty {
+                            return Err(e.into());
+                        }
+                        if entry_path != path {
+                            progress.inc_items_processed();
+                        }
+                        continue;
+                    }
                 } else {
                     fs::remove_file(entry_path).await?;
                 }
