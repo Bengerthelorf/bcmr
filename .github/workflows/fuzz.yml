@@ -19,7 +19,9 @@ jobs:
         with:
           tool: cargo-fuzz
       - name: Fuzz decode_message
-        run: cargo +nightly fuzz run decode_message -- -max_total_time=180
+        # explicit target: the prebuilt cargo-fuzz is musl-static and would
+        # otherwise default to its own (sanitizer-incompatible) musl triple
+        run: cargo +nightly fuzz run decode_message --target x86_64-unknown-linux-gnu -- -max_total_time=180
       - name: Upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@v4
