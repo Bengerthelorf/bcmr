@@ -28,6 +28,11 @@ eval "$(bcmr init bash --cmd b)"
 bcmr init fish --cmd b | source
 ```
 
+```powershell [PowerShell ($PROFILE)]
+# 使用 'b' 前缀 → bcp, bmv, brm
+bcmr init powershell --cmd b | Out-String | Invoke-Expression
+```
+
 :::
 
 ## 选项
@@ -58,6 +63,7 @@ eval "$(bcmr init zsh --cmd --prefix p --suffix +)"
 - Bash
 - Zsh
 - Fish
+- PowerShell
 
 ## Shell 补全
 

@@ -7,7 +7,7 @@ tags: [stable]
 order: 1
 related: [bcmr completions]
 flags:
-  - { f: "<shell>",      t: "bash|zsh|fish", d: "—", x: "target shell" }
+  - { f: "<shell>",      t: "bash|zsh|fish|powershell", d: "—", x: "target shell" }
   - { f: "--cmd <pfx>",  t: str,             d: "—", x: "command prefix, e.g. b → bcp, bmv, brm" }
   - { f: "--prefix",     t: str,             d: "—", x: "explicit prefix (overrides --cmd)" }
   - { f: "--suffix",     t: str,             d: "—", x: "command suffix" }

@@ -14,6 +14,8 @@ flags:
   - { f: "-v, --verbose",       t: bool,                     d: "false",      x: "explain what is being done" }
   - { f: "-e, --exclude",       t: "regex...",               d: "—",          x: "exclude paths matching regex (repeatable)" }
   - { f: "-n, --dry-run",       t: bool,                     d: "false",      x: "preview without making changes" }
+  - { f: "--to <DEST>",         t: "path...",                d: "—",          x: "fan-out target (repeatable); all positionals become sources" }
+  - { f: "--no-deref",          t: bool,                     d: "false",      x: "replicate symlinks instead of following them (cp -P)" }
   - { f: "-V, --verify",        t: bool,                     d: "false",      x: "recompute blake3 after copy" }
   - { f: "-C, --resume",        t: bool,                     d: "false",      x: "resume interrupted copy (size + mtime check)" }
   - { f: "-s, --strict",        t: bool,                     d: "false",      x: "strict blake3 partial-hash resume" }
@@ -25,6 +27,9 @@ flags:
   - { f: "-j, --jobs <N>",      t: int,                      d: "min(CPU,8)", x: "max concurrent local file copies" }
   - { f: "--compress",          t: "auto|zstd|lz4|none",     d: "auto",       x: "remote-wire compression" }
   - { f: "--fast",              t: bool,                     d: "false",      x: "remote only: skip server-side blake3; linux splice(2)" }
+  - { f: "--direct",            t: "ssh|direct",             d: "ssh",        x: "remote data plane: ssh stream or direct TCP with AES-256-GCM" }
+  - { f: "-t, --plain",         t: bool,                     d: "false",      x: "plain 3-line progress instead of the TUI box" }
+  - { f: "-q, --quiet",         t: bool,                     d: "false",      x: "suppress progress UI; errors only" }
 example:
   - "scanning source ……  2,481 files · 14.2 gb"
   - "handshake (ssh) ……  ok"

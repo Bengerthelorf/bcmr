@@ -27,6 +27,11 @@ eval "$(bcmr init bash --cmd b)"
 bcmr init fish --cmd b | source
 ```
 
+```powershell [PowerShell ($PROFILE)]
+# Use 'b' prefix → bcp, bmv, brm
+bcmr init powershell --cmd b | Out-String | Invoke-Expression
+```
+
 :::
 
 ## Options
@@ -60,6 +65,7 @@ eval "$(bcmr init zsh --no-cmd --path /usr/local/bin)"
 - Bash
 - Zsh
 - Fish
+- PowerShell
 
 ## Shell Completions
 

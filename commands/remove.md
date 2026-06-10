@@ -15,6 +15,8 @@ flags:
   - { f: "-d, --dir",           t: bool,           d: "false", x: "remove empty directories only (rmdir)" }
   - { f: "-e, --exclude",       t: "regex...",     d: "—",     x: "exclude paths matching regex" }
   - { f: "-n, --dry-run",       t: bool,           d: "false", x: "preview without making changes" }
+  - { f: "-t, --plain",         t: bool,           d: "false", x: "plain 3-line progress instead of the TUI box" }
+  - { f: "-q, --quiet",         t: bool,           d: "false", x: "suppress progress UI; errors only" }
 example:
   - "scanning ……  37 files · 120.4 mb"
   - "confirm? y"

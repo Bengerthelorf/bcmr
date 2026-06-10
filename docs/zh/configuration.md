@@ -120,9 +120,9 @@ compression = "auto"     # "auto"（默认）、"force" 或 "off"
 
 | 值 | 说明 |
 |----|------|
-| `"notify"` | 检查并在 stderr 输出更新提示（默认） |
-| `"quiet"` | 不输出提示 |
-| `"off"` | 完全跳过更新检查 |
+| `"off"` | 完全跳过更新检查（默认） |
+| `"quiet"` | 后台检查但不输出任何提示 |
+| `"notify"` | 检查并在 stderr 输出更新提示 |
 
 ## 配置文件位置
 
@@ -133,6 +133,75 @@ BCMR 按以下顺序查找配置文件：
 3. 平台特定的配置目录（通过 `directories` crate）：
    - **macOS：** `~/Library/Application Support/com.bcmr.bcmr/`
    - **Windows：** `%APPDATA%\bcmr\bcmr\`
+
+## 路径书签
+
+冗长且反复输入的远程目标很烦人。`[paths]` 表把简短的 `@别名` 映射为完整的 `host:path` 字符串；bcmr 在启动时完成替换，下游所有代码路径看到的都是解析后的目标。
+
+```toml
+[paths]
+proj   = "lab:/data/projects/myrepo/"
+backup = "nas:/backups/"
+logs   = "archive:/var/log/myapp/"
+```
+
+```sh
+bcmr copy ./project/  @proj           # → lab:/data/projects/myrepo/
+bcmr copy db.gz       @proj/backups/  # → lab:/data/projects/myrepo/backups/
+bcmr copy report.pdf  @backup/today/  # → nas:/backups/today/
+```
+
+**规则：**
+
+- 别名必须匹配 `[A-Za-z_][A-Za-z0-9_-]*`，非法名称在使用时报错。
+- 配置目标的末尾斜杠在裸别名形式下原样保留（`@proj` 原样返回目标），在带后缀形式下做归一化（`@proj/foo` 之间恰好以一个 `/` 连接）。
+- 未知的 `@alias` 会报错并给出基于 Levenshtein 距离的 `did you mean ...?` 建议，同时列出所有已知别名。bcmr 不会静默回退到字面量文件查找。
+- 要复制名字以 `@` 开头的字面量文件，请加 `./` 前缀 — 例如 `bcmr copy ./@weird-filename ./dst/`。
+
+别名可用于所有接受路径的位置：源列表、目标、`bcmr check`、`bcmr remove`。
+
+## 按主机默认参数
+
+当传输涉及某个特定主机时，自动附加一组固定参数：
+
+```toml
+[host."lab"]
+default_args = ["-p", "--compress", "zstd", "--reflink", "force"]
+
+[host."nas"]
+default_args = ["--direct", "direct"]
+```
+
+```sh
+bcmr copy ./project/ lab:dst/
+# 解析为：bcmr copy -p --compress zstd --reflink force ./project/ lab:dst/
+```
+
+匹配的主机名取自任意源或目标参数中 `host:` 的部分（第一个命中者生效）。显式的 CLI 参数排在注入的默认参数之后，因此用户输入的 `--compress none` 会覆盖主机的 `default_args = ["--compress", "zstd"]`。
+
+## 配置方案（Profiles）
+
+通过 `--profile <name>` 或 `BCMR_PROFILE=<name>` 激活的命名参数包：
+
+```toml
+[profile.work]
+default_args = ["-p", "-V"]
+
+[profile.home]
+default_args = ["-p"]
+```
+
+```sh
+bcmr --profile work copy ./report.pdf host:dst/
+# 解析为：bcmr copy -p -V ./report.pdf host:dst/
+
+BCMR_PROFILE=home bcmr copy ./report.pdf host:dst/
+# 解析为：bcmr copy -p ./report.pdf host:dst/
+```
+
+**优先级（左侧胜出）：** `显式用户参数 > 主机默认 > profile 默认 > 内置默认`。注入顺序为 `profile、host、用户参数`，全部从左到右；clap 后解析的参数覆盖先解析的，因此用户参数胜出。
+
+未知的 `--profile <name>`（没有对应的 `[profile.<name>]` 表）是静默 no-op — 命令其余部分照常执行。
 
 ## 环境变量
 

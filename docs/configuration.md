@@ -119,9 +119,9 @@ Controls whether BCMR checks for new versions in the background when running any
 
 | Value | Description |
 |-------|-------------|
-| `"notify"` | Check and print update notification to stderr (default) |
-| `"quiet"` | No notification |
-| `"off"` | Skip update check entirely |
+| `"off"` | Skip update check entirely (default) |
+| `"quiet"` | Check in the background but print nothing |
+| `"notify"` | Check and print update notification to stderr |
 
 ## Config File Locations
 
@@ -167,8 +167,8 @@ Apply a fixed set of flags whenever a transfer involves a particular host:
 [host."lab"]
 default_args = ["-p", "--compress", "zstd", "--reflink", "force"]
 
-[host."slow_link"]
-default_args = ["--bwlimit", "200K"]
+[host."nas"]
+default_args = ["--direct", "direct"]
 ```
 
 ```sh

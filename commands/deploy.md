@@ -9,6 +9,7 @@ related: [bcmr update]
 flags:
   - { f: "<target>",  t: "user@host",      d: "—",                    x: "remote ssh target" }
   - { f: "--path",    t: path,             d: "~/.local/bin/bcmr",    x: "installation path on remote" }
+  - { f: "--sudo",    t: bool,             d: "false",                x: "use sudo for the remote install step (passwordless)" }
 example:
   - "probing remote ……  linux/x86_64"
   - "same arch · uploading local binary"

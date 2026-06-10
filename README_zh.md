@@ -67,11 +67,22 @@ bcmr 不是 delta-sync 引擎。如果你在 100 GB 文件里只改了 3 MB 而�
 brew install Bengerthelorf/tap/bcmr
 ```
 
-### 安装脚本
+### 安装脚本 (macOS / Linux)
 
 ```bash
 curl -fsSL https://app.snaix.homes/bcmr/install | bash
 ```
+
+### Windows
+
+```powershell
+$dir = "$env:LOCALAPPDATA\Programs\bcmr"
+Invoke-WebRequest https://github.com/Bengerthelorf/bcmr/releases/latest/download/bcmr-x86_64-windows.zip -OutFile "$env:TEMP\bcmr.zip"
+Expand-Archive "$env:TEMP\bcmr.zip" -DestinationPath $dir -Force
+# 然后把 $dir 加入 PATH，或直接使用：cargo install bcmr
+```
+
+ARM64 版本为 `bcmr-aarch64-windows.zip`。
 
 ### Cargo
 

@@ -95,11 +95,22 @@ see the [Internals](https://app.snaix.homes/bcmr/internals/) index.
 brew install Bengerthelorf/tap/bcmr
 ```
 
-### Install Script
+### Install Script (macOS / Linux)
 
 ```bash
 curl -fsSL https://app.snaix.homes/bcmr/install.sh | bash
 ```
+
+### Windows
+
+```powershell
+$dir = "$env:LOCALAPPDATA\Programs\bcmr"
+Invoke-WebRequest https://github.com/Bengerthelorf/bcmr/releases/latest/download/bcmr-x86_64-windows.zip -OutFile "$env:TEMP\bcmr.zip"
+Expand-Archive "$env:TEMP\bcmr.zip" -DestinationPath $dir -Force
+# then add $dir to PATH, or use: cargo install bcmr
+```
+
+ARM64 builds ship as `bcmr-aarch64-windows.zip`.
 
 ### Cargo
 
