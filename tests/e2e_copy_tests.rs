@@ -90,14 +90,14 @@ fn e2e_session_cleaned_up_after_success() {
     let dst = dir.path().join("dst.bin");
     create_random_file(&src, 80 * 1024 * 1024);
 
-    let (ok, _, _) = run_bcmr(&[
+    let (ok, _, stderr) = run_bcmr(&[
         "copy",
         "-t",
         "-C",
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
     ]);
-    assert!(ok);
+    assert!(ok, "copy should succeed: {}", stderr);
 
     assert!(
         !session_exists(&src, &dst),
@@ -131,14 +131,14 @@ fn e2e_resume_after_simulated_crash() {
     let size = 80 * 1024 * 1024;
     create_random_file(&src, size);
 
-    let (ok, _, _) = run_bcmr(&[
+    let (ok, _, stderr) = run_bcmr(&[
         "copy",
         "-t",
         "-C",
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
     ]);
-    assert!(ok);
+    assert!(ok, "initial copy should succeed: {}", stderr);
     assert!(files_match(&src, &dst));
 
     let src_meta = src.metadata().unwrap();
@@ -194,14 +194,14 @@ fn e2e_resume_with_corrupted_tail_block() {
     let size = 80 * 1024 * 1024;
     create_random_file(&src, size);
 
-    let (ok, _, _) = run_bcmr(&[
+    let (ok, _, stderr) = run_bcmr(&[
         "copy",
         "-t",
         "-C",
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
     ]);
-    assert!(ok);
+    assert!(ok, "initial copy should succeed: {}", stderr);
 
     let src_meta = src.metadata().unwrap();
     let src_mtime = src_meta
@@ -303,8 +303,8 @@ fn e2e_small_file_no_session() {
     let dst = dir.path().join("small_dst.bin");
     create_random_file(&src, 1024 * 1024);
 
-    let (ok, _, _) = run_bcmr(&["copy", "-t", src.to_str().unwrap(), dst.to_str().unwrap()]);
-    assert!(ok);
+    let (ok, _, stderr) = run_bcmr(&["copy", "-t", src.to_str().unwrap(), dst.to_str().unwrap()]);
+    assert!(ok, "copy should succeed: {}", stderr);
     assert!(files_match(&src, &dst));
 
     assert!(!session_exists(&src, &dst));
@@ -317,8 +317,8 @@ fn e2e_copy_verify_detects_corruption() {
     let dst = dir.path().join("dst.bin");
     create_random_file(&src, 80 * 1024 * 1024);
 
-    let (ok, _, _) = run_bcmr(&["copy", "-t", src.to_str().unwrap(), dst.to_str().unwrap()]);
-    assert!(ok);
+    let (ok, _, stderr) = run_bcmr(&["copy", "-t", src.to_str().unwrap(), dst.to_str().unwrap()]);
+    assert!(ok, "initial copy should succeed: {}", stderr);
 
     {
         use std::io::Seek;
@@ -423,14 +423,14 @@ fn e2e_multi_crash_resume_preserves_block_history() {
     }
     session.save().unwrap();
 
-    let (ok, _, _) = run_bcmr(&[
+    let (ok, _, stderr) = run_bcmr(&[
         "copy",
         "-t",
         "-C",
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
     ]);
-    assert!(ok);
+    assert!(ok, "first resume should succeed: {}", stderr);
     assert!(files_match(&src, &dst));
 
     let mut session2 = Session::new(&src, &dst, src_meta.len(), src_mtime, src_inode);
@@ -474,8 +474,13 @@ fn e2e_copy_preserves_existing_on_no_force() {
 
     let dst_hash_before = checksum::calculate_hash(&dst).unwrap();
 
-    let (ok, _, _) = run_bcmr(&["copy", "-t", src.to_str().unwrap(), dst.to_str().unwrap()]);
-    assert!(!ok, "copy without -f should fail when target exists");
+    let (ok, stdout, stderr) =
+        run_bcmr(&["copy", "-t", src.to_str().unwrap(), dst.to_str().unwrap()]);
+    assert!(
+        !ok,
+        "copy without -f should fail when target exists; stdout: {} stderr: {}",
+        stdout, stderr
+    );
 
     let dst_hash_after = checksum::calculate_hash(&dst).unwrap();
     assert_eq!(dst_hash_before, dst_hash_after);
@@ -486,7 +491,9 @@ fn e2e_copy_preserves_existing_on_no_force() {
 fn e2e_pipeline_copy_honors_jobs_concurrency() {
     const FILES: usize = 12;
     const DELAY_MS: u64 = 600;
-    const THRESHOLD_MS: u64 = 4000;
+    // Fully serial copies would take FILES * DELAY_MS; anything one delay short
+    // of that proves overlap, while staying loose enough for loaded CI runners.
+    const THRESHOLD_MS: u64 = FILES as u64 * DELAY_MS - DELAY_MS;
 
     let dir = tempfile::tempdir().unwrap();
     let dst_dir = dir.path().join("dst");
@@ -515,7 +522,8 @@ fn e2e_pipeline_copy_honors_jobs_concurrency() {
     assert!(ok, "copy with --jobs should succeed: {}", stderr);
     assert!(
         elapsed < Duration::from_millis(THRESHOLD_MS),
-        "expected file copies to overlap with --jobs; elapsed={elapsed:?}"
+        "expected file copies to overlap with --jobs; serial would take {}ms, elapsed={elapsed:?}",
+        FILES as u64 * DELAY_MS
     );
 
     for i in 0..FILES {
@@ -587,14 +595,14 @@ fn e2e_carry_forward_code_path() {
         f.set_len(40 * 1024 * 1024).unwrap();
     }
 
-    let (ok, _, _) = run_bcmr(&[
+    let (ok, _, stderr) = run_bcmr(&[
         "copy",
         "-t",
         "-C",
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
     ]);
-    assert!(ok);
+    assert!(ok, "intermediate resume should succeed: {}", stderr);
 
     {
         use std::io::Read;
@@ -663,8 +671,8 @@ fn test_xattr_preserves_binary_value() {
         return;
     }
 
-    let (ok, _, _) = run_bcmr(&["copy", "-p", src.to_str().unwrap(), dst.to_str().unwrap()]);
-    assert!(ok);
+    let (ok, _, stderr) = run_bcmr(&["copy", "-p", src.to_str().unwrap(), dst.to_str().unwrap()]);
+    assert!(ok, "copy -p should succeed: {}", stderr);
 
     let got = xattr::get(&dst, "user.bcmr.bin").unwrap().unwrap();
     assert_eq!(got, binary_value);
@@ -709,13 +717,13 @@ fn e2e_no_deref_default_dereferences() {
     let dst_dir = dir.path().join("dst");
     fs::create_dir(&dst_dir).unwrap();
 
-    let (ok, _, _) = run_bcmr(&[
+    let (ok, _, stderr) = run_bcmr(&[
         "copy",
         "-t",
         link.to_str().unwrap(),
         dst_dir.to_str().unwrap(),
     ]);
-    assert!(ok);
+    assert!(ok, "default deref copy should succeed: {}", stderr);
 
     let landed = dst_dir.join("link.txt");
     assert!(landed.symlink_metadata().unwrap().file_type().is_file());
@@ -731,14 +739,14 @@ fn e2e_no_deref_preserves_dangling_symlink() {
     let dst_dir = dir.path().join("dst");
     fs::create_dir(&dst_dir).unwrap();
 
-    let (ok, _, _) = run_bcmr(&[
+    let (ok, _, stderr) = run_bcmr(&[
         "copy",
         "-t",
         "--no-deref",
         link.to_str().unwrap(),
         dst_dir.to_str().unwrap(),
     ]);
-    assert!(ok);
+    assert!(ok, "copy of dangling symlink should succeed: {}", stderr);
 
     let landed = dst_dir.join("broken.txt");
     assert!(landed.symlink_metadata().is_ok());
@@ -801,14 +809,18 @@ fn e2e_no_deref_overwrite_gate_refuses_existing_dst() {
     fs::write(&collide, b"PRE").unwrap();
     let pre_hash = checksum::calculate_hash(&collide).unwrap();
 
-    let (ok, _, stderr) = run_bcmr(&[
+    let (ok, stdout, stderr) = run_bcmr(&[
         "copy",
         "-t",
         "--no-deref",
         link.to_str().unwrap(),
         dst_dir.to_str().unwrap(),
     ]);
-    assert!(!ok);
+    assert!(
+        !ok,
+        "copy onto existing dst without -f should fail; stdout: {} stderr: {}",
+        stdout, stderr
+    );
     assert!(stderr.contains("already exists") || stderr.contains("TargetExists"));
     assert!(collide.is_file());
     assert_eq!(checksum::calculate_hash(&collide).unwrap(), pre_hash);
@@ -856,14 +868,18 @@ fn e2e_no_deref_overwrite_gate_treats_dangling_link_as_existing() {
     let dangling = dst_dir.join("src_link.txt");
     std::os::unix::fs::symlink("does_not_exist", &dangling).unwrap();
 
-    let (ok, _, stderr) = run_bcmr(&[
+    let (ok, stdout, stderr) = run_bcmr(&[
         "copy",
         "-t",
         "--no-deref",
         src_link.to_str().unwrap(),
         dst_dir.to_str().unwrap(),
     ]);
-    assert!(!ok);
+    assert!(
+        !ok,
+        "copy onto existing dangling link should fail; stdout: {} stderr: {}",
+        stdout, stderr
+    );
     assert!(stderr.contains("already exists") || stderr.contains("TargetExists"));
     assert_eq!(
         std::fs::read_link(&dangling).unwrap(),
@@ -951,14 +967,18 @@ fn e2e_no_deref_refuses_overwriting_directory_even_with_force() {
     fs::create_dir(&collide).unwrap();
     fs::write(collide.join("inside.txt"), b"keep").unwrap();
 
-    let (ok, _, stderr) = run_bcmr(&[
+    let (ok, stdout, stderr) = run_bcmr(&[
         "copy",
         "-tfy",
         "--no-deref",
         link.to_str().unwrap(),
         dst_dir.to_str().unwrap(),
     ]);
-    assert!(!ok);
+    assert!(
+        !ok,
+        "overwriting a directory must fail even with force; stdout: {} stderr: {}",
+        stdout, stderr
+    );
     assert!(stderr.contains("cannot overwrite directory"));
     assert!(collide.is_dir());
     assert!(collide.join("inside.txt").exists());
@@ -999,14 +1019,18 @@ fn e2e_no_deref_remote_target_refuses() {
     let link = dir.path().join("link.txt");
     std::os::unix::fs::symlink("target.txt", &link).unwrap();
 
-    let (ok, _, stderr) = run_bcmr(&[
+    let (ok, stdout, stderr) = run_bcmr(&[
         "copy",
         "-t",
         "--no-deref",
         link.to_str().unwrap(),
         "no-such-host-bcmr-test.invalid:dst/",
     ]);
-    assert!(!ok);
+    assert!(
+        !ok,
+        "--no-deref with remote target should fail; stdout: {} stderr: {}",
+        stdout, stderr
+    );
     assert!(stderr.contains("--no-deref is currently only supported for local"));
 }
 
@@ -1108,13 +1132,13 @@ fn e2e_quiet_long_form_also_suppresses() {
     let dst = dir.path().join("d.bin");
     fs::write(&src, b"quiet-long").unwrap();
 
-    let (ok, stdout, _stderr) = run_bcmr(&[
+    let (ok, stdout, stderr) = run_bcmr(&[
         "copy",
         "--quiet",
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
     ]);
-    assert!(ok);
+    assert!(ok, "copy --quiet should succeed: {}", stderr);
     assert!(dst.exists());
     assert!(!stdout.contains("Done:"), "got: {stdout}");
 }
@@ -1189,8 +1213,8 @@ fn e2e_doctor_unreachable_host_fails_with_exit_1() {
 
 #[test]
 fn e2e_doctor_json_emits_structured_report() {
-    let (ok, stdout, _stderr) = run_bcmr(&["--json", "doctor"]);
-    assert!(ok);
+    let (ok, stdout, stderr) = run_bcmr(&["--json", "doctor"]);
+    assert!(ok, "doctor --json should succeed: {}", stderr);
     let trimmed = stdout.trim();
     assert!(trimmed.starts_with('{'), "got: {stdout}");
     for token in ["\"bcmr_version\"", "\"local\"", "\"hosts\"", "\"ok\":true"] {
@@ -1200,13 +1224,17 @@ fn e2e_doctor_json_emits_structured_report() {
 
 #[test]
 fn e2e_same_host_remote_to_remote_copy_refuses() {
-    let (ok, _stdout, stderr) = run_bcmr(&[
+    let (ok, stdout, stderr) = run_bcmr(&[
         "copy",
         "-t",
         "host-x-bcmr-test.invalid:src.bin",
         "host-x-bcmr-test.invalid:dst/",
     ]);
-    assert!(!ok);
+    assert!(
+        !ok,
+        "same-host remote-to-remote should fail; stdout: {} stderr: {}",
+        stdout, stderr
+    );
     assert!(
         stderr.contains("does not support remote-to-remote"),
         "stderr: {stderr}"

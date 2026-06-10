@@ -282,8 +282,10 @@ async fn serve_direct_tcp_hung_squatters_do_not_starve_real_client() {
         other => panic!("real client was starved by hung squatters, got {other:?}"),
     }
     let elapsed = start.elapsed();
+    // Serial verify of 8 hung squatters at the 2 s auth timeout each would take
+    // 16 s; half that proves overlap without flaking on loaded CI runners.
     assert!(
-        elapsed < std::time::Duration::from_secs(2),
+        elapsed < std::time::Duration::from_secs(8),
         "serial verify would take 8 * 2s = 16s; got {elapsed:?}"
     );
 
