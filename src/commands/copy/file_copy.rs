@@ -253,84 +253,128 @@ async fn try_atomic_reflink(
     staging.finish_unsupported_reflink(fail_on_error)
 }
 
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, PartialEq, Eq)]
+enum CopyFileRangeLoopOutcome {
+    Complete,
+    Fallback,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn copy_file_range_loop_with<CopyRange>(
+    expected_remaining: u64,
+    mut copy_range: CopyRange,
+) -> Result<CopyFileRangeLoopOutcome, BcmrError>
+where
+    CopyRange: FnMut(usize) -> std::io::Result<usize>,
+{
+    const CHUNK: usize = 4 * 1024 * 1024;
+    let mut remaining = expected_remaining;
+
+    while remaining > 0 {
+        let requested = remaining.min(CHUNK as u64) as usize;
+        match copy_range(requested) {
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(libc::ENOSYS | libc::EXDEV | libc::EINVAL | libc::EOPNOTSUPP)
+                ) =>
+            {
+                return Ok(CopyFileRangeLoopOutcome::Fallback);
+            }
+            Err(error) => return Err(BcmrError::Io(error)),
+            Ok(0) => {
+                return Err(BcmrError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!("source ended with {remaining} bytes remaining"),
+                )));
+            }
+            Ok(copied) if copied > requested => {
+                return Err(BcmrError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("copy_file_range copied {copied} bytes for a {requested}-byte request"),
+                )));
+            }
+            Ok(copied) => {
+                remaining -= copied as u64;
+            }
+        }
+    }
+
+    Ok(CopyFileRangeLoopOutcome::Complete)
+}
+
 #[cfg(target_os = "linux")]
-async fn try_copy_file_range(
+async fn try_copy_file_range<F>(
     src: &Path,
     dst: &Path,
     file_size: u64,
-    callback: &impl Fn(u64),
-) -> Option<Result<(), BcmrError>> {
-    use std::os::unix::io::AsRawFd;
+    callback: &F,
+) -> Option<Result<(), BcmrError>>
+where
+    F: Fn(u64) + Send + Sync + Clone + 'static,
+{
+    let src = src.to_path_buf();
+    let dst = dst.to_path_buf();
 
-    let src_file = std::fs::File::open(src).ok()?;
-    let dst_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(dst)
-        .ok()?;
+    let task = tokio::task::spawn_blocking(move || {
+        use std::os::unix::io::AsRawFd;
 
-    let src_fd = src_file.as_raw_fd();
-    let dst_fd = dst_file.as_raw_fd();
+        let src_file = std::fs::File::open(src).ok()?;
+        let dst_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(dst)
+            .ok()?;
+        let src_fd = src_file.as_raw_fd();
+        let dst_fd = dst_file.as_raw_fd();
 
-    if file_size > 0 {
-        unsafe {
-            let _ = libc::fallocate(dst_fd, 0, 0, file_size as libc::off_t);
+        if file_size > 0 {
+            unsafe {
+                let _ = libc::fallocate(dst_fd, 0, 0, file_size as libc::off_t);
+            }
         }
-    }
 
-    const CHUNK: usize = 4 * 1024 * 1024;
-    let mut remaining = file_size;
-
-    while remaining > 0 {
-        let to_copy = (remaining as usize).min(CHUNK);
-        let sfd = src_fd;
-        let dfd = dst_fd;
-        let result = tokio::task::spawn_blocking(move || {
-            let ret = unsafe {
+        let outcome = copy_file_range_loop_with(file_size, |requested| {
+            let copied = unsafe {
                 libc::copy_file_range(
-                    sfd,
+                    src_fd,
                     std::ptr::null_mut(),
-                    dfd,
+                    dst_fd,
                     std::ptr::null_mut(),
-                    to_copy,
+                    requested,
                     0,
                 )
             };
-            if ret < 0 {
+            if copied < 0 {
                 Err(std::io::Error::last_os_error())
             } else {
-                Ok(ret)
+                Ok(copied as usize)
             }
-        })
-        .await
-        .ok()?;
+        });
 
-        match result {
-            Err(err) => {
-                let errno = err.raw_os_error().unwrap_or(0);
-                if errno == libc::ENOSYS
-                    || errno == libc::EXDEV
-                    || errno == libc::EINVAL
-                    || errno == libc::EOPNOTSUPP
-                {
-                    if let Err(reset_error) = reset_copy_file_range_stage_for_fallback(&dst_file) {
-                        return Some(Err(BcmrError::Io(reset_error)));
-                    }
-                    return None;
+        match outcome {
+            Ok(CopyFileRangeLoopOutcome::Complete) => Some(Ok(())),
+            Ok(CopyFileRangeLoopOutcome::Fallback) => {
+                if let Err(error) = reset_copy_file_range_stage_for_fallback(&dst_file) {
+                    Some(Err(BcmrError::Io(error)))
+                } else {
+                    None
                 }
-                return Some(Err(BcmrError::Io(err)));
             }
-            Ok(0) => break,
-            Ok(n) => {
-                let n = n as u64;
-                remaining -= n;
-                callback(n);
-            }
+            Err(error) => Some(Err(error)),
         }
-    }
+    });
 
-    Some(Ok(()))
+    match task.await {
+        Ok(Some(Ok(()))) => {
+            callback(file_size);
+            Some(Ok(()))
+        }
+        Ok(result) => result,
+        Err(error) => Some(Err(BcmrError::Join(error))),
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -458,6 +502,20 @@ where
         test_mode,
         replace_existing,
     } = opts;
+    #[cfg(feature = "test-support")]
+    let truncate_source_after_snapshot = matches!(
+        test_mode,
+        TestMode::TruncateSourceAfterSnapshot
+            | TestMode::TruncateSourceAfterSnapshotDelay
+            | TestMode::TruncateSourceAfterSnapshotSpeedLimit
+    );
+    #[cfg(feature = "test-support")]
+    let test_mode = match test_mode {
+        TestMode::TruncateSourceAfterSnapshot => TestMode::None,
+        TestMode::TruncateSourceAfterSnapshotDelay => TestMode::Delay(0),
+        TestMode::TruncateSourceAfterSnapshotSpeedLimit => TestMode::SpeedLimit(u64::MAX),
+        other => other,
+    };
     let crate::core::remote::TransferOptions {
         preserve,
         verify,
@@ -468,6 +526,12 @@ where
     } = transfer;
 
     let file_size = src.metadata()?.len();
+    #[cfg(feature = "test-support")]
+    if truncate_source_after_snapshot {
+        let truncated = fs::OpenOptions::new().write(true).open(src).await?;
+        truncated.set_len(file_size.saturating_sub(1)).await?;
+        drop(truncated);
+    }
     let file_name = src
         .file_name()
         .unwrap_or_default()
@@ -519,6 +583,7 @@ where
             write_target: &write_target,
             dst,
             src,
+            expected_file_size: file_size,
             use_atomic,
             staging: staging.take(),
             replace_existing,
@@ -540,6 +605,7 @@ where
                     write_target: &write_target,
                     dst,
                     src,
+                    expected_file_size: file_size,
                     use_atomic,
                     staging: staging.take(),
                     replace_existing,
@@ -556,6 +622,10 @@ where
         }
     }
 
+    // Defer resume progress publication until the selected source snapshot has
+    // been validated. In particular, size-only append completion must not
+    // report success after the source shrinks.
+    let defer_resume_progress = |_: u64| {};
     let resume_state = crate::core::resume::resolve(
         src,
         dst,
@@ -563,17 +633,41 @@ where
         resume,
         strict,
         append,
-        &callback.callback,
+        &defer_resume_progress,
     )
     .await?;
 
     if resume_state.already_complete {
+        let current_source_len = src.metadata()?.len();
+        if current_source_len < file_size {
+            return Err(BcmrError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!(
+                    "source ended at {current_source_len} bytes; snapshot was {file_size} bytes"
+                ),
+            )));
+        }
+        if current_source_len > file_size {
+            return Err(BcmrError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "source grew to {current_source_len} bytes; snapshot was {file_size} bytes"
+                ),
+            )));
+        }
+        (callback.callback)(file_size);
         return Ok(());
     }
 
     let start_offset = resume_state.start_offset;
+    if start_offset > 0 {
+        (callback.callback)(start_offset);
+    }
     let loaded_session = resume_state.loaded_session;
     let truncate_tail = resume_state.truncate_tail;
+    let expected_remaining = file_size.checked_sub(start_offset).ok_or_else(|| {
+        BcmrError::InvalidInput("resume offset exceeds the source size snapshot".into())
+    })?;
 
     let mut file_flags = fs::OpenOptions::new();
     file_flags.write(true);
@@ -611,11 +705,17 @@ where
     let inline_src_hash = match test_mode {
         TestMode::Delay(ms) => {
             let mut buffer = vec![0u8; crate::core::session::COPY_BLOCK_SIZE as usize];
-            loop {
-                let n = src_file.read(&mut buffer).await?;
+            let mut remaining = expected_remaining;
+            while remaining > 0 {
+                let read_limit = remaining.min(buffer.len() as u64) as usize;
+                let n = src_file.read(&mut buffer[..read_limit]).await?;
                 if n == 0 {
-                    break;
+                    return Err(BcmrError::Io(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        format!("source ended with {remaining} bytes remaining"),
+                    )));
                 }
+                remaining -= n as u64;
                 dst_file.write_all(&buffer[..n]).await?;
                 (callback.callback)(n as u64);
                 tokio::time::sleep(Duration::from_millis(ms)).await;
@@ -626,11 +726,17 @@ where
             let mut buffer = vec![0u8; crate::core::session::COPY_BLOCK_SIZE as usize];
             let chunk_size = bps.min(buffer.len() as u64);
             let mut start_time = Instant::now();
-            loop {
-                let n = src_file.read(&mut buffer[..chunk_size as usize]).await?;
+            let mut remaining = expected_remaining;
+            while remaining > 0 {
+                let read_limit = remaining.min(chunk_size) as usize;
+                let n = src_file.read(&mut buffer[..read_limit]).await?;
                 if n == 0 {
-                    break;
+                    return Err(BcmrError::Io(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        format!("source ended with {remaining} bytes remaining"),
+                    )));
                 }
+                remaining -= n as u64;
                 dst_file.write_all(&buffer[..n]).await?;
                 let elapsed = start_time.elapsed();
                 let target = Duration::from_secs_f64(n as f64 / bps as f64);
@@ -648,12 +754,21 @@ where
                 &mut src_file,
                 &mut dst_file,
                 &mut session,
-                &sparse_mode,
-                start_offset,
-                need_src_hash,
+                super::super::copy_strategies::StreamingCopyParams {
+                    sparse_mode: sparse_mode.clone(),
+                    start_offset,
+                    expected_remaining,
+                    need_src_hash,
+                },
                 &callback.callback,
             )
             .await?
+        }
+        #[cfg(feature = "test-support")]
+        TestMode::TruncateSourceAfterSnapshot
+        | TestMode::TruncateSourceAfterSnapshotDelay
+        | TestMode::TruncateSourceAfterSnapshotSpeedLimit => {
+            unreachable!("truncate test modes are normalized before transfer")
         }
     };
 
@@ -661,6 +776,7 @@ where
         write_target: &write_target,
         dst,
         src,
+        expected_file_size: file_size,
         use_atomic,
         staging: staging.take(),
         replace_existing,
@@ -1049,6 +1165,54 @@ mod tests {
             .open(&stage_path)
             .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn copy_file_range_loop_rejects_zero_progress_before_snapshot_completion() {
+        let error = copy_file_range_loop_with(17, |_| Ok(0))
+            .expect_err("zero progress before the snapshot boundary must fail");
+
+        assert!(
+            matches!(error, BcmrError::Io(ref error) if error.kind() == std::io::ErrorKind::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn copy_file_range_loop_caps_the_final_request_at_the_snapshot_boundary() {
+        use std::cell::RefCell;
+
+        let chunk = 4 * 1024 * 1024;
+        let requests = RefCell::new(Vec::new());
+
+        let outcome = copy_file_range_loop_with(chunk as u64 + 3, |requested| {
+            requests.borrow_mut().push(requested);
+            Ok(requested)
+        })
+        .unwrap();
+
+        assert_eq!(outcome, CopyFileRangeLoopOutcome::Complete);
+        assert_eq!(requests.into_inner(), vec![chunk, 3]);
+    }
+
+    #[test]
+    fn copy_file_range_loop_falls_back_only_for_supported_errno_values() {
+        for errno in [libc::ENOSYS, libc::EXDEV, libc::EINVAL, libc::EOPNOTSUPP] {
+            let outcome =
+                copy_file_range_loop_with(1, |_| Err(std::io::Error::from_raw_os_error(errno)))
+                    .unwrap();
+            assert_eq!(
+                outcome,
+                CopyFileRangeLoopOutcome::Fallback,
+                "errno {errno} must select the reset-and-fallback path"
+            );
+        }
+
+        let error =
+            copy_file_range_loop_with(1, |_| Err(std::io::Error::from_raw_os_error(libc::EIO)))
+                .expect_err("unrelated I/O errors must propagate");
+        assert!(
+            matches!(error, BcmrError::Io(ref error) if error.raw_os_error() == Some(libc::EIO))
+        );
     }
 
     #[test]

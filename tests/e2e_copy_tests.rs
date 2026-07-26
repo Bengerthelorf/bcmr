@@ -552,6 +552,139 @@ fn e2e_verified_force_copy_replaces_existing_destination_after_staging() {
 }
 
 #[test]
+fn e2e_snapshot_truncation_never_commits_streaming_delay_or_speed_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    let old_destination = b"old destination must survive";
+
+    for test_mode in [
+        "truncate_source_after_snapshot",
+        "truncate_source_after_snapshot_delay",
+        "truncate_source_after_snapshot_speed_limit",
+    ] {
+        create_random_file(&src, 128 * 1024);
+        fs::write(&dst, old_destination).unwrap();
+
+        let (ok, _stdout, stderr) = run_bcmr(&[
+            "copy",
+            "-t",
+            "-f",
+            "-y",
+            "--reflink",
+            "disable",
+            "--test-mode",
+            test_mode,
+            src.to_str().unwrap(),
+            dst.to_str().unwrap(),
+        ]);
+
+        assert!(!ok, "{test_mode} must reject a short source");
+        assert!(
+            stderr.contains("source ended") || stderr.contains("UnexpectedEof"),
+            "{test_mode} reported the wrong error: {stderr}"
+        );
+        assert_eq!(fs::read(&dst).unwrap(), old_destination);
+        assert!(
+            !session_exists(&src, &dst),
+            "{test_mode} must not publish a resumable success checkpoint"
+        );
+        let stages: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".bcmr.stage.")
+            })
+            .collect();
+        assert!(stages.is_empty(), "{test_mode} leaked stages: {stages:?}");
+    }
+}
+
+#[test]
+fn e2e_append_cannot_report_complete_after_the_source_snapshot_shrinks() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    create_random_file(&src, 128 * 1024);
+    let old_destination = vec![0x5a; 128 * 1024];
+    let old_destination_hash = blake3::hash(&old_destination);
+    fs::write(&dst, &old_destination).unwrap();
+
+    let (ok, _stdout, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "--append",
+        "--reflink",
+        "disable",
+        "--test-mode",
+        "truncate_source_after_snapshot",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+
+    assert!(!ok, "append must revalidate an already-complete snapshot");
+    assert!(
+        stderr.contains("source ended") || stderr.contains("UnexpectedEof"),
+        "append reported the wrong error: {stderr}"
+    );
+    let destination_after = fs::read(&dst).unwrap();
+    assert_eq!(destination_after.len(), old_destination.len());
+    assert_eq!(blake3::hash(&destination_after), old_destination_hash);
+    assert!(!session_exists(&src, &dst));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn e2e_copy_file_range_rejects_a_source_truncated_after_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    let old_destination = b"old destination must survive";
+    create_random_file(&src, 128 * 1024);
+    fs::write(&dst, old_destination).unwrap();
+
+    let (ok, _stdout, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "-f",
+        "-y",
+        "--reflink",
+        "disable",
+        "--sparse",
+        "disable",
+        "--test-mode",
+        "truncate_source_after_snapshot",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+
+    assert!(!ok, "copy_file_range must reject a short source");
+    assert!(
+        stderr.contains("source ended") || stderr.contains("UnexpectedEof"),
+        "copy_file_range reported the wrong error: {stderr}"
+    );
+    assert_eq!(fs::read(&dst).unwrap(), old_destination);
+    assert!(!session_exists(&src, &dst));
+    let stages: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".bcmr.stage.")
+        })
+        .collect();
+    assert!(
+        stages.is_empty(),
+        "copy_file_range leaked stages: {stages:?}"
+    );
+}
+
+#[test]
 fn e2e_forced_reflink_uses_the_unique_stage_before_verified_replacement() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.bin");

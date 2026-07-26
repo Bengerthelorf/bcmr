@@ -11,6 +11,7 @@ pub struct FinalizeParams<'a> {
     pub write_target: &'a Path,
     pub dst: &'a Path,
     pub src: &'a Path,
+    pub expected_file_size: u64,
     pub use_atomic: bool,
     pub staging: Option<AtomicStaging>,
     pub replace_existing: bool,
@@ -28,6 +29,34 @@ pub async fn finalize(
     if p.use_atomic {
         let mut stage_file = Some(dst_file);
         let prepare = async {
+            let actual_len = stage_file
+                .as_ref()
+                .ok_or_else(|| {
+                    BcmrError::InvalidInput(
+                        "atomic finalization requires an open staging file".into(),
+                    )
+                })?
+                .metadata()
+                .await?
+                .len();
+            if actual_len < p.expected_file_size {
+                return Err(BcmrError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "staged copy ended at {actual_len} bytes; source snapshot was {} bytes",
+                        p.expected_file_size
+                    ),
+                )));
+            }
+            if actual_len > p.expected_file_size {
+                return Err(BcmrError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "staged copy grew to {actual_len} bytes; source snapshot was {} bytes",
+                        p.expected_file_size
+                    ),
+                )));
+            }
             if p.corrupt_before_verify {
                 // Test-only fault injection must close the writer before reopening
                 // the stage, which also exercises Windows handle discipline.
@@ -144,13 +173,18 @@ pub fn create_session(
     Some(s)
 }
 
+pub struct StreamingCopyParams {
+    pub sparse_mode: SparseMode,
+    pub start_offset: u64,
+    pub expected_remaining: u64,
+    pub need_src_hash: bool,
+}
+
 pub async fn streaming_copy(
     src_file: &mut tokio::fs::File,
     dst_file: &mut tokio::fs::File,
     session: &mut Option<Session>,
-    sparse_mode: &SparseMode,
-    start_offset: u64,
-    need_src_hash: bool,
+    params: StreamingCopyParams,
     callback: &(impl Fn(u64) + Send + Sync + Clone + 'static),
 ) -> Result<Option<blake3::Hash>, BcmrError> {
     // dup fds into std handles so the whole copy loop runs under one
@@ -159,19 +193,10 @@ pub async fn streaming_copy(
     let src_std = src_file.try_clone().await?.into_std().await;
     let dst_std = dst_file.try_clone().await?.into_std().await;
     let session_in = session.take();
-    let sparse_mode = sparse_mode.clone();
     let cb = callback.clone();
 
     let join = tokio::task::spawn_blocking(move || {
-        streaming_copy_sync(
-            src_std,
-            dst_std,
-            session_in,
-            &sparse_mode,
-            start_offset,
-            need_src_hash,
-            cb,
-        )
+        streaming_copy_sync(src_std, dst_std, session_in, params, cb)
     });
 
     let (returned_session, hash) = join.await??;
@@ -204,17 +229,62 @@ fn persist_checkpoint(dst_file: &std::fs::File, session: &Session) -> Result<(),
 }
 
 fn streaming_copy_sync(
-    mut src_file: std::fs::File,
-    mut dst_file: std::fs::File,
-    mut session: Option<Session>,
-    sparse_mode: &SparseMode,
-    start_offset: u64,
-    need_src_hash: bool,
+    src_file: std::fs::File,
+    dst_file: std::fs::File,
+    session: Option<Session>,
+    params: StreamingCopyParams,
     callback: impl Fn(u64) + Send + Sync,
 ) -> Result<(Option<Session>, Option<blake3::Hash>), BcmrError> {
-    use std::io::{Read, Seek, SeekFrom as StdSeekFrom, Write};
+    #[cfg(target_os = "linux")]
+    let source_fd = {
+        use std::os::unix::io::AsRawFd;
+        src_file.as_raw_fd()
+    };
+
+    streaming_copy_sync_from_reader(
+        src_file,
+        dst_file,
+        session,
+        params,
+        callback,
+        move |source_end| {
+            #[cfg(target_os = "linux")]
+            unsafe {
+                libc::posix_fadvise(
+                    source_fd,
+                    0,
+                    source_end as libc::off_t,
+                    libc::POSIX_FADV_DONTNEED,
+                );
+            }
+            #[cfg(not(target_os = "linux"))]
+            let _ = source_end;
+        },
+    )
+}
+
+fn streaming_copy_sync_from_reader<R, Progress, ReleaseSource>(
+    mut src_file: R,
+    mut dst_file: std::fs::File,
+    mut session: Option<Session>,
+    params: StreamingCopyParams,
+    callback: Progress,
+    mut release_source: ReleaseSource,
+) -> Result<(Option<Session>, Option<blake3::Hash>), BcmrError>
+where
+    R: std::io::Read,
+    Progress: Fn(u64) + Send + Sync,
+    ReleaseSource: FnMut(u64),
+{
+    use std::io::{Seek, SeekFrom as StdSeekFrom, Write};
 
     const SPARSE_DETECT_SIZE: usize = 4096;
+    let StreamingCopyParams {
+        sparse_mode,
+        start_offset,
+        expected_remaining,
+        need_src_hash,
+    } = params;
 
     let mut buffer = vec![0u8; COPY_BLOCK_SIZE as usize];
     let mut pending_hole = 0u64;
@@ -222,27 +292,51 @@ fn streaming_copy_sync(
     let mut block_hasher = session.as_ref().map(|_| blake3::Hasher::new());
     let mut bytes_in_block = 0u64;
     let mut blocks_since_checkpoint = 0u32;
+    let mut source_bytes_read = start_offset;
+    let mut remaining = expected_remaining;
 
-    loop {
-        let n = src_file.read(&mut buffer)?;
+    while remaining > 0 {
+        let read_limit = remaining.min(buffer.len() as u64) as usize;
+        let n = src_file.read(&mut buffer[..read_limit])?;
         if n == 0 {
-            break;
+            return Err(BcmrError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("source ended with {remaining} bytes remaining"),
+            )));
         }
+        remaining -= n as u64;
 
         if let Some(h) = src_hasher.as_mut() {
             h.update(&buffer[..n]);
         }
+        let mut completed_block_hash = None;
         if let Some(h) = block_hasher.as_mut() {
-            h.update(&buffer[..n]);
+            let mut offset = 0;
+            while offset < n {
+                let room = (COPY_BLOCK_SIZE - bytes_in_block) as usize;
+                let end = (offset + room).min(n);
+                h.update(&buffer[offset..end]);
+                bytes_in_block += (end - offset) as u64;
+                offset = end;
+                if bytes_in_block == COPY_BLOCK_SIZE {
+                    debug_assert!(
+                        completed_block_hash.is_none(),
+                        "one bounded read cannot complete multiple checkpoint blocks"
+                    );
+                    completed_block_hash = Some(*h.finalize().as_bytes());
+                    *h = blake3::Hasher::new();
+                    bytes_in_block = 0;
+                }
+            }
         }
-        bytes_in_block += n as u64;
+        source_bytes_read += n as u64;
 
-        match sparse_mode {
+        match &sparse_mode {
             SparseMode::Never => {
                 dst_file.write_all(&buffer[..n])?;
             }
             SparseMode::Always | SparseMode::Auto => {
-                let min_block = if matches!(sparse_mode, SparseMode::Always) {
+                let min_block = if matches!(&sparse_mode, SparseMode::Always) {
                     1
                 } else {
                     SPARSE_DETECT_SIZE
@@ -267,13 +361,10 @@ fn streaming_copy_sync(
 
         callback(n as u64);
 
-        if bytes_in_block >= COPY_BLOCK_SIZE {
-            if let (Some(h), Some(s)) = (block_hasher.as_mut(), session.as_mut()) {
-                let block_hash = h.finalize();
-                s.add_block(*block_hash.as_bytes(), COPY_BLOCK_SIZE);
-                *h = blake3::Hasher::new();
+        if let Some(block_hash) = completed_block_hash {
+            if let Some(s) = session.as_mut() {
+                s.add_block(block_hash, COPY_BLOCK_SIZE);
             }
-            bytes_in_block -= COPY_BLOCK_SIZE;
             blocks_since_checkpoint += 1;
 
             if blocks_since_checkpoint >= CHECKPOINT_INTERVAL_BLOCKS {
@@ -281,19 +372,13 @@ fn streaming_copy_sync(
                     persist_checkpoint(&dst_file, s)?;
                 }
                 blocks_since_checkpoint = 0;
+                release_source(source_bytes_read);
 
                 #[cfg(target_os = "linux")]
                 {
                     use std::os::unix::io::AsRawFd;
-                    let src_end = src_file.stream_position().unwrap_or(0) as libc::off_t;
                     let dst_end = dst_file.stream_position().unwrap_or(0) as libc::off_t;
                     unsafe {
-                        libc::posix_fadvise(
-                            src_file.as_raw_fd(),
-                            0,
-                            src_end,
-                            libc::POSIX_FADV_DONTNEED,
-                        );
                         libc::posix_fadvise(
                             dst_file.as_raw_fd(),
                             0,
@@ -335,7 +420,170 @@ fn streaming_copy_sync(
 mod checkpoint_tests {
     use super::*;
     use std::cell::{Cell, RefCell};
-    use std::io;
+    use std::collections::VecDeque;
+    use std::io::{self, Cursor, Read};
+
+    struct SegmentedReader {
+        inner: Cursor<Vec<u8>>,
+        segments: VecDeque<usize>,
+    }
+
+    impl SegmentedReader {
+        fn new(bytes: Vec<u8>, segments: impl IntoIterator<Item = usize>) -> Self {
+            Self {
+                inner: Cursor::new(bytes),
+                segments: segments.into_iter().collect(),
+            }
+        }
+    }
+
+    impl Read for SegmentedReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let limit = self
+                .segments
+                .pop_front()
+                .unwrap_or(buf.len())
+                .min(buf.len());
+            Read::read(&mut self.inner, &mut buf[..limit])
+        }
+    }
+
+    #[test]
+    fn segmented_reads_hash_exact_checkpoint_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source.bin");
+        let dst = dir.path().join("destination.bin");
+        let block = COPY_BLOCK_SIZE as usize;
+        let bytes: Vec<u8> = (0..block * 6 / 4)
+            .map(|index| (index.wrapping_mul(31) % 251) as u8)
+            .collect();
+        let expected_first = *blake3::hash(&bytes[..block]).as_bytes();
+        let expected_tail = *blake3::hash(&bytes[block..]).as_bytes();
+        let reader = SegmentedReader::new(bytes.clone(), [block / 2, block]);
+        let destination = std::fs::File::create(&dst).unwrap();
+        let session = Session::new(&src, &dst, bytes.len() as u64, 0, 0);
+
+        let (session, _) = streaming_copy_sync_from_reader(
+            reader,
+            destination,
+            Some(session),
+            StreamingCopyParams {
+                sparse_mode: SparseMode::Never,
+                start_offset: 0,
+                expected_remaining: bytes.len() as u64,
+                need_src_hash: false,
+            },
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        let session = session.unwrap();
+
+        assert_eq!(session.bytes_written, bytes.len() as u64);
+        assert_eq!(session.block_hashes, vec![expected_first, expected_tail]);
+        let copied = std::fs::read(&dst).unwrap();
+        assert_eq!(copied.len(), bytes.len());
+        assert_eq!(blake3::hash(&copied), blake3::hash(&bytes));
+    }
+
+    #[test]
+    fn checkpoint_after_a_crossing_read_does_not_truncate_written_ahead_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source.bin");
+        let dst = dir.path().join("destination.bin");
+        let block = COPY_BLOCK_SIZE as usize;
+        let total = 15 * block + block / 2 + block;
+        let bytes: Vec<u8> = (0..total)
+            .map(|index| (index.wrapping_mul(17).wrapping_add(13) % 251) as u8)
+            .collect();
+        let expected_hashes: Vec<[u8; 32]> = bytes
+            .chunks(block)
+            .map(|chunk| *blake3::hash(chunk).as_bytes())
+            .collect();
+        let mut segments = vec![block; 15];
+        segments.extend([block / 2, block]);
+        let reader = SegmentedReader::new(bytes.clone(), segments);
+        let destination = std::fs::File::create(&dst).unwrap();
+        let session = Session::new(&src, &dst, bytes.len() as u64, 0, 0);
+
+        let (session, _) = streaming_copy_sync_from_reader(
+            reader,
+            destination,
+            Some(session),
+            StreamingCopyParams {
+                sparse_mode: SparseMode::Never,
+                start_offset: 0,
+                expected_remaining: bytes.len() as u64,
+                need_src_hash: false,
+            },
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        let session = session.unwrap();
+
+        assert_eq!(session.bytes_written, bytes.len() as u64);
+        assert_eq!(session.block_hashes, expected_hashes);
+        let copied = std::fs::read(&dst).unwrap();
+        assert_eq!(copied.len(), bytes.len());
+        assert_eq!(blake3::hash(&copied), blake3::hash(&bytes));
+    }
+
+    #[test]
+    fn streaming_reader_rejects_eof_before_the_snapshot_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path().join("destination.bin");
+        let destination = std::fs::File::create(&dst).unwrap();
+        let bytes = b"short source".to_vec();
+        let reader = SegmentedReader::new(bytes.clone(), [3, 2, 7]);
+
+        let error = streaming_copy_sync_from_reader(
+            reader,
+            destination,
+            None,
+            StreamingCopyParams {
+                sparse_mode: SparseMode::Never,
+                start_offset: 0,
+                expected_remaining: bytes.len() as u64 + 1,
+                need_src_hash: false,
+            },
+            |_| {},
+            |_| {},
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, BcmrError::Io(ref error) if error.kind() == io::ErrorKind::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn streaming_reader_does_not_copy_bytes_beyond_the_snapshot_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path().join("destination.bin");
+        let destination = std::fs::File::create(&dst).unwrap();
+        let snapshot = b"snapshot";
+        let mut grown = snapshot.to_vec();
+        grown.extend_from_slice(b"-later-growth");
+        let reader = SegmentedReader::new(grown, [64]);
+
+        streaming_copy_sync_from_reader(
+            reader,
+            destination,
+            None,
+            StreamingCopyParams {
+                sparse_mode: SparseMode::Never,
+                start_offset: 0,
+                expected_remaining: snapshot.len() as u64,
+                need_src_hash: false,
+            },
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read(&dst).unwrap(), snapshot);
+    }
 
     #[test]
     fn checkpoint_materializes_and_syncs_before_publish_and_propagates_failures() {
@@ -419,6 +667,100 @@ mod checkpoint_tests {
         assert!(
             session.is_none(),
             "checkpoint bytes are absolute; an unhashed destination prefix cannot be published"
+        );
+    }
+
+    #[tokio::test]
+    async fn atomic_finalize_rejects_a_stage_shorter_than_the_source_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source");
+        let dst = dir.path().join("destination");
+        std::fs::write(&src, b"source snapshot").unwrap();
+        std::fs::write(&dst, b"old destination").unwrap();
+        let staging = crate::commands::copy::create_staging(&dst).unwrap();
+        let stage_path = staging.path().to_path_buf();
+        std::fs::write(&stage_path, b"short").unwrap();
+        let stage_file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&stage_path)
+            .await
+            .unwrap();
+
+        let result = finalize(
+            stage_file,
+            FinalizeParams {
+                write_target: &stage_path,
+                dst: &dst,
+                src: &src,
+                expected_file_size: b"source snapshot".len() as u64,
+                use_atomic: true,
+                staging: Some(staging),
+                replace_existing: true,
+                sync: false,
+                preserve: false,
+                verify: false,
+                inline_src_hash: None,
+                corrupt_before_verify: false,
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(BcmrError::Io(ref error)) if error.kind() == io::ErrorKind::UnexpectedEof),
+            "short stages must fail before commit: {result:?}"
+        );
+        assert_eq!(std::fs::read(&dst).unwrap(), b"old destination");
+        assert!(
+            !stage_path.exists(),
+            "failed finalization must clean its stage"
+        );
+    }
+
+    #[tokio::test]
+    async fn atomic_finalize_rejects_a_stage_longer_than_the_source_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source");
+        let dst = dir.path().join("destination");
+        std::fs::write(&src, b"source snapshot").unwrap();
+        std::fs::write(&dst, b"old destination").unwrap();
+        let staging = crate::commands::copy::create_staging(&dst).unwrap();
+        let stage_path = staging.path().to_path_buf();
+        std::fs::write(&stage_path, b"source snapshot plus later growth").unwrap();
+        let stage_file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&stage_path)
+            .await
+            .unwrap();
+
+        let result = finalize(
+            stage_file,
+            FinalizeParams {
+                write_target: &stage_path,
+                dst: &dst,
+                src: &src,
+                expected_file_size: b"source snapshot".len() as u64,
+                use_atomic: true,
+                staging: Some(staging),
+                replace_existing: true,
+                sync: false,
+                preserve: false,
+                verify: false,
+                inline_src_hash: None,
+                corrupt_before_verify: false,
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(BcmrError::Io(ref error)) if error.kind() == io::ErrorKind::InvalidData),
+            "oversized stages must fail before commit: {result:?}"
+        );
+        assert_eq!(std::fs::read(&dst).unwrap(), b"old destination");
+        assert!(
+            !stage_path.exists(),
+            "failed finalization must clean its stage"
         );
     }
 }

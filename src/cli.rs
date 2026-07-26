@@ -503,6 +503,12 @@ pub enum TestMode {
     Delay(u64),
     SpeedLimit(u64),
     CorruptBeforeFinalize,
+    #[cfg(feature = "test-support")]
+    TruncateSourceAfterSnapshot,
+    #[cfg(feature = "test-support")]
+    TruncateSourceAfterSnapshotDelay,
+    #[cfg(feature = "test-support")]
+    TruncateSourceAfterSnapshotSpeedLimit,
     None,
 }
 
@@ -802,6 +808,19 @@ fn parse_test_mode(s: &str) -> Result<TestMode, String> {
     }
     if s == "corrupt_before_finalize" {
         return Ok(TestMode::CorruptBeforeFinalize);
+    }
+    #[cfg(feature = "test-support")]
+    match s {
+        "truncate_source_after_snapshot" => {
+            return Ok(TestMode::TruncateSourceAfterSnapshot);
+        }
+        "truncate_source_after_snapshot_delay" => {
+            return Ok(TestMode::TruncateSourceAfterSnapshotDelay);
+        }
+        "truncate_source_after_snapshot_speed_limit" => {
+            return Ok(TestMode::TruncateSourceAfterSnapshotSpeedLimit);
+        }
+        _ => {}
     }
     let parts: Vec<&str> = s.split(':').collect();
     if parts.len() == 2 {
