@@ -37,7 +37,7 @@ tokio = { version = "1.50.0", features = ["fs", "io-util", "io-std", "macros", "
 
 walkdir = "2.5.0"
 same-file = "1.0.6"
-anyhow = "1.0.102"
+anyhow = "1.0.104"
 thiserror = "2.0.18"
 terminal_size = "0.4.4"
 crossterm = { version = "0.29.0", default-features = false, features = ["windows", "events"] }
@@ -54,7 +54,7 @@ regex = "1.12.3"
 blake3 = "1.8"
 reflink-copy = "0.1.29"
 signal-hook = "0.4.4"
-self_update = { version = "0.44", default-features = false, features = ["archive-tar", "archive-zip", "compression-flate2", "reqwest", "rustls"] }
+self_update = { version = "1.0.0-rc.6", default-features = false, features = ["archive-tar", "archive-zip", "checksums", "compression-tar-gz", "compression-zip-deflate", "github", "progress-bar", "reqwest", "rustls"] }
 futures = "0.3"
 lz4_flex = { version = "0.13", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 zstd = { version = "0.13", default-features = false }
