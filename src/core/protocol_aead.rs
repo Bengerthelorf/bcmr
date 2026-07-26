@@ -263,6 +263,28 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_data_frame_with_trailing_bytes_is_rejected() {
+        let key = test_key();
+        let mut plaintext = Vec::new();
+        plaintext.extend_from_slice(&7u32.to_le_bytes());
+        plaintext.push(0x84);
+        plaintext.extend_from_slice(&1u32.to_le_bytes());
+        plaintext.extend_from_slice(&[0xAA, 0xBB]);
+        key.seal_in_place_append_tag(
+            make_nonce(Direction::ClientToServer, 0),
+            Aad::empty(),
+            &mut plaintext,
+        )
+        .unwrap();
+
+        let mut recv = 0;
+        let err = decrypt_message(&mut plaintext, &key, Direction::ClientToServer, &mut recv)
+            .unwrap_err();
+        assert!(matches!(err, BcmrError::InvalidInput(_)));
+        assert_eq!(recv, 1);
+    }
+
+    #[test]
     fn counter_desync_fails() {
         let key = test_key();
         let mut send = 0u64;

@@ -5,7 +5,7 @@ use super::ssh_cmd::{shell_escape, ssh_command, ssh_error_message};
 use super::{RemotePath, TransferCallbacks, TransferOptions};
 use crate::core::error::BcmrError;
 use std::path::Path;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub async fn download_file(
     remote: &RemotePath,
@@ -56,6 +56,12 @@ pub async fn download_file(
     if decision.skip_bytes > 0 {
         (cb.on_skip)(decision.skip_bytes);
     }
+    if decision.skip_bytes > file_size {
+        return Err(BcmrError::InvalidInput(format!(
+            "resume offset {} exceeds remote file size {file_size}",
+            decision.skip_bytes
+        )));
+    }
 
     let ssh_cmd = if decision.use_append_mode {
         format!(
@@ -87,19 +93,13 @@ pub async fn download_file(
     } else {
         tokio::fs::File::create(local_dst).await?
     };
-    let mut buffer = vec![0u8; 4 * 1024 * 1024];
-
-    let io_result: Result<(), BcmrError> = async {
-        loop {
-            let n = stdout.read(&mut buffer).await?;
-            if n == 0 {
-                break;
-            }
-            dst_file.write_all(&buffer[..n]).await?;
-            (cb.on_progress)(n as u64);
-        }
-        Ok(())
-    }
+    let io_result = copy_download_stream(
+        &mut stdout,
+        &mut dst_file,
+        decision.skip_bytes,
+        file_size,
+        cb.on_progress,
+    )
     .await;
 
     if let Err(e) = io_result {
@@ -154,6 +154,112 @@ pub async fn download_file(
     }
 
     Ok(())
+}
+
+async fn copy_download_stream<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    skip_bytes: u64,
+    file_size: u64,
+    on_progress: &(impl Fn(u64) + ?Sized),
+) -> Result<(), BcmrError>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    if skip_bytes > file_size {
+        return Err(BcmrError::InvalidInput(format!(
+            "resume offset {skip_bytes} exceeds remote file size {file_size}"
+        )));
+    }
+
+    let mut transferred = skip_bytes;
+    let mut buffer = vec![0u8; 4 * 1024 * 1024];
+    loop {
+        let n = reader.read(&mut buffer).await?;
+        if n == 0 {
+            break;
+        }
+        let next = crate::core::protocol::checked_transfer_total(transferred, n, file_size)?;
+        writer.write_all(&buffer[..n]).await?;
+        transferred = next;
+        on_progress(n as u64);
+    }
+    if transferred != file_size {
+        return Err(BcmrError::InvalidInput(format!(
+            "download ended at {transferred} bytes, expected {file_size}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn source(bytes: Vec<u8>) -> tokio::io::DuplexStream {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            writer.write_all(&bytes).await.unwrap();
+            writer.shutdown().await.unwrap();
+        });
+        reader
+    }
+
+    async fn sink_bytes(mut reader: tokio::io::DuplexStream) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await.unwrap();
+        bytes
+    }
+
+    #[tokio::test]
+    async fn download_stream_rejects_excess_before_writing_it() {
+        let mut input = source(vec![1, 2, 3, 4]).await;
+        let (mut output, output_reader) = tokio::io::duplex(64);
+
+        assert!(copy_download_stream(&mut input, &mut output, 0, 3, &|_| {})
+            .await
+            .is_err());
+        drop(output);
+        assert!(sink_bytes(output_reader).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn download_stream_rejects_short_read_at_eof() {
+        let mut input = source(vec![1, 2, 3]).await;
+        let (mut output, output_reader) = tokio::io::duplex(64);
+
+        assert!(copy_download_stream(&mut input, &mut output, 0, 4, &|_| {})
+            .await
+            .is_err());
+        drop(output);
+        assert_eq!(sink_bytes(output_reader).await, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn download_stream_completes_exactly_from_resume_offset() {
+        let mut input = source(vec![3, 4]).await;
+        let (mut output, output_reader) = tokio::io::duplex(64);
+
+        copy_download_stream(&mut input, &mut output, 2, 4, &|_| {})
+            .await
+            .unwrap();
+        drop(output);
+        assert_eq!(sink_bytes(output_reader).await, vec![3, 4]);
+    }
+
+    #[tokio::test]
+    async fn download_stream_rejects_resume_offset_past_remote_size() {
+        let mut input = source(Vec::new()).await;
+        let (mut output, output_reader) = tokio::io::duplex(64);
+
+        assert!(copy_download_stream(&mut input, &mut output, 5, 4, &|_| {})
+            .await
+            .is_err());
+        drop(output);
+        assert!(sink_bytes(output_reader).await.is_empty());
+    }
 }
 
 pub async fn upload_file(

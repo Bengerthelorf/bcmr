@@ -93,6 +93,27 @@ fn data_block_rejects_data_compressed_with_algo_none() {
     assert!(decode_data_block(message).is_err());
 }
 
+#[test]
+fn codec_rejects_trailing_bytes_inside_a_data_frame() {
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&7u32.to_le_bytes());
+    frame.push(0x84);
+    frame.extend_from_slice(&1u32.to_le_bytes());
+    frame.extend_from_slice(&[0xAA, 0xBB]);
+
+    assert!(decode_message(&frame).is_none());
+}
+
+#[test]
+fn codec_rejects_bytes_after_the_declared_outer_frame() {
+    let mut frame = encode_message(&Message::Data {
+        payload: vec![0xAA],
+    });
+    frame.extend_from_slice(&[0xBB, 0xCC]);
+
+    assert!(decode_message(&frame).is_none());
+}
+
 #[tokio::test]
 async fn plain_wire_rejects_oversized_raw_data_before_reading_its_payload() {
     let (mut writer, mut reader) = tokio::io::duplex(64);

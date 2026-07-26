@@ -99,3 +99,38 @@ XDG-cache/data/config, and BCMR CAS locations.
   record cap before authentication reveals their type. The shared codec check
   prevents a second oversized raw payload clone after authentication; this is
   the deliberate finite authenticated-frame strategy requested by review.
+
+## Second Review Follow-up (2026-07-26)
+
+### Implementation
+
+- `decode_message` now requires the declared outer payload to end exactly at
+  the input end (using checked cursor arithmetic) and requires the inner
+  message cursor to consume that payload completely. This closes both direct
+  codec and authenticated-AEAD trailing-byte acceptance paths.
+- `download_file` rejects a resume offset beyond the remote `stat` size before
+  spawning `ssh`. Its shared stream copier starts accounting at the accepted
+  resume offset, calls `protocol::checked_transfer_total` before each write,
+  and rejects EOF unless the final total equals the remote size.
+
+### TDD Evidence
+
+- RED: a direct encoded `Data` frame with one declared byte and a second inner
+  byte was accepted before the codec strict-consumption check. A separate
+  outer-frame-tail regression covered bytes after the declared outer payload.
+- RED: the focused legacy-download tests initially failed to compile because
+  `copy_download_stream` did not exist; they exercise excess input, short EOF,
+  an exact resumed remainder, and a resume offset past the remote size.
+- GREEN: the direct codec and real authenticated-AEAD trailing-byte
+  regressions pass. The download helper rejects excess before writing it,
+  detects short reads at EOF, accepts the exact resumed remainder, and rejects
+  an invalid resume offset without writing.
+
+### Verification and scope
+
+- `cargo fmt --all -- --check` and `git diff --check` passed.
+- `serve_protocol_tests`, `proptest_codec`, `e2e_copy_tests`, and
+  `cargo test --all --locked --features test-support --quiet` passed using the
+  required external KIOXIA locations.
+- `Session::add_block` was assessed but intentionally left unchanged because it
+  is outside this follow-up's requested scope. No Task 8 staging logic changed.

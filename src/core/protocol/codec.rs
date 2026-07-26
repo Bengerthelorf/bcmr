@@ -333,7 +333,11 @@ pub fn decode_message(data: &[u8]) -> Option<Message> {
 
     let mut c = Cursor::new(data);
     let payload_len = c.read_u32_le()? as usize;
-    let payload = data.get(c.pos..c.pos + payload_len)?;
+    let payload_end = c.pos.checked_add(payload_len)?;
+    if payload_end != data.len() {
+        return None;
+    }
+    let payload = data.get(c.pos..payload_end)?;
 
     let mut p = Cursor::new(payload);
     let msg_type = p.read_u8()?;
@@ -463,6 +467,9 @@ pub fn decode_message(data: &[u8]) -> Option<Message> {
         _ => return None,
     };
 
+    if p.pos != payload.len() {
+        return None;
+    }
     Some(msg)
 }
 
