@@ -212,7 +212,11 @@ pub(super) fn determine_dry_run_action(
                 return Ok(ActionType::Skip);
             }
             return Ok(if verified > 0 {
-                ActionType::Append
+                if dst_len > verified {
+                    ActionType::Overwrite
+                } else {
+                    ActionType::Append
+                }
             } else {
                 ActionType::Overwrite
             });

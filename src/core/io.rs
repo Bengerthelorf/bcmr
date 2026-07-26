@@ -27,9 +27,29 @@ pub async fn durable_sync_async(file: &tokio::fs::File) -> io::Result<()> {
 }
 
 #[cfg(unix)]
+fn sync_directory_with<SyncFn>(directory: &std::fs::File, sync: SyncFn) -> io::Result<()>
+where
+    SyncFn: FnOnce(&std::fs::File) -> io::Result<()>,
+{
+    match sync(directory) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if error.raw_os_error().is_some_and(|errno| {
+                [libc::EINVAL, libc::ENOTSUP, libc::EOPNOTSUPP].contains(&errno)
+            }) =>
+        {
+            // Losing the directory-entry flush can lose only resume progress:
+            // restart revalidates every published source/destination block.
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
 pub fn durable_sync_dir(dir: &Path) -> io::Result<()> {
     let directory = std::fs::File::open(dir)?;
-    durable_sync(&directory)
+    sync_directory_with(&directory, std::fs::File::sync_all)
 }
 
 #[cfg(not(unix))]
@@ -72,6 +92,48 @@ mod tests {
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(b"hello").unwrap();
         durable_sync(&f).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_sync_helper_accepts_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let directory = std::fs::File::open(dir.path()).unwrap();
+        let called = std::cell::Cell::new(false);
+
+        sync_directory_with(&directory, |_| {
+            called.set(true);
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(called.get(), "the injected directory sync must be called");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_sync_helper_downgrades_only_unsupported_errno() {
+        let dir = tempfile::tempdir().unwrap();
+        let directory = std::fs::File::open(dir.path()).unwrap();
+
+        for errno in [libc::EINVAL, libc::ENOTSUP, libc::EOPNOTSUPP] {
+            sync_directory_with(&directory, |_| Err(io::Error::from_raw_os_error(errno)))
+                .expect("unsupported directory fsync is a safe progress-only downgrade");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_sync_helper_propagates_genuine_storage_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let directory = std::fs::File::open(dir.path()).unwrap();
+
+        for errno in [libc::EIO, libc::ENOSPC, libc::EROFS, libc::EACCES] {
+            let error =
+                sync_directory_with(&directory, |_| Err(io::Error::from_raw_os_error(errno)))
+                    .expect_err("genuine directory sync failures must remain visible");
+            assert_eq!(error.raw_os_error(), Some(errno));
+        }
     }
 
     #[test]

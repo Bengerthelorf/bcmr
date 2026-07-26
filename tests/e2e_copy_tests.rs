@@ -1219,7 +1219,7 @@ fn e2e_dry_run_forced_direct_modes_preview_the_forced_overwrite() {
 }
 
 #[test]
-fn e2e_dry_run_resume_uses_session_proof_without_mutating_session() {
+fn e2e_dry_run_resume_distinguishes_dirty_tail_from_short_destination() {
     use std::io::Read;
 
     let dir = tempfile::tempdir().unwrap();
@@ -1262,8 +1262,8 @@ fn e2e_dry_run_resume_uses_session_proof_without_mutating_session() {
 
     assert!(ok, "session-aware dry-run should succeed: {stderr}");
     assert!(
-        stdout.contains("APPEND"),
-        "dry-run should report the same proven resume decision: {stdout}"
+        stdout.contains("OVERWRITE"),
+        "repairing an unverified tail requires truncation, not a plain append: {stdout}"
     );
     assert_eq!(
         fs::read(&session_path).unwrap(),
@@ -1275,6 +1275,23 @@ fn e2e_dry_run_resume_uses_session_proof_without_mutating_session() {
         destination_hash_before,
         "dry-run must not truncate the unverified destination tail"
     );
+
+    destination.set_len(block_size).unwrap();
+    destination.sync_all().unwrap();
+    let (ok, stdout, stderr) = run_bcmr(&[
+        "copy",
+        "-n",
+        "--resume",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    assert!(ok, "short-prefix dry-run should succeed: {stderr}");
+    assert!(
+        stdout.contains("APPEND"),
+        "a destination ending exactly at the verified prefix is a plain append: {stdout}"
+    );
+    assert_eq!(dst.metadata().unwrap().len(), block_size);
+    assert_eq!(fs::read(&session_path).unwrap(), session_before);
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
