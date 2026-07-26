@@ -9,6 +9,24 @@ pub use copy::FileToOverwrite;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
+fn refuse_same_file_move(src: &Path, dst: &Path) -> std::result::Result<(), BcmrError> {
+    if !dst.exists() {
+        return Ok(());
+    }
+
+    let source = same_file::Handle::from_path(src)?;
+    let destination = same_file::Handle::from_path(dst)?;
+    if source == destination {
+        return Err(BcmrError::InvalidInput(format!(
+            "cannot move '{}' onto the same file '{}'",
+            src.display(),
+            dst.display()
+        )));
+    }
+
+    Ok(())
+}
+
 fn is_cross_device_error(err: &std::io::Error) -> bool {
     #[cfg(unix)]
     {
@@ -72,6 +90,8 @@ where
         } else {
             dst.to_path_buf()
         };
+
+        refuse_same_file_move(src, &dst_path)?;
 
         if dst_path.exists() && !cli.is_force() {
             return Err(BcmrError::TargetExists(dst_path));

@@ -36,6 +36,7 @@ clap_complete = "4.6"
 tokio = { version = "1.50.0", features = ["fs", "io-util", "io-std", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 
 walkdir = "2.5.0"
+same-file = "1.0.6"
 anyhow = "1.0.102"
 thiserror = "2.0.18"
 terminal_size = "0.4.4"

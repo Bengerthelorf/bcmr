@@ -167,6 +167,7 @@ dependencies = [
  "reflink-copy",
  "regex",
  "ring",
+ "same-file",
  "self_update",
  "serde",
  "serde_json",

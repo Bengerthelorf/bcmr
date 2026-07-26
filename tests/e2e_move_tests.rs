@@ -227,6 +227,114 @@ fn e2e_move_refuses_overwrite_without_force_succeeds_with_force_yes() {
 }
 
 #[test]
+fn e2e_move_force_refuses_same_file_without_data_loss() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("file.txt");
+    fs::write(&file, b"same file payload").unwrap();
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "move",
+        "-t",
+        "-f",
+        "-y",
+        file.to_str().unwrap(),
+        file.to_str().unwrap(),
+    ]);
+
+    assert!(!ok, "move onto itself must fail: {stderr}");
+    assert_eq!(
+        fs::read(&file).unwrap(),
+        b"same file payload",
+        "same-path refusal must preserve the file"
+    );
+}
+
+#[test]
+fn e2e_move_force_refuses_file_into_its_own_parent_without_data_loss() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("file.txt");
+    fs::write(&file, b"parent payload").unwrap();
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "move",
+        "-t",
+        "-f",
+        "-y",
+        file.to_str().unwrap(),
+        dir.path().to_str().unwrap(),
+    ]);
+
+    assert!(
+        !ok,
+        "move into its own parent must fail before overwrite: {stderr}"
+    );
+    assert_eq!(
+        fs::read(&file).unwrap(),
+        b"parent payload",
+        "parent-directory refusal must preserve the file"
+    );
+}
+
+#[test]
+fn e2e_move_force_refuses_hard_link_alias_without_data_loss() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("file.txt");
+    let alias = dir.path().join("alias.txt");
+    fs::write(&file, b"hard-link payload").unwrap();
+    if fs::hard_link(&file, &alias).is_err() {
+        return;
+    }
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "move",
+        "-t",
+        "-f",
+        "-y",
+        file.to_str().unwrap(),
+        alias.to_str().unwrap(),
+    ]);
+
+    assert!(!ok, "move onto a hard-link alias must fail: {stderr}");
+    for path in [&file, &alias] {
+        assert_eq!(
+            fs::read(path).unwrap(),
+            b"hard-link payload",
+            "hard-link refusal must preserve {}",
+            path.display()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_move_force_refuses_symlink_alias_without_data_loss() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("file.txt");
+    let alias = dir.path().join("alias.txt");
+    fs::write(&file, b"symlink payload").unwrap();
+    std::os::unix::fs::symlink("file.txt", &alias).unwrap();
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "move",
+        "-t",
+        "-f",
+        "-y",
+        file.to_str().unwrap(),
+        alias.to_str().unwrap(),
+    ]);
+
+    assert!(!ok, "move onto a symlink alias must fail: {stderr}");
+    for path in [&file, &alias] {
+        assert_eq!(
+            fs::read(path).unwrap(),
+            b"symlink payload",
+            "symlink refusal must preserve {}",
+            path.display()
+        );
+    }
+}
+
+#[test]
 fn e2e_move_dry_run_leaves_everything_untouched() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.txt");
