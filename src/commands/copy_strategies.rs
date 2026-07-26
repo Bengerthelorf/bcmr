@@ -279,6 +279,7 @@ where
     use std::io::{Seek, SeekFrom as StdSeekFrom, Write};
 
     const SPARSE_DETECT_SIZE: usize = 4096;
+    const CACHE_RELEASE_INTERVAL: u64 = CHECKPOINT_INTERVAL_BLOCKS as u64 * COPY_BLOCK_SIZE;
     let StreamingCopyParams {
         sparse_mode,
         start_offset,
@@ -292,6 +293,7 @@ where
     let mut block_hasher = session.as_ref().map(|_| blake3::Hasher::new());
     let mut bytes_in_block = 0u64;
     let mut blocks_since_checkpoint = 0u32;
+    let mut bytes_since_cache_release = 0u64;
     let mut source_bytes_read = start_offset;
     let mut remaining = expected_remaining;
 
@@ -372,20 +374,25 @@ where
                     persist_checkpoint(&dst_file, s)?;
                 }
                 blocks_since_checkpoint = 0;
-                release_source(source_bytes_read);
+            }
+        }
 
-                #[cfg(target_os = "linux")]
-                {
-                    use std::os::unix::io::AsRawFd;
-                    let dst_end = dst_file.stream_position().unwrap_or(0) as libc::off_t;
-                    unsafe {
-                        libc::posix_fadvise(
-                            dst_file.as_raw_fd(),
-                            0,
-                            dst_end,
-                            libc::POSIX_FADV_DONTNEED,
-                        );
-                    }
+        bytes_since_cache_release += n as u64;
+        if bytes_since_cache_release >= CACHE_RELEASE_INTERVAL {
+            bytes_since_cache_release %= CACHE_RELEASE_INTERVAL;
+            release_source(source_bytes_read);
+
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::unix::io::AsRawFd;
+                let dst_end = dst_file.stream_position().unwrap_or(0) as libc::off_t;
+                unsafe {
+                    libc::posix_fadvise(
+                        dst_file.as_raw_fd(),
+                        0,
+                        dst_end,
+                        libc::POSIX_FADV_DONTNEED,
+                    );
                 }
             }
         }
@@ -583,6 +590,54 @@ mod checkpoint_tests {
         .unwrap();
 
         assert_eq!(std::fs::read(&dst).unwrap(), snapshot);
+    }
+
+    #[test]
+    fn cache_release_without_session_obeys_the_production_interval() {
+        let interval = u64::from(CHECKPOINT_INTERVAL_BLOCKS) * COPY_BLOCK_SIZE;
+        let exact_releases = RefCell::new(Vec::new());
+
+        streaming_copy_sync_from_reader(
+            std::io::repeat(0).take(interval),
+            tempfile::tempfile().unwrap(),
+            None,
+            StreamingCopyParams {
+                sparse_mode: SparseMode::Always,
+                start_offset: 0,
+                expected_remaining: interval,
+                need_src_hash: false,
+            },
+            |_| {},
+            |source_end| exact_releases.borrow_mut().push(source_end),
+        )
+        .unwrap();
+
+        assert_eq!(
+            exact_releases.into_inner(),
+            vec![interval],
+            "ordinary streaming must release cache at the production interval"
+        );
+
+        let below_releases = RefCell::new(Vec::new());
+        streaming_copy_sync_from_reader(
+            std::io::repeat(0).take(interval - 1),
+            tempfile::tempfile().unwrap(),
+            None,
+            StreamingCopyParams {
+                sparse_mode: SparseMode::Always,
+                start_offset: 0,
+                expected_remaining: interval - 1,
+                need_src_hash: false,
+            },
+            |_| {},
+            |source_end| below_releases.borrow_mut().push(source_end),
+        )
+        .unwrap();
+
+        assert!(
+            below_releases.into_inner().is_empty(),
+            "ordinary streaming must not release cache before the interval"
+        );
     }
 
     #[test]

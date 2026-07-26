@@ -636,6 +636,69 @@ fn e2e_append_cannot_report_complete_after_the_source_snapshot_shrinks() {
     assert!(!session_exists(&src, &dst));
 }
 
+#[test]
+fn e2e_active_direct_modes_reject_snapshot_shrink_before_touching_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    let prefix_len = 32 * 1024;
+    let mut changed_destinations = Vec::new();
+
+    for mode in ["--resume", "--strict", "--append"] {
+        create_random_file(&src, 128 * 1024);
+        let source_snapshot = fs::read(&src).unwrap();
+        let old_destination = if mode == "--strict" {
+            source_snapshot[..prefix_len].to_vec()
+        } else {
+            vec![0x5a; prefix_len]
+        };
+        let old_len = old_destination.len();
+        let old_hash = blake3::hash(&old_destination);
+        fs::write(&dst, &old_destination).unwrap();
+        assert!(
+            !session_exists(&src, &dst),
+            "{mode} fixture must start without a session"
+        );
+
+        let (ok, _stdout, stderr) = run_bcmr(&[
+            "copy",
+            "-t",
+            mode,
+            "--reflink",
+            "disable",
+            "--test-mode",
+            "truncate_source_after_snapshot",
+            src.to_str().unwrap(),
+            dst.to_str().unwrap(),
+        ]);
+
+        assert!(!ok, "{mode} must reject a short source snapshot");
+        assert!(
+            stderr.contains("source ended") || stderr.contains("UnexpectedEof"),
+            "{mode} reported the wrong error: {stderr}"
+        );
+        assert!(
+            !session_exists(&src, &dst),
+            "{mode} must not create or replace a session before transfer"
+        );
+
+        let destination_after = fs::read(&dst).unwrap();
+        if destination_after.len() != old_len || blake3::hash(&destination_after) != old_hash {
+            changed_destinations.push(format!(
+                "{mode}: length {old_len} -> {}, hash changed: {}",
+                destination_after.len(),
+                blake3::hash(&destination_after) != old_hash
+            ));
+        }
+    }
+
+    assert!(
+        changed_destinations.is_empty(),
+        "direct modes touched their destination before rejecting the snapshot: \
+         {changed_destinations:?}"
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn e2e_copy_file_range_rejects_a_source_truncated_after_snapshot() {

@@ -476,6 +476,23 @@ fn resolve_sparse_mode(arg: &Option<String>) -> SparseMode {
     }
 }
 
+fn revalidate_source_snapshot(src: &Path, expected_len: u64) -> Result<(), BcmrError> {
+    let current_len = src.metadata()?.len();
+    if current_len < expected_len {
+        return Err(BcmrError::Io(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            format!("source ended at {current_len} bytes; snapshot was {expected_len} bytes"),
+        )));
+    }
+    if current_len > expected_len {
+        return Err(BcmrError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("source grew to {current_len} bytes; snapshot was {expected_len} bytes"),
+        )));
+    }
+    Ok(())
+}
+
 type FinalizeCtx<'a> = super::super::copy_strategies::FinalizeParams<'a>;
 
 async fn run_finalize(
@@ -636,25 +653,9 @@ where
         &defer_resume_progress,
     )
     .await?;
+    revalidate_source_snapshot(src, file_size)?;
 
     if resume_state.already_complete {
-        let current_source_len = src.metadata()?.len();
-        if current_source_len < file_size {
-            return Err(BcmrError::Io(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                format!(
-                    "source ended at {current_source_len} bytes; snapshot was {file_size} bytes"
-                ),
-            )));
-        }
-        if current_source_len > file_size {
-            return Err(BcmrError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "source grew to {current_source_len} bytes; snapshot was {file_size} bytes"
-                ),
-            )));
-        }
         (callback.callback)(file_size);
         return Ok(());
     }
