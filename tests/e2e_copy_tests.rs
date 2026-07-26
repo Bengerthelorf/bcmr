@@ -551,6 +551,58 @@ fn e2e_verified_force_copy_replaces_existing_destination_after_staging() {
     assert_eq!(fs::read(&dst).unwrap(), b"new verified content");
 }
 
+#[test]
+fn e2e_forced_reflink_uses_the_unique_stage_before_verified_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    fs::write(&src, b"new reflinked content").unwrap();
+    fs::write(&dst, b"old destination").unwrap();
+    let capability_probe = dir.path().join("reflink-capability-probe.bin");
+    if let Err(error) = reflink_copy::reflink(&src, &capability_probe) {
+        eprintln!("skipping forced reflink test: filesystem does not support reflink: {error}");
+        return;
+    }
+    fs::remove_file(&capability_probe).unwrap();
+
+    let (ok, _stdout, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "-f",
+        "-y",
+        "-V",
+        "--reflink",
+        "force",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+
+    assert!(
+        ok,
+        "forced reflink must not collide with bcmr's own stage: {stderr}"
+    );
+    assert_eq!(fs::read(&dst).unwrap(), b"new reflinked content");
+
+    fs::write(&src, b"").unwrap();
+    fs::write(&dst, b"old destination again").unwrap();
+    let (ok, _stdout, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "-f",
+        "-y",
+        "-V",
+        "--reflink",
+        "force",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    assert!(
+        ok,
+        "forced reflink of an empty file should succeed: {stderr}"
+    );
+    assert_eq!(fs::metadata(&dst).unwrap().len(), 0);
+}
+
 #[cfg(unix)]
 #[test]
 fn e2e_preserve_and_sync_apply_metadata_to_the_committed_destination() {

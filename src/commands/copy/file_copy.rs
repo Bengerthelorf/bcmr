@@ -43,6 +43,64 @@ impl AtomicStaging {
             }
         }
     }
+
+    fn relinquish_cleanup(&mut self) {
+        self.guard.disarm();
+        self.path.disable_cleanup(true);
+    }
+
+    fn try_reflink_create_new<F>(
+        mut self,
+        fail_on_error: bool,
+        operation: F,
+    ) -> Result<(Self, bool), BcmrError>
+    where
+        F: FnOnce(&Path) -> std::io::Result<()>,
+    {
+        std::fs::remove_file(self.path())?;
+        // reflink-copy uses create-new on every supported platform. Linux and
+        // Windows wrap partial destinations in AutoRemovedFile; macOS clonefile
+        // creates the destination as one operation. Therefore an error leaves
+        // no file owned by that operation at this path.
+        match operation(self.path()) {
+            Ok(()) => Ok((self, true)),
+            Err(error) if fail_on_error => {
+                // The create-new operation owns cleanup of any partial file.
+                // Relinquish our path because an EEXIST path may belong to a
+                // competing creator and must never be removed by our guards.
+                self.relinquish_cleanup();
+                Err(BcmrError::Reflink(format!(
+                    "Reflink failed (forced): {error}"
+                )))
+            }
+            Err(_) => match create_new_stage_file(self.path()) {
+                Ok(file) => {
+                    drop(file);
+                    Ok((self, false))
+                }
+                Err(error) => {
+                    self.relinquish_cleanup();
+                    Err(BcmrError::Io(error))
+                }
+            },
+        }
+    }
+}
+
+fn create_new_stage_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o666);
+    }
+    options.open(path)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn reset_copy_file_range_stage_for_fallback(file: &std::fs::File) -> std::io::Result<()> {
+    file.set_len(0)
 }
 
 pub(crate) fn create_staging(dst: &Path) -> Result<AtomicStaging, BcmrError> {
@@ -62,6 +120,31 @@ pub(crate) fn create_staging(dst: &Path) -> Result<AtomicStaging, BcmrError> {
     let path = file.into_temp_path();
     let guard = TempFileGuard::new(path.to_path_buf());
     Ok(AtomicStaging { path, guard })
+}
+
+async fn try_atomic_reflink(
+    src: &Path,
+    staging: AtomicStaging,
+    file_size: u64,
+    try_reflink: bool,
+    fail_on_error: bool,
+    sparse_mode: &SparseMode,
+    callback: &impl Fn(u64),
+) -> Result<(AtomicStaging, bool), BcmrError> {
+    if !try_reflink || matches!(sparse_mode, SparseMode::Always) {
+        return Ok((staging, false));
+    }
+
+    let src = src.to_path_buf();
+    let (staging, reflinked) = tokio::task::spawn_blocking(move || {
+        staging.try_reflink_create_new(fail_on_error, |dst| reflink_copy::reflink(&src, dst))
+    })
+    .await??;
+
+    if reflinked {
+        callback(file_size);
+    }
+    Ok((staging, reflinked))
 }
 
 #[cfg(target_os = "linux")]
@@ -125,8 +208,9 @@ async fn try_copy_file_range(
                     || errno == libc::EINVAL
                     || errno == libc::EOPNOTSUPP
                 {
-                    drop(dst_file);
-                    let _ = std::fs::remove_file(dst);
+                    if let Err(reset_error) = reset_copy_file_range_stage_for_fallback(&dst_file) {
+                        return Some(Err(BcmrError::Io(reset_error)));
+                    }
                     return None;
                 }
                 return Some(Err(BcmrError::Io(err)));
@@ -279,17 +363,33 @@ where
         write_target = dst.to_path_buf();
     }
 
-    if super::super::copy_strategies::try_reflink(
-        src,
-        &write_target,
-        file_size,
-        try_reflink,
-        fail_on_error,
-        &sparse_mode,
-        &callback.callback,
-    )
-    .await?
-    {
+    let reflinked = if let Some(stage) = staging.take() {
+        let (stage, reflinked) = try_atomic_reflink(
+            src,
+            stage,
+            file_size,
+            try_reflink,
+            fail_on_error,
+            &sparse_mode,
+            &callback.callback,
+        )
+        .await?;
+        staging = Some(stage);
+        reflinked
+    } else {
+        super::super::copy_strategies::try_reflink(
+            src,
+            &write_target,
+            file_size,
+            try_reflink,
+            fail_on_error,
+            &sparse_mode,
+            &callback.callback,
+        )
+        .await?
+    };
+
+    if reflinked {
         (callback.on_reflink)();
         let ctx = FinalizeCtx {
             write_target: &write_target,
@@ -573,5 +673,169 @@ mod tests {
             })
             .collect();
         assert!(remaining_stages.is_empty());
+    }
+
+    #[test]
+    fn reflink_operation_gets_unreserved_path_and_stage_still_commits() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("destination.bin");
+        let stage = create_staging(&final_path).unwrap();
+        let stage_path = stage.path().to_path_buf();
+
+        let (stage, reflinked) = stage
+            .try_reflink_create_new(false, |path| {
+                assert!(!path.exists(), "reflink must receive an absent path");
+                let mut cloned = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)?;
+                cloned.write_all(b"reflink result")
+            })
+            .unwrap();
+
+        assert!(reflinked);
+        assert_eq!(stage.path(), stage_path);
+        assert_eq!(std::fs::read(stage.path()).unwrap(), b"reflink result");
+        stage.commit(&final_path, true).unwrap();
+        assert_eq!(std::fs::read(final_path).unwrap(), b"reflink result");
+    }
+
+    #[test]
+    fn automatic_reflink_failure_recreates_the_same_exclusive_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("destination.bin");
+        let stage = create_staging(&final_path).unwrap();
+        let stage_path = stage.path().to_path_buf();
+
+        let (stage, reflinked) = stage
+            .try_reflink_create_new(false, |path| {
+                assert_eq!(path, stage_path);
+                assert!(!path.exists(), "reflink must receive an absent path");
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "simulated unsupported reflink",
+                ))
+            })
+            .unwrap();
+
+        assert!(!reflinked);
+        assert_eq!(stage.path(), stage_path);
+        assert!(stage.path().is_file(), "fallback must own a regular file");
+        let error = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(stage.path())
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn copy_file_range_fallback_keeps_the_exclusive_stage_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("destination.bin");
+        let stage = create_staging(&final_path).unwrap();
+        let stage_path = stage.path().to_path_buf();
+        std::fs::write(&stage_path, b"partial copy_file_range bytes").unwrap();
+        let stage_file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&stage_path)
+            .unwrap();
+
+        reset_copy_file_range_stage_for_fallback(&stage_file).unwrap();
+        drop(stage_file);
+
+        assert!(stage_path.is_file());
+        assert_eq!(std::fs::metadata(&stage_path).unwrap().len(), 0);
+        let error = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&stage_path)
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn automatic_reflink_reservation_race_does_not_delete_competing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("destination.bin");
+        std::fs::write(&final_path, b"old final bytes").unwrap();
+        let stage = create_staging(&final_path).unwrap();
+        let stage_path = stage.path().to_path_buf();
+        let sentinel = b"competing writer's bytes";
+
+        let result = stage.try_reflink_create_new(false, |path| {
+            assert!(!path.exists(), "reflink must receive an absent path");
+            std::fs::write(path, sentinel)?;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "simulated failed reflink after a competing create",
+            ))
+        });
+
+        assert!(
+            matches!(result, Err(BcmrError::Io(ref error)) if error.kind() == std::io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(std::fs::read(&stage_path).unwrap(), sentinel);
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"old final bytes");
+    }
+
+    #[test]
+    fn forced_reflink_failure_keeps_contract_without_deleting_competing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("destination.bin");
+        std::fs::write(&final_path, b"old final bytes").unwrap();
+        let stage = create_staging(&final_path).unwrap();
+        let stage_path = stage.path().to_path_buf();
+        let sentinel = b"competing writer's bytes";
+
+        let result = stage.try_reflink_create_new(true, |path| {
+            assert!(!path.exists(), "reflink must receive an absent path");
+            std::fs::write(path, sentinel)?;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "simulated forced reflink failure",
+            ))
+        });
+
+        assert!(matches!(result, Err(BcmrError::Reflink(_))));
+        assert_eq!(std::fs::read(&stage_path).unwrap(), sentinel);
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"old final bytes");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn automatic_reflink_reservation_race_does_not_follow_or_delete_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("destination.bin");
+        std::fs::write(&final_path, b"old final bytes").unwrap();
+        let sentinel_target = dir.path().join("sentinel-target.bin");
+        std::fs::write(&sentinel_target, b"sentinel target bytes").unwrap();
+        let stage = create_staging(&final_path).unwrap();
+        let stage_path = stage.path().to_path_buf();
+
+        let result = stage.try_reflink_create_new(false, |path| {
+            assert!(!path.exists(), "reflink must receive an absent path");
+            std::os::unix::fs::symlink(&sentinel_target, path)?;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "simulated failed reflink after a competing symlink",
+            ))
+        });
+
+        assert!(
+            matches!(result, Err(BcmrError::Io(ref error)) if error.kind() == std::io::ErrorKind::AlreadyExists)
+        );
+        assert!(stage_path
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read(&sentinel_target).unwrap(),
+            b"sentinel target bytes"
+        );
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"old final bytes");
     }
 }
