@@ -106,10 +106,6 @@ where
             return Ok(());
         }
 
-        if dst_path.exists() && cli.is_force() {
-            fs::remove_file(&dst_path).await?;
-        }
-
         let file_size = src.metadata()?.len();
         let file_name = src
             .file_name()

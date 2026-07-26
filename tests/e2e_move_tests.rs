@@ -49,6 +49,21 @@ fn create_random_file(path: &Path, size: usize) {
     f.sync_all().unwrap();
 }
 
+#[cfg(unix)]
+fn create_file_symlink(target: &Path, link: &Path) -> bool {
+    std::os::unix::fs::symlink(target, link).is_ok()
+}
+
+#[cfg(windows)]
+fn create_file_symlink(target: &Path, link: &Path) -> bool {
+    std::os::windows::fs::symlink_file(target, link).is_ok()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_file_symlink(_target: &Path, _link: &Path) -> bool {
+    false
+}
+
 #[test]
 fn e2e_move_single_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -305,14 +320,15 @@ fn e2e_move_force_refuses_hard_link_alias_without_data_loss() {
     }
 }
 
-#[cfg(unix)]
 #[test]
-fn e2e_move_force_refuses_symlink_alias_without_data_loss() {
+fn e2e_move_force_refuses_file_onto_symlink_alias_without_data_loss() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("file.txt");
     let alias = dir.path().join("alias.txt");
     fs::write(&file, b"symlink payload").unwrap();
-    std::os::unix::fs::symlink("file.txt", &alias).unwrap();
+    if !create_file_symlink(&file, &alias) {
+        return;
+    }
 
     let (ok, _, stderr) = run_bcmr(&[
         "move",
@@ -332,6 +348,92 @@ fn e2e_move_force_refuses_symlink_alias_without_data_loss() {
             path.display()
         );
     }
+}
+
+#[test]
+fn e2e_move_force_refuses_symlink_onto_its_underlying_file_without_data_loss() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("file.txt");
+    let alias = dir.path().join("alias.txt");
+    fs::write(&file, b"symlink source payload").unwrap();
+    if !create_file_symlink(&file, &alias) {
+        return;
+    }
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "move",
+        "-t",
+        "-f",
+        "-y",
+        alias.to_str().unwrap(),
+        file.to_str().unwrap(),
+    ]);
+
+    assert!(
+        !ok,
+        "moving a symlink onto its underlying file must fail: {stderr}"
+    );
+    for path in [&file, &alias] {
+        assert_eq!(
+            fs::read(path).unwrap(),
+            b"symlink source payload",
+            "symlink-source refusal must preserve {}",
+            path.display()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_move_force_rename_failure_preserves_existing_destination() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir(&src_dir).unwrap();
+    fs::create_dir(&dst_dir).unwrap();
+    let src = src_dir.join("file.txt");
+    let dst = dst_dir.join("file.txt");
+    fs::write(&src, b"new payload").unwrap();
+    fs::write(&dst, b"old payload").unwrap();
+
+    let original_permissions = fs::metadata(&src_dir).unwrap().permissions();
+    let mut readonly = original_permissions.clone();
+    readonly.set_mode(0o555);
+    fs::set_permissions(&src_dir, readonly).unwrap();
+
+    if fs::File::create(src_dir.join("permission-probe")).is_ok() {
+        let _ = fs::remove_file(src_dir.join("permission-probe"));
+        fs::set_permissions(&src_dir, original_permissions).unwrap();
+        return;
+    }
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "move",
+        "-t",
+        "-f",
+        "-y",
+        "-q",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    fs::set_permissions(&src_dir, original_permissions).unwrap();
+
+    assert!(
+        !ok,
+        "rename must fail without source-dir write permission: {stderr}"
+    );
+    assert_eq!(
+        fs::read(&dst).unwrap(),
+        b"old payload",
+        "failed forced move must preserve the existing destination"
+    );
+    assert_eq!(
+        fs::read(&src).unwrap(),
+        b"new payload",
+        "failed forced move must preserve the source"
+    );
 }
 
 #[test]
