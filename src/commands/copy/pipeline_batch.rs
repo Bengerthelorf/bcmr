@@ -40,6 +40,7 @@ where
     F: Fn(u64) + Send + Sync + Clone + 'static,
 {
     let test_mode = cli.get_test_mode();
+    CopyFileOptions::from_cli(cli, test_mode.clone()).validate_reflink_compatibility()?;
     let recursive = cli.is_recursive();
     let no_deref = cli.is_no_deref();
     let jobs = cli.local_jobs();

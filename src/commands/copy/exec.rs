@@ -43,6 +43,7 @@ where
     F: Fn(u64) + Send + Sync + Clone + 'static,
 {
     let test_mode = cli.get_test_mode();
+    CopyFileOptions::from_cli(cli, test_mode.clone()).validate_reflink_compatibility()?;
     let callback = ProgressCallback {
         callback: progress_callback,
         on_new_file: Arc::new(on_new_file),
@@ -123,6 +124,7 @@ where
     F: Fn(u64) + Send + Sync + Clone + 'static,
 {
     let test_mode = cli.get_test_mode();
+    CopyFileOptions::from_cli(cli, test_mode.clone()).validate_reflink_compatibility()?;
     let callback = ProgressCallback {
         callback: progress_callback,
         on_new_file: Arc::new(on_new_file),

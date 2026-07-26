@@ -90,41 +90,6 @@ pub async fn finalize(
     Ok(())
 }
 
-pub async fn try_reflink(
-    src: &Path,
-    write_target: &Path,
-    file_size: u64,
-    try_reflink: bool,
-    fail_on_error: bool,
-    sparse_mode: &SparseMode,
-    callback: &impl Fn(u64),
-) -> Result<bool, BcmrError> {
-    if !try_reflink || matches!(sparse_mode, SparseMode::Always) {
-        return Ok(false);
-    }
-
-    let src_path = src.to_path_buf();
-    let target_path = write_target.to_path_buf();
-    let result =
-        tokio::task::spawn_blocking(move || reflink_copy::reflink(&src_path, &target_path)).await?;
-
-    match result {
-        Ok(_) => {
-            callback(file_size);
-            Ok(true)
-        }
-        Err(e) => {
-            if fail_on_error {
-                return Err(BcmrError::Reflink(format!(
-                    "Reflink failed (forced): {}",
-                    e
-                )));
-            }
-            Ok(false)
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 pub struct SessionIntent {
     pub resume: bool,

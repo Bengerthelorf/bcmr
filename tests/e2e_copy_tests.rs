@@ -603,6 +603,74 @@ fn e2e_forced_reflink_uses_the_unique_stage_before_verified_replacement() {
     assert_eq!(fs::metadata(&dst).unwrap().len(), 0);
 }
 
+#[test]
+fn e2e_forced_reflink_rejects_direct_modes_before_touching_the_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    fs::write(&src, b"complete replacement bytes").unwrap();
+
+    for mode in ["--resume", "--append", "--strict"] {
+        fs::write(&dst, b"original destination").unwrap();
+
+        let (ok, _stdout, stderr) = run_bcmr(&[
+            "copy",
+            "-t",
+            "-f",
+            "-y",
+            mode,
+            "--reflink",
+            "force",
+            src.to_str().unwrap(),
+            dst.to_str().unwrap(),
+        ]);
+
+        assert!(!ok, "{mode} with forced reflink must be rejected");
+        assert!(
+            stderr.contains("incompatible"),
+            "{mode} should report an incompatible option combination: {stderr}"
+        );
+        assert_eq!(
+            fs::read(&dst).unwrap(),
+            b"original destination",
+            "{mode} validation must run before overwrite handling"
+        );
+    }
+}
+
+#[test]
+fn e2e_forced_reflink_rejects_forced_sparse_before_touching_the_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    fs::write(&src, b"complete replacement bytes").unwrap();
+    fs::write(&dst, b"original destination").unwrap();
+
+    let (ok, _stdout, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "-f",
+        "-y",
+        "--sparse",
+        "force",
+        "--reflink",
+        "force",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+
+    assert!(!ok, "forced sparse with forced reflink must be rejected");
+    assert!(
+        stderr.contains("incompatible"),
+        "conflicting force modes should report an incompatible option combination: {stderr}"
+    );
+    assert_eq!(
+        fs::read(&dst).unwrap(),
+        b"original destination",
+        "force-mode validation must run before overwrite handling"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn e2e_preserve_and_sync_apply_metadata_to_the_committed_destination() {
