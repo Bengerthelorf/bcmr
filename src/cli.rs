@@ -521,6 +521,12 @@ pub enum TestMode {
     ReplaceDestinationWithFifoAfterObservation,
     #[cfg(feature = "test-support")]
     CreateDestinationHardlinkBeforeFinalize,
+    #[cfg(feature = "test-support")]
+    FailSymlinkCreate,
+    #[cfg(feature = "test-support")]
+    FailSymlinkCommit,
+    #[cfg(feature = "test-support")]
+    CreateDestinationBeforeSymlinkCommit,
     None,
 }
 
@@ -849,6 +855,15 @@ fn parse_test_mode(s: &str) -> Result<TestMode, String> {
         }
         "create_destination_hardlink_before_finalize" => {
             return Ok(TestMode::CreateDestinationHardlinkBeforeFinalize);
+        }
+        "fail_symlink_create" => {
+            return Ok(TestMode::FailSymlinkCreate);
+        }
+        "fail_symlink_commit" => {
+            return Ok(TestMode::FailSymlinkCommit);
+        }
+        "create_destination_before_symlink_commit" => {
+            return Ok(TestMode::CreateDestinationBeforeSymlinkCommit);
         }
         _ => {}
     }

@@ -7,10 +7,23 @@ use parking_lot::Mutex;
 fn remove_temp_file(path: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     if let Ok(metadata) = std::fs::symlink_metadata(path) {
-        let mut permissions = metadata.permissions();
-        if permissions.readonly() {
-            permissions.set_readonly(false);
-            let _ = std::fs::set_permissions(path, permissions);
+        if !metadata.file_type().is_symlink() {
+            let mut permissions = metadata.permissions();
+            if permissions.readonly() {
+                permissions.set_readonly(false);
+                let _ = std::fs::set_permissions(path, permissions);
+            }
+        }
+
+        // DeleteFileW refuses directory symlinks. The raw directory attribute
+        // describes the link entry itself and lets cleanup choose RemoveDirectoryW
+        // without following the link target.
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+        if metadata.file_type().is_symlink()
+            && metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0
+        {
+            return std::fs::remove_dir(path);
         }
     }
     std::fs::remove_file(path)

@@ -128,6 +128,21 @@ fn is_symlink(p: &Path) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(unix)]
+fn assert_no_symlink_stages(parent: &Path) {
+    let stages: Vec<_> = fs::read_dir(parent)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".bcmr.symlink.")
+        })
+        .collect();
+    assert!(stages.is_empty(), "symlink stages leaked: {stages:?}");
+}
+
 fn session_exists(src: &Path, dst: &Path) -> bool {
     Session::session_path(src, dst).exists()
 }
@@ -2429,6 +2444,77 @@ fn e2e_no_deref_preserves_dangling_symlink() {
 
 #[cfg(unix)]
 #[test]
+fn e2e_no_deref_preserves_symlink_to_fifo_without_opening_target() {
+    use std::os::unix::fs::FileTypeExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    create_fifo(&dir.path().join("target.pipe"));
+    std::os::unix::fs::symlink("target.pipe", dir.path().join("link.pipe")).unwrap();
+    fs::create_dir(dir.path().join("dst")).unwrap();
+
+    let (ok, _stdout, stderr, timed_out) = run_bcmr_in_with_timeout(
+        dir.path(),
+        &["copy", "-t", "--no-deref", "link.pipe", "dst"],
+        Duration::from_secs(10),
+    );
+
+    assert!(
+        !timed_out,
+        "--no-deref must not open a symlink's FIFO target"
+    );
+    assert!(
+        ok,
+        "--no-deref should copy the symlink entry itself: {stderr}"
+    );
+    let landed = dir.path().join("dst/link.pipe");
+    assert!(is_symlink(&landed));
+    assert_eq!(fs::read_link(&landed).unwrap(), Path::new("target.pipe"));
+    assert!(
+        dir.path()
+            .join("target.pipe")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_fifo(),
+        "the FIFO target must remain untouched"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_no_deref_still_rejects_an_ordinary_fifo_without_opening_it() {
+    use std::os::unix::fs::FileTypeExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    create_fifo(&dir.path().join("source.pipe"));
+
+    let (ok, _stdout, stderr, timed_out) = run_bcmr_in_with_timeout(
+        dir.path(),
+        &["copy", "-t", "--no-deref", "source.pipe", "dst"],
+        Duration::from_secs(10),
+    );
+
+    assert!(
+        !timed_out,
+        "source validation must not open an ordinary FIFO"
+    );
+    assert!(!ok, "an ordinary FIFO must remain unsupported");
+    assert!(
+        stderr.contains("FIFO (named pipe)"),
+        "ordinary FIFO refusal should identify its type: {stderr}"
+    );
+    assert!(!dir.path().join("dst").exists());
+    assert!(dir
+        .path()
+        .join("source.pipe")
+        .symlink_metadata()
+        .unwrap()
+        .file_type()
+        .is_fifo());
+}
+
+#[cfg(unix)]
+#[test]
 fn e2e_no_deref_recursive_preserves_nested_links() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("tree");
@@ -2528,6 +2614,129 @@ fn e2e_no_deref_overwrite_with_force_replaces() {
 
 #[cfg(unix)]
 #[test]
+fn e2e_no_deref_symlink_create_failure_keeps_existing_regular_file() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("target.txt"), b"target").unwrap();
+    let link = dir.path().join("link.txt");
+    std::os::unix::fs::symlink("target.txt", &link).unwrap();
+
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir(&dst_dir).unwrap();
+    let collide = dst_dir.join("link.txt");
+    fs::write(&collide, b"OLD FINAL").unwrap();
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-tfy",
+        "--no-deref",
+        "--test-mode",
+        "fail_symlink_create",
+        link.to_str().unwrap(),
+        dst_dir.to_str().unwrap(),
+    ]);
+    assert!(!ok, "injected create failure must fail: {stderr}");
+    assert_eq!(
+        fs::read(&collide).unwrap(),
+        b"OLD FINAL",
+        "failed symlink creation must not remove or replace the old final"
+    );
+    assert_no_symlink_stages(&dst_dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_no_deref_symlink_create_failure_keeps_existing_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("new-target.txt"), b"new").unwrap();
+    let link = dir.path().join("link.txt");
+    std::os::unix::fs::symlink("new-target.txt", &link).unwrap();
+
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir(&dst_dir).unwrap();
+    let collide = dst_dir.join("link.txt");
+    std::os::unix::fs::symlink("old-target.txt", &collide).unwrap();
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-tfy",
+        "--no-deref",
+        "--test-mode",
+        "fail_symlink_create",
+        link.to_str().unwrap(),
+        dst_dir.to_str().unwrap(),
+    ]);
+    assert!(!ok, "injected create failure must fail: {stderr}");
+    assert_eq!(
+        fs::read_link(&collide).unwrap(),
+        Path::new("old-target.txt"),
+        "failed symlink creation must preserve the old link entry"
+    );
+    assert_no_symlink_stages(&dst_dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_no_deref_symlink_commit_failure_keeps_existing_final() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("target.txt"), b"target").unwrap();
+    let link = dir.path().join("link.txt");
+    std::os::unix::fs::symlink("target.txt", &link).unwrap();
+
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir(&dst_dir).unwrap();
+    let collide = dst_dir.join("link.txt");
+    fs::write(&collide, b"OLD FINAL").unwrap();
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-tfy",
+        "--no-deref",
+        "--test-mode",
+        "fail_symlink_commit",
+        link.to_str().unwrap(),
+        dst_dir.to_str().unwrap(),
+    ]);
+    assert!(!ok, "injected commit failure must fail: {stderr}");
+    assert_eq!(
+        fs::read(&collide).unwrap(),
+        b"OLD FINAL",
+        "failed symlink commit must preserve the old final"
+    );
+    assert_no_symlink_stages(&dst_dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_no_deref_noforce_commit_race_preserves_competing_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("target.txt"), b"target").unwrap();
+    let link = dir.path().join("link.txt");
+    std::os::unix::fs::symlink("target.txt", &link).unwrap();
+
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir(&dst_dir).unwrap();
+    let collide = dst_dir.join("link.txt");
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "--no-deref",
+        "--test-mode",
+        "create_destination_before_symlink_commit",
+        link.to_str().unwrap(),
+        dst_dir.to_str().unwrap(),
+    ]);
+    assert!(!ok, "no-force commit race must fail: {stderr}");
+    assert_eq!(
+        fs::read(&collide).unwrap(),
+        b"racing destination must survive",
+        "no-clobber commit must preserve the competing creator's path"
+    );
+    assert_no_symlink_stages(&dst_dir);
+}
+
+#[cfg(unix)]
+#[test]
 fn e2e_no_deref_overwrite_gate_treats_dangling_link_as_existing() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("target.txt"), b"new").unwrap();
@@ -2556,6 +2765,34 @@ fn e2e_no_deref_overwrite_gate_treats_dangling_link_as_existing() {
         std::fs::read_link(&dangling).unwrap(),
         std::path::Path::new("does_not_exist")
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_no_deref_force_atomically_replaces_dangling_link() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("target.txt"), b"new").unwrap();
+    let src_link = dir.path().join("src_link.txt");
+    std::os::unix::fs::symlink("target.txt", &src_link).unwrap();
+
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir(&dst_dir).unwrap();
+    let dangling = dst_dir.join("src_link.txt");
+    std::os::unix::fs::symlink("does_not_exist", &dangling).unwrap();
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-tfy",
+        "--no-deref",
+        src_link.to_str().unwrap(),
+        dst_dir.to_str().unwrap(),
+    ]);
+    assert!(ok, "forced dangling-link replacement failed: {stderr}");
+    assert_eq!(
+        std::fs::read_link(&dangling).unwrap(),
+        Path::new("target.txt")
+    );
+    assert_no_symlink_stages(&dst_dir);
 }
 
 #[cfg(unix)]

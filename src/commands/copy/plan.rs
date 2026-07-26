@@ -21,7 +21,50 @@ pub enum PlanEntry {
         src: PathBuf,
         dst: PathBuf,
         target: PathBuf,
+        kind: SymlinkKind,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SymlinkKind {
+    File,
+    Directory,
+}
+
+fn symlink_entry_metadata(
+    path: &Path,
+) -> std::result::Result<Option<std::fs::Metadata>, BcmrError> {
+    match path.symlink_metadata() {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(BcmrError::Io(error)),
+    }
+}
+
+#[cfg(windows)]
+fn scanned_symlink_kind(path: &Path, metadata: &std::fs::Metadata) -> SymlinkKind {
+    use std::os::windows::fs::MetadataExt;
+
+    let _ = path;
+    windows_symlink_kind_from_attributes(metadata.file_attributes())
+}
+
+#[cfg(not(windows))]
+fn scanned_symlink_kind(path: &Path, _metadata: &std::fs::Metadata) -> SymlinkKind {
+    match path.metadata() {
+        Ok(metadata) if metadata.is_dir() => SymlinkKind::Directory,
+        _ => SymlinkKind::File,
+    }
+}
+
+#[cfg(any(windows, test))]
+fn windows_symlink_kind_from_attributes(attributes: u32) -> SymlinkKind {
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        SymlinkKind::Directory
+    } else {
+        SymlinkKind::File
+    }
 }
 
 pub struct CopyPlan {
@@ -54,19 +97,22 @@ pub(super) fn scan_sources(
 ) -> std::result::Result<(), BcmrError> {
     let dst_is_dir = dst.exists() && dst.is_dir();
 
-    let is_symlink = |p: &Path| -> bool {
-        p.symlink_metadata()
-            .map(|m| m.is_symlink())
-            .unwrap_or(false)
-    };
-
     for src in sources {
         if traversal::is_excluded(src, excludes) {
             continue;
         }
 
-        if no_deref && is_symlink(src) {
+        let source_entry_metadata = if no_deref {
+            symlink_entry_metadata(src)?
+        } else {
+            None
+        };
+        if let Some(metadata) = source_entry_metadata
+            .as_ref()
+            .filter(|metadata| metadata.file_type().is_symlink())
+        {
             let target = std::fs::read_link(src).map_err(BcmrError::Io)?;
+            let kind = scanned_symlink_kind(src, metadata);
             let dst_path = if dst_is_dir {
                 dst.join(
                     src.file_name()
@@ -80,6 +126,7 @@ pub(super) fn scan_sources(
                     src: src.clone(),
                     dst: dst_path,
                     target,
+                    kind,
                 },
                 0,
             )?;
@@ -136,13 +183,22 @@ pub(super) fn scan_sources(
                 let relative = path.strip_prefix(src)?;
                 let target = new_dst.join(relative);
 
-                if no_deref && is_symlink(path) {
+                let entry_metadata = if no_deref {
+                    symlink_entry_metadata(path)?
+                } else {
+                    None
+                };
+                if let Some(metadata) = entry_metadata
+                    .as_ref()
+                    .filter(|metadata| metadata.file_type().is_symlink())
+                {
                     let link_target = std::fs::read_link(path).map_err(BcmrError::Io)?;
                     on_entry(
                         PlanEntry::Symlink {
                             src: path.to_path_buf(),
                             dst: target,
                             target: link_target,
+                            kind: scanned_symlink_kind(path, metadata),
                         },
                         0,
                     )?;
@@ -199,14 +255,17 @@ fn plan_copy_sync(
             total_size += size;
 
             let target = match &entry {
-                PlanEntry::CopyFile { dst, .. } | PlanEntry::Symlink { dst, .. } => {
+                PlanEntry::CopyFile { dst, .. } if dst.exists() => Some((dst.clone(), false)),
+                PlanEntry::CopyFile { .. } => None,
+                PlanEntry::Symlink { dst, .. } if symlink_entry_metadata(dst)?.is_some() => {
                     Some((dst.clone(), false))
                 }
+                PlanEntry::Symlink { .. } => None,
                 PlanEntry::CreateDir { dst, .. } if dst.exists() => Some((dst.clone(), true)),
                 PlanEntry::CreateDir { .. } => None,
             };
             if let Some((path, is_dir)) = target {
-                if path.exists() && !traversal::is_excluded(&path, &excludes) {
+                if !traversal::is_excluded(&path, &excludes) {
                     overwrites.push(FileToOverwrite { path, is_dir });
                 }
             }
@@ -253,8 +312,14 @@ pub fn dry_run_plan(plan: &CopyPlan, cli: &Commands) -> std::result::Result<(), 
                 let action = determine_dry_run_action(src, dst, cli)?;
                 print_dry_run(action, &src.to_string_lossy(), Some(&dst.to_string_lossy()));
             }
-            PlanEntry::Symlink { src, dst, target } => {
-                let action = if dst.symlink_metadata().is_ok() {
+            PlanEntry::Symlink {
+                src,
+                dst,
+                target,
+                kind,
+            } => {
+                let action = if symlink_entry_metadata(dst)?.is_some() {
+                    super::symlinks::check_symlink_overwrite(dst, *kind, cli)?;
                     ActionType::Overwrite
                 } else {
                     ActionType::Add
@@ -316,10 +381,12 @@ mod scan_tests {
                 src,
                 dst: d,
                 target,
+                kind,
             } => {
                 assert_eq!(src, &link);
                 assert_eq!(d, &dst.join("link.txt"));
                 assert_eq!(target, std::path::Path::new("target.txt"));
+                assert_eq!(*kind, SymlinkKind::File);
             }
             other => panic!("expected Symlink, got {other:?}"),
         }
@@ -337,6 +404,15 @@ mod scan_tests {
         let entries = collect(&link, &dst, false, false);
         assert_eq!(entries.len(), 1);
         assert!(matches!(entries[0], PlanEntry::CopyFile { .. }));
+    }
+
+    #[test]
+    fn windows_symlink_attributes_preserve_scanned_kind() {
+        assert_eq!(windows_symlink_kind_from_attributes(0), SymlinkKind::File);
+        assert_eq!(
+            windows_symlink_kind_from_attributes(0x10),
+            SymlinkKind::Directory
+        );
     }
 
     #[test]
@@ -364,6 +440,30 @@ mod scan_tests {
             .filter(|e| matches!(e, PlanEntry::CopyFile { .. }))
             .collect();
         assert_eq!(copy_entries.len(), 1);
+    }
+
+    #[test]
+    fn scan_propagates_non_not_found_symlink_metadata_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("regular-file");
+        write(&blocker, b"x");
+        let impossible = blocker.join("child");
+
+        let error = scan_sources(
+            std::slice::from_ref(&impossible),
+            &dir.path().join("dst"),
+            false,
+            true,
+            &[],
+            |_, _| Ok(()),
+        )
+        .unwrap_err();
+        match error {
+            BcmrError::Io(error) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory);
+            }
+            other => panic!("expected propagated IO error, got {other:?}"),
+        }
     }
 
     #[test]

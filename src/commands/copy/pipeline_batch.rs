@@ -124,10 +124,11 @@ where
                 PlanEntry::Symlink {
                     ref dst,
                     ref target,
+                    kind,
                     ..
                 } => {
-                    check_symlink_overwrite(dst, cli)?;
-                    create_symlink_replacing(dst, target).await?;
+                    check_symlink_overwrite(dst, kind, cli)?;
+                    create_symlink_replacing(dst, target, kind, cli.is_force(), &test_mode).await?;
                     if verbose {
                         eprintln!("'{}' -> '{}' (symlink)", target.display(), dst.display());
                     }

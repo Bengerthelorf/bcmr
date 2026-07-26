@@ -1173,7 +1173,10 @@ where
         | TestMode::ReplaceDestinationBeforeFinalize
         | TestMode::ReplaceDestinationAfterResumeResolution
         | TestMode::ReplaceDestinationWithFifoAfterObservation
-        | TestMode::CreateDestinationHardlinkBeforeFinalize => TestMode::None,
+        | TestMode::CreateDestinationHardlinkBeforeFinalize
+        | TestMode::FailSymlinkCreate
+        | TestMode::FailSymlinkCommit
+        | TestMode::CreateDestinationBeforeSymlinkCommit => TestMode::None,
         other => other,
     };
     let crate::core::remote::TransferOptions {
@@ -1535,6 +1538,12 @@ where
         | TestMode::ReplaceDestinationWithFifoAfterObservation
         | TestMode::CreateDestinationHardlinkBeforeFinalize => {
             unreachable!("destination race modes are normalized before transfer")
+        }
+        #[cfg(feature = "test-support")]
+        TestMode::FailSymlinkCreate
+        | TestMode::FailSymlinkCommit
+        | TestMode::CreateDestinationBeforeSymlinkCommit => {
+            unreachable!("symlink test modes are normalized before file transfer")
         }
     };
 

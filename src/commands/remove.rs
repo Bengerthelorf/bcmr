@@ -180,7 +180,10 @@ async fn report_progress(size: u64, test_mode: &TestMode, callback: &(impl Fn(u6
         | TestMode::ReplaceDestinationBeforeFinalize
         | TestMode::ReplaceDestinationAfterResumeResolution
         | TestMode::ReplaceDestinationWithFifoAfterObservation
-        | TestMode::CreateDestinationHardlinkBeforeFinalize => {
+        | TestMode::CreateDestinationHardlinkBeforeFinalize
+        | TestMode::FailSymlinkCreate
+        | TestMode::FailSymlinkCommit
+        | TestMode::CreateDestinationBeforeSymlinkCommit => {
             callback(size);
         }
     }
