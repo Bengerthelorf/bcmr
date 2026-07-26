@@ -5,16 +5,15 @@ use crate::core::session::{Session, CHECKPOINT_INTERVAL_BLOCKS, COPY_BLOCK_SIZE}
 use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 
-use crate::commands::copy::AtomicStaging;
+use crate::commands::copy::{destination_parent, AtomicStaging, CommitPolicy};
 
 pub struct FinalizeParams<'a> {
     pub write_target: &'a Path,
     pub dst: &'a Path,
     pub src: &'a Path,
     pub expected_file_size: u64,
-    pub use_atomic: bool,
     pub staging: Option<AtomicStaging>,
-    pub replace_existing: bool,
+    pub commit_policy: &'a CommitPolicy,
     pub sync: bool,
     pub preserve: bool,
     pub verify: bool,
@@ -26,99 +25,84 @@ pub async fn finalize(
     dst_file: tokio::fs::File,
     mut p: FinalizeParams<'_>,
 ) -> Result<(), BcmrError> {
-    if p.use_atomic {
-        let mut stage_file = Some(dst_file);
-        let prepare = async {
-            let actual_len = stage_file
-                .as_ref()
-                .ok_or_else(|| {
-                    BcmrError::InvalidInput(
-                        "atomic finalization requires an open staging file".into(),
-                    )
-                })?
-                .metadata()
-                .await?
-                .len();
-            if actual_len < p.expected_file_size {
-                return Err(BcmrError::Io(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    format!(
-                        "staged copy ended at {actual_len} bytes; source snapshot was {} bytes",
-                        p.expected_file_size
-                    ),
-                )));
-            }
-            if actual_len > p.expected_file_size {
-                return Err(BcmrError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "staged copy grew to {actual_len} bytes; source snapshot was {} bytes",
-                        p.expected_file_size
-                    ),
-                )));
-            }
-            if p.corrupt_before_verify {
-                // Test-only fault injection must close the writer before reopening
-                // the stage, which also exercises Windows handle discipline.
-                drop(stage_file.take());
-                let mut stage = tokio::fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(p.write_target)
-                    .await?;
-                let mut first_byte = [0u8; 1];
-                stage.read_exact(&mut first_byte).await?;
-                stage.seek(SeekFrom::Start(0)).await?;
-                first_byte[0] ^= 0xff;
-                stage.write_all(&first_byte).await?;
-                stage.sync_data().await?;
-            }
-            if p.verify {
-                // verify_copy removes its second argument on a mismatch.  This must
-                // remain the private stage, never the pre-existing final destination.
-                super::copy::verify_copy(p.src, p.write_target, p.inline_src_hash).await?;
-            }
-            if p.preserve {
-                super::copy::preserve_attributes(p.src, p.write_target).await?;
-            }
-            if p.sync {
-                if let Some(ref stage_file) = stage_file {
-                    durable_io::durable_sync_async(stage_file).await?;
-                }
-            }
-            Ok::<(), BcmrError>(())
+    let mut stage_file = Some(dst_file);
+    let mut preserved_readonly = None;
+    let prepare = async {
+        let actual_len = stage_file
+            .as_ref()
+            .ok_or_else(|| {
+                BcmrError::InvalidInput("atomic finalization requires an open staging file".into())
+            })?
+            .metadata()
+            .await?
+            .len();
+        if actual_len < p.expected_file_size {
+            return Err(BcmrError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!(
+                    "staged copy ended at {actual_len} bytes; source snapshot was {} bytes",
+                    p.expected_file_size
+                ),
+            )));
         }
-        .await;
-        drop(stage_file);
-        prepare?;
-
-        let staging = p.staging.take().ok_or_else(|| {
-            BcmrError::InvalidInput("atomic finalization requires a staging file".into())
-        })?;
-        staging.commit(p.dst, p.replace_existing)?;
-        if p.sync {
-            if let Some(parent) = p.dst.parent() {
-                durable_io::fsync_dir_async(parent).await;
-            }
+        if actual_len > p.expected_file_size {
+            return Err(BcmrError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "staged copy grew to {actual_len} bytes; source snapshot was {} bytes",
+                    p.expected_file_size
+                ),
+            )));
         }
-    } else {
-        // Resume/append/strict retain their pre-existing direct-path ordering.
-        if p.sync {
-            durable_io::durable_sync_async(&dst_file).await?;
-        }
-        drop(dst_file);
-        if p.preserve {
-            super::copy::preserve_attributes(p.src, p.write_target).await?;
+        if p.corrupt_before_verify {
+            // Test-only fault injection must close the writer before reopening
+            // the stage, which also exercises Windows handle discipline.
+            drop(stage_file.take());
+            let mut stage = tokio::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(p.write_target)
+                .await?;
+            let mut first_byte = [0u8; 1];
+            stage.read_exact(&mut first_byte).await?;
+            stage.seek(SeekFrom::Start(0)).await?;
+            first_byte[0] ^= 0xff;
+            stage.write_all(&first_byte).await?;
+            stage.sync_data().await?;
         }
         if p.verify {
+            // verify_copy removes its second argument on a mismatch.  This must
+            // remain the private stage, never the pre-existing final destination.
             super::copy::verify_copy(p.src, p.write_target, p.inline_src_hash).await?;
         }
+        if p.preserve {
+            preserved_readonly =
+                super::copy::preserve_staging_attributes(p.src, p.write_target).await?;
+        }
+        if p.sync {
+            if let Some(ref stage_file) = stage_file {
+                durable_io::durable_sync_async(stage_file).await?;
+            }
+        }
+        Ok::<(), BcmrError>(())
+    }
+    .await;
+    drop(stage_file);
+    prepare?;
+
+    let staging = p.staging.take().ok_or_else(|| {
+        BcmrError::InvalidInput("atomic finalization requires a staging file".into())
+    })?;
+    staging.commit(p.dst, p.commit_policy, preserved_readonly)?;
+    if p.sync {
+        durable_io::fsync_dir_async(destination_parent(p.dst)).await;
     }
 
     Session::remove(p.src, p.dst);
     Ok(())
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 pub struct SessionIntent {
     pub resume: bool,
@@ -126,12 +110,14 @@ pub struct SessionIntent {
     pub strict: bool,
 }
 
+#[cfg(test)]
 impl SessionIntent {
     fn supports_checkpoint(&self) -> bool {
         self.resume && !self.append && !self.strict
     }
 }
 
+#[cfg(test)]
 pub fn create_session(
     src: &Path,
     dst: &Path,
@@ -741,6 +727,7 @@ mod checkpoint_tests {
             .open(&stage_path)
             .await
             .unwrap();
+        let commit_policy = CommitPolicy::ReplaceAny;
 
         let result = finalize(
             stage_file,
@@ -749,9 +736,8 @@ mod checkpoint_tests {
                 dst: &dst,
                 src: &src,
                 expected_file_size: b"source snapshot".len() as u64,
-                use_atomic: true,
                 staging: Some(staging),
-                replace_existing: true,
+                commit_policy: &commit_policy,
                 sync: false,
                 preserve: false,
                 verify: false,
@@ -788,6 +774,7 @@ mod checkpoint_tests {
             .open(&stage_path)
             .await
             .unwrap();
+        let commit_policy = CommitPolicy::ReplaceAny;
 
         let result = finalize(
             stage_file,
@@ -796,9 +783,8 @@ mod checkpoint_tests {
                 dst: &dst,
                 src: &src,
                 expected_file_size: b"source snapshot".len() as u64,
-                use_atomic: true,
                 staging: Some(staging),
-                replace_existing: true,
+                commit_policy: &commit_policy,
                 sync: false,
                 preserve: false,
                 verify: false,

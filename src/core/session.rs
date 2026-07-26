@@ -27,6 +27,10 @@ pub struct Session {
 }
 
 impl Session {
+    // The library exposes this constructor for resume/session tooling and the
+    // integration suite. The binary crate shares this module but deliberately
+    // no longer constructs final-key sessions while writing private stages.
+    #[allow(dead_code)]
     pub fn new(src: &Path, dst: &Path, src_size: u64, src_mtime: u64, src_inode: u64) -> Self {
         let now = now_secs();
         Self {
@@ -168,10 +172,18 @@ impl Session {
     }
 
     pub fn find_verified_resume_offset(&self, src: &Path, dst: &Path) -> io::Result<u64> {
-        use std::io::Read;
+        self.find_verified_resume_offset_file(src, fs::File::open(dst)?)
+    }
+
+    pub fn find_verified_resume_offset_file(
+        &self,
+        src: &Path,
+        mut dst_file: fs::File,
+    ) -> io::Result<u64> {
+        use std::io::{Read, Seek, SeekFrom};
 
         let mut src_file = fs::File::open(src)?;
-        let mut dst_file = fs::File::open(dst)?;
+        dst_file.seek(SeekFrom::Start(0))?;
         let src_len = src_file.metadata()?.len();
         let dst_len = dst_file.metadata()?.len();
         if !self.has_valid_resume_structure() {

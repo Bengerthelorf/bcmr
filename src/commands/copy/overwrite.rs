@@ -6,9 +6,8 @@ use crate::core::session::Session;
 use crate::core::traversal;
 use crate::ui::display::ActionType;
 
+use super::validate_direct_destination;
 use std::path::{Path, PathBuf};
-use tokio::fs;
-
 pub struct FileToOverwrite {
     pub path: PathBuf,
     pub is_dir: bool,
@@ -141,9 +140,6 @@ pub(super) async fn check_overwrite(
     if !cli.is_force() && is_normal_write(cli) {
         return Err(BcmrError::TargetExists(dst.to_path_buf()));
     }
-    if cli.is_force() && !is_normal_write(cli) {
-        fs::remove_file(dst).await?;
-    }
     Ok(())
 }
 
@@ -152,13 +148,19 @@ pub(super) fn determine_dry_run_action(
     dst: &Path,
     cli: &Commands,
 ) -> std::result::Result<ActionType, BcmrError> {
-    if !dst.exists() {
-        return Ok(ActionType::Add);
-    }
-    if cli.is_force() && !is_normal_write(cli) {
-        // The existing execution contract removes direct-mode destinations
-        // before resolution when force is explicit. Preview that overwrite
-        // without reading or mutating session state.
+    let entry_metadata = match dst.symlink_metadata() {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ActionType::Add);
+        }
+        Err(error) => return Err(BcmrError::Io(error)),
+    };
+    if !is_normal_write(cli) {
+        let force_fresh = validate_direct_destination(dst, Some(&entry_metadata), cli.is_force())?;
+        if force_fresh {
+            return Ok(ActionType::Overwrite);
+        }
+    } else if !entry_metadata.file_type().is_file() {
         return Ok(ActionType::Overwrite);
     }
     let src_meta = src.metadata()?;

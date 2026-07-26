@@ -159,10 +159,6 @@ where
             return Ok(());
         }
 
-        if dst_path.exists() && cli.is_force() && !is_normal_write(cli) {
-            fs::remove_file(&dst_path).await?;
-        }
-
         copy_file(
             src,
             &dst_path,
@@ -242,10 +238,6 @@ where
                     Some(&dst_path.to_string_lossy()),
                 );
             } else {
-                if dst_path.exists() && cli.is_force() && !is_normal_write(cli) {
-                    fs::remove_file(&dst_path).await?;
-                }
-
                 copy_file(
                     &src_path,
                     &dst_path,
@@ -305,6 +297,30 @@ pub(crate) async fn preserve_attributes(
     super::file_copy::copy_xattrs(src, dst)?;
 
     Ok(())
+}
+
+pub(crate) async fn preserve_staging_attributes(
+    src: &Path,
+    dst: &Path,
+) -> std::result::Result<Option<bool>, BcmrError> {
+    #[cfg(not(windows))]
+    {
+        preserve_attributes(src, dst).await?;
+        Ok(None)
+    }
+
+    #[cfg(windows)]
+    {
+        // A preserved READONLY bit makes a private stage undeletable on
+        // Windows. Preserve fallible timestamps while it is still writable;
+        // AtomicStaging applies READONLY only after precommit validation and
+        // immediately before MoveFileExW.
+        let src_metadata = src.metadata()?;
+        let atime = filetime::FileTime::from_last_access_time(&src_metadata);
+        let mtime = filetime::FileTime::from_last_modification_time(&src_metadata);
+        filetime::set_file_times(dst, atime, mtime)?;
+        Ok(Some(src_metadata.permissions().readonly()))
+    }
 }
 
 pub(crate) async fn verify_copy(

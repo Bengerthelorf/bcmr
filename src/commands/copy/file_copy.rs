@@ -3,6 +3,7 @@ use crate::core::error::BcmrError;
 
 use std::fs::File as StdFile;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempPath;
 use tokio::fs::{self, File};
@@ -10,6 +11,499 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 
 use super::exec::ProgressCallback;
 use crate::core::cleanup::TempFileGuard;
+
+#[derive(Debug, Eq, PartialEq)]
+struct DestinationFingerprint {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    kind: u8,
+    readonly: bool,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    mode: u32,
+    #[cfg(unix)]
+    mtime_seconds: i64,
+    #[cfg(unix)]
+    mtime_nanoseconds: i64,
+    #[cfg(unix)]
+    ctime_seconds: i64,
+    #[cfg(unix)]
+    ctime_nanoseconds: i64,
+}
+
+impl DestinationFingerprint {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        let file_type = metadata.file_type();
+        let kind = if file_type.is_file() {
+            1
+        } else if file_type.is_dir() {
+            2
+        } else if file_type.is_symlink() {
+            3
+        } else {
+            4
+        };
+
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+
+        Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            kind,
+            readonly: metadata.permissions().readonly(),
+            #[cfg(unix)]
+            device: metadata.dev(),
+            #[cfg(unix)]
+            inode: metadata.ino(),
+            #[cfg(unix)]
+            mode: metadata.mode(),
+            #[cfg(unix)]
+            mtime_seconds: metadata.mtime(),
+            #[cfg(unix)]
+            mtime_nanoseconds: metadata.mtime_nsec(),
+            #[cfg(unix)]
+            ctime_seconds: metadata.ctime(),
+            #[cfg(unix)]
+            ctime_nanoseconds: metadata.ctime_nsec(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct DestinationTargetObservation {
+    identity: same_file::Handle,
+    fingerprint: DestinationFingerprint,
+    link_count: Option<u64>,
+}
+
+#[derive(Debug)]
+pub(crate) struct DestinationObservation {
+    entry: Option<DestinationFingerprint>,
+    target: Option<DestinationTargetObservation>,
+    observe_target: bool,
+}
+
+impl DestinationObservation {
+    fn capture(path: &Path, observe_target: bool) -> Result<Self, BcmrError> {
+        let entry = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => Some(DestinationFingerprint::from_metadata(&metadata)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(BcmrError::Io(error)),
+        };
+        let target = if observe_target
+            && entry
+                .as_ref()
+                .is_some_and(|fingerprint| fingerprint.kind == 1)
+        {
+            match open_destination_for_observation(path) {
+                Ok(file) => {
+                    let metadata = file.metadata()?;
+                    let fingerprint = DestinationFingerprint::from_metadata(&metadata);
+                    if entry.as_ref() != Some(&fingerprint) {
+                        return Err(BcmrError::DestinationChanged(path.to_path_buf()));
+                    }
+                    let link_count = file_link_count(&file)?;
+                    let identity = same_file::Handle::from_file(file)?;
+                    Some(DestinationTargetObservation {
+                        identity,
+                        fingerprint,
+                        link_count,
+                    })
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(BcmrError::Io(error)),
+            }
+        } else {
+            None
+        };
+        Ok(Self {
+            entry,
+            target,
+            observe_target,
+        })
+    }
+
+    fn matches_path(&self, path: &Path) -> Result<bool, BcmrError> {
+        let current = Self::capture(path, self.observe_target)?;
+        if self.entry != current.entry {
+            return Ok(false);
+        }
+        Ok(match (&self.target, &current.target) {
+            (None, None) => true,
+            (Some(expected), Some(current)) => {
+                expected.identity == current.identity
+                    && expected.fingerprint == current.fingerprint
+                    && observed_link_count_matches(expected.link_count, current.link_count)
+            }
+            _ => false,
+        })
+    }
+
+    fn matches_file(&self, file: &StdFile) -> Result<bool, BcmrError> {
+        let Some(expected) = self.target.as_ref() else {
+            return Ok(false);
+        };
+        let fingerprint = DestinationFingerprint::from_metadata(&file.metadata()?);
+        let link_count = file_link_count(file)?;
+        let identity = same_file::Handle::from_file(file.try_clone()?)?;
+        Ok(expected.identity == identity
+            && expected.fingerprint == fingerprint
+            && observed_link_count_matches(expected.link_count, link_count))
+    }
+
+    fn try_clone_target_file(&self) -> Result<Option<StdFile>, BcmrError> {
+        self.target
+            .as_ref()
+            .map(|target| target.identity.as_file().try_clone().map_err(BcmrError::Io))
+            .transpose()
+    }
+
+    fn target_has_multiple_links(&self) -> bool {
+        self.target
+            .as_ref()
+            .and_then(|target| target.link_count)
+            .is_some_and(|link_count| link_count > 1)
+    }
+}
+
+fn observed_link_count_matches(expected: Option<u64>, current: Option<u64>) -> bool {
+    expected == current
+}
+
+#[cfg(unix)]
+fn file_link_count(file: &StdFile) -> Result<Option<u64>, BcmrError> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(Some(file.metadata()?.nlink()))
+}
+
+#[cfg(windows)]
+fn file_link_count(file: &StdFile) -> Result<Option<u64>, BcmrError> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let mut information = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
+    let result = unsafe {
+        GetFileInformationByHandle(file.as_raw_handle() as HANDLE, information.as_mut_ptr())
+    };
+    if result == 0 {
+        return Err(BcmrError::Io(std::io::Error::last_os_error()));
+    }
+    let information = unsafe { information.assume_init() };
+    Ok(Some(information.nNumberOfLinks as u64))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn file_link_count(_file: &StdFile) -> Result<Option<u64>, BcmrError> {
+    Ok(None)
+}
+
+fn open_destination_for_observation(path: &Path) -> std::io::Result<StdFile> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // Observe the directory entry itself if it becomes a reparse point
+        // during the metadata-to-open race; never follow a newly swapped link.
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options.open(path)
+}
+
+pub(crate) fn destination_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn destination_entry_metadata(path: &Path) -> Result<Option<std::fs::Metadata>, BcmrError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(BcmrError::Io(error)),
+    }
+}
+
+pub(crate) fn validate_direct_destination(
+    dst: &Path,
+    metadata: Option<&std::fs::Metadata>,
+    replace_existing: bool,
+) -> Result<bool, BcmrError> {
+    let Some(metadata) = metadata else {
+        return Ok(false);
+    };
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        if replace_existing {
+            // Forced direct modes intentionally replace the directory entry
+            // and therefore must not inspect or follow the symlink target.
+            return Ok(true);
+        }
+        return Err(BcmrError::InvalidInput(format!(
+            "direct copy destination '{}' is a symbolic link; use -f to replace the link entry",
+            dst.display()
+        )));
+    }
+    if !file_type.is_file() {
+        return Err(BcmrError::InvalidInput(format!(
+            "direct copy destination '{}' must be a regular file",
+            dst.display()
+        )));
+    }
+    if !replace_existing && has_multiple_hard_links(dst, metadata)? {
+        return Err(BcmrError::InvalidInput(format!(
+            "direct copy destination '{}' has multiple hard links; use -f to replace only this path",
+            dst.display()
+        )));
+    }
+    Ok(false)
+}
+
+#[cfg(unix)]
+fn has_multiple_hard_links(_path: &Path, metadata: &std::fs::Metadata) -> Result<bool, BcmrError> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(metadata.nlink() > 1)
+}
+
+#[cfg(windows)]
+fn has_multiple_hard_links(path: &Path, _metadata: &std::fs::Metadata) -> Result<bool, BcmrError> {
+    let file = open_destination_for_observation(path)?;
+    Ok(file_link_count(&file)?.is_some_and(|link_count| link_count > 1))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn has_multiple_hard_links(_path: &Path, _metadata: &std::fs::Metadata) -> Result<bool, BcmrError> {
+    Ok(false)
+}
+
+pub(crate) enum CommitPolicy {
+    NoClobber,
+    ReplaceObserved(Arc<DestinationObservation>),
+    ReplaceAny,
+}
+
+#[cfg(any(windows, test))]
+const WINDOWS_FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
+#[cfg(any(windows, test))]
+const WINDOWS_FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
+#[cfg(any(windows, test))]
+const WINDOWS_FILE_ATTRIBUTE_TEMPORARY: u32 = 0x0000_0100;
+#[cfg(any(windows, test))]
+const WINDOWS_SETTABLE_SPECIFIC_ATTRIBUTES: u32 = WINDOWS_FILE_ATTRIBUTE_READONLY
+        | 0x0000_0002 // HIDDEN
+        | 0x0000_0004 // SYSTEM
+        | 0x0000_0020 // ARCHIVE
+        | 0x0000_1000 // OFFLINE
+        | 0x0000_2000; // NOT_CONTENT_INDEXED
+
+#[cfg(any(windows, test))]
+fn windows_attributes_after_persist(attributes: u32, preserved_readonly: Option<bool>) -> u32 {
+    // SetFileAttributesW rejects status bits such as COMPRESSED, SPARSE_FILE,
+    // ENCRYPTED, and REPARSE_POINT. Passing only its documented settable bits
+    // leaves those filesystem-managed states unchanged.
+    let mut specific = attributes & WINDOWS_SETTABLE_SPECIFIC_ATTRIBUTES;
+    match preserved_readonly {
+        Some(true) => specific |= WINDOWS_FILE_ATTRIBUTE_READONLY,
+        Some(false) => specific &= !WINDOWS_FILE_ATTRIBUTE_READONLY,
+        None => {}
+    }
+    if specific == 0 {
+        WINDOWS_FILE_ATTRIBUTE_NORMAL
+    } else {
+        specific
+    }
+}
+
+#[cfg(any(windows, test))]
+fn windows_attributes_for_failed_stage_cleanup(attributes: u32) -> u32 {
+    let specific =
+        attributes & (WINDOWS_SETTABLE_SPECIFIC_ATTRIBUTES & !WINDOWS_FILE_ATTRIBUTE_READONLY);
+    if specific == 0 {
+        WINDOWS_FILE_ATTRIBUTE_NORMAL
+    } else {
+        specific
+    }
+}
+
+#[cfg(windows)]
+fn persist_windows_stage(
+    stage: &Path,
+    dst: &Path,
+    replace_existing: bool,
+    preserved_readonly: Option<bool>,
+) -> std::io::Result<()> {
+    use std::iter;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileAttributesW, MoveFileExW, SetFileAttributesW, INVALID_FILE_ATTRIBUTES,
+        MOVEFILE_REPLACE_EXISTING,
+    };
+
+    let stage_w: Vec<u16> = stage
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect();
+    let dst_w: Vec<u16> = dst.as_os_str().encode_wide().chain(iter::once(0)).collect();
+    let original_attributes = unsafe { GetFileAttributesW(stage_w.as_ptr()) };
+    if original_attributes == INVALID_FILE_ATTRIBUTES {
+        return Err(std::io::Error::last_os_error());
+    }
+    let persisted_attributes =
+        windows_attributes_after_persist(original_attributes, preserved_readonly);
+    if unsafe { SetFileAttributesW(stage_w.as_ptr(), persisted_attributes) } == 0 {
+        let error = std::io::Error::last_os_error();
+        let cleanup_attributes = windows_attributes_for_failed_stage_cleanup(original_attributes);
+        let _ = unsafe { SetFileAttributesW(stage_w.as_ptr(), cleanup_attributes) };
+        return Err(error);
+    }
+
+    let flags = if replace_existing {
+        MOVEFILE_REPLACE_EXISTING
+    } else {
+        0
+    };
+    if unsafe { MoveFileExW(stage_w.as_ptr(), dst_w.as_ptr(), flags) } != 0 {
+        return Ok(());
+    }
+
+    let error = std::io::Error::last_os_error();
+    // The stage is private and will be deleted after a failed commit. Make it
+    // writable so Windows cleanup cannot leak a preserved read-only stage.
+    let cleanup_attributes = windows_attributes_for_failed_stage_cleanup(original_attributes);
+    let _ = unsafe { SetFileAttributesW(stage_w.as_ptr(), cleanup_attributes) };
+    Err(error)
+}
+
+struct DestinationWriterLock {
+    _file: StdFile,
+}
+
+impl DestinationWriterLock {
+    async fn acquire(dst: &Path) -> Result<Self, BcmrError> {
+        let dst = dst.to_path_buf();
+        tokio::task::spawn_blocking(move || Self::acquire_sync(&dst)).await?
+    }
+
+    fn acquire_sync(dst: &Path) -> Result<Self, BcmrError> {
+        let file = open_writer_lock_file(dst)?;
+        file.lock()?;
+        Ok(Self { _file: file })
+    }
+
+    #[cfg(test)]
+    fn try_acquire_sync(dst: &Path) -> Result<Option<Self>, BcmrError> {
+        let file = open_writer_lock_file(dst)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { _file: file })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(BcmrError::Io(error)),
+        }
+    }
+}
+
+fn open_writer_lock_file(dst: &Path) -> Result<StdFile, BcmrError> {
+    let parent = destination_parent(dst);
+    let canonical_parent = std::fs::canonicalize(parent)?;
+    let normalized = match dst.file_name() {
+        Some(file_name) => canonical_parent.join(file_name),
+        None => canonical_parent,
+    };
+    let mut hasher = blake3::Hasher::new();
+    hash_path(&mut hasher, &normalized);
+    let key = hasher.finalize().to_hex();
+
+    let lock_dir = writer_lock_dir()?;
+    std::fs::create_dir_all(&lock_dir)?;
+    let lock_dir_metadata = std::fs::symlink_metadata(&lock_dir)?;
+    if lock_dir_metadata.file_type().is_symlink() || !lock_dir_metadata.is_dir() {
+        return Err(BcmrError::InvalidInput(format!(
+            "writer lock path is not a private directory: {}",
+            lock_dir.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if lock_dir_metadata.uid() != unsafe { libc::geteuid() } {
+            return Err(BcmrError::InvalidInput(format!(
+                "writer lock directory is not owned by the current user: {}",
+                lock_dir.display()
+            )));
+        }
+        std::fs::set_permissions(&lock_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let lock_path = lock_dir.join(format!("{}.lock", &key[..32]));
+    if let Ok(metadata) = std::fs::symlink_metadata(&lock_path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(BcmrError::InvalidInput(format!(
+                "writer lock path is not a regular file: {}",
+                lock_path.display()
+            )));
+        }
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(lock_path)?;
+    if !file.metadata()?.is_file() {
+        return Err(BcmrError::InvalidInput(
+            "writer lock handle is not a regular file".into(),
+        ));
+    }
+    Ok(file)
+}
+
+fn writer_lock_dir() -> Result<std::path::PathBuf, BcmrError> {
+    if let Some(data_home) = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
+        return Ok(std::path::PathBuf::from(data_home)
+            .join("bcmr")
+            .join("writer-locks"));
+    }
+    directories::ProjectDirs::from("", "", "bcmr")
+        .map(|directories| directories.data_local_dir().join("writer-locks"))
+        .ok_or_else(|| {
+            BcmrError::InvalidInput(
+                "could not determine a private data directory for writer locks".into(),
+            )
+        })
+}
+
+#[cfg(unix)]
+fn hash_path(hasher: &mut blake3::Hasher, path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    hasher.update(path.as_os_str().as_bytes());
+}
+
+#[cfg(windows)]
+fn hash_path(hasher: &mut blake3::Hasher, path: &Path) {
+    use std::os::windows::ffi::OsStrExt;
+    for code_unit in path.as_os_str().encode_wide() {
+        hasher.update(&code_unit.to_le_bytes());
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn hash_path(hasher: &mut blake3::Hasher, path: &Path) {
+    hasher.update(path.to_string_lossy().as_bytes());
+}
 
 pub(crate) struct AtomicStaging {
     file: Option<StdFile>,
@@ -22,7 +516,22 @@ impl AtomicStaging {
         self.path.as_ref()
     }
 
-    pub(crate) fn commit(self, dst: &Path, replace_existing: bool) -> Result<(), BcmrError> {
+    fn try_clone_file(&self) -> Result<StdFile, BcmrError> {
+        self.file
+            .as_ref()
+            .ok_or_else(|| {
+                BcmrError::InvalidInput("atomic staging lost its retained file handle".into())
+            })?
+            .try_clone()
+            .map_err(BcmrError::Io)
+    }
+
+    pub(crate) fn commit(
+        self,
+        dst: &Path,
+        policy: &CommitPolicy,
+        preserved_readonly: Option<bool>,
+    ) -> Result<(), BcmrError> {
         let AtomicStaging {
             file,
             path,
@@ -31,11 +540,38 @@ impl AtomicStaging {
         // Windows cannot reliably rename a file while arbitrary handles remain
         // open.  Close the retained create-new handle before persisting.
         drop(file);
-        let persisted = if replace_existing {
-            path.persist(dst)
-        } else {
-            path.persist_noclobber(dst)
+        if let CommitPolicy::ReplaceObserved(observed) = policy {
+            if !observed.matches_path(dst)? {
+                return Err(BcmrError::DestinationChanged(dst.to_path_buf()));
+            }
+        }
+        #[cfg(windows)]
+        {
+            let mut path = path;
+            let replace_existing = !matches!(policy, CommitPolicy::NoClobber);
+            match persist_windows_stage(path.as_ref(), dst, replace_existing, preserved_readonly) {
+                Ok(()) => {
+                    path.disable_cleanup(true);
+                    guard.disarm();
+                    return Ok(());
+                }
+                Err(error) => {
+                    drop(path);
+                    if !replace_existing && error.kind() == std::io::ErrorKind::AlreadyExists {
+                        return Err(BcmrError::TargetExists(dst.to_path_buf()));
+                    }
+                    return Err(BcmrError::Io(error));
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = preserved_readonly;
+        #[cfg(not(windows))]
+        let persisted = match policy {
+            CommitPolicy::NoClobber => path.persist_noclobber(dst),
+            CommitPolicy::ReplaceObserved(_) | CommitPolicy::ReplaceAny => path.persist(dst),
         };
+        #[cfg(not(windows))]
         match persisted {
             Ok(()) => {
                 guard.disarm();
@@ -44,7 +580,7 @@ impl AtomicStaging {
             Err(error) => {
                 let is_target_exists = error.error.kind() == std::io::ErrorKind::AlreadyExists;
                 drop(error.path);
-                if !replace_existing && is_target_exists {
+                if matches!(policy, CommitPolicy::NoClobber) && is_target_exists {
                     Err(BcmrError::TargetExists(dst.to_path_buf()))
                 } else {
                     Err(BcmrError::Io(error.error))
@@ -158,7 +694,7 @@ fn reset_copy_file_range_stage_for_fallback(file: &std::fs::File) -> std::io::Re
 }
 
 pub(crate) fn create_staging(dst: &Path) -> Result<AtomicStaging, BcmrError> {
-    let parent = dst.parent().unwrap_or_else(|| Path::new("."));
+    let parent = destination_parent(dst);
     let mut builder = tempfile::Builder::new();
     // Keep this prefix short: a legal 255-byte final name still needs room
     // for tempfile's random suffix on filesystems with NAME_MAX=255.
@@ -178,6 +714,91 @@ pub(crate) fn create_staging(dst: &Path) -> Result<AtomicStaging, BcmrError> {
         path,
         guard,
     })
+}
+
+async fn seed_staging_prefix(
+    dst: &Path,
+    staging: &AtomicStaging,
+    start_offset: u64,
+    observed: Arc<DestinationObservation>,
+) -> Result<(), BcmrError> {
+    let dst = dst.to_path_buf();
+    let mut stage_file = staging.try_clone_file()?;
+    tokio::task::spawn_blocking(move || {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        stage_file.set_len(0)?;
+        stage_file.seek(SeekFrom::Start(0))?;
+        if start_offset == 0 {
+            return Ok(());
+        }
+
+        let mut source = open_destination_for_observation(&dst)?;
+        if !observed.matches_file(&source)? {
+            return Err(BcmrError::DestinationChanged(dst));
+        }
+        source.seek(SeekFrom::Start(0))?;
+
+        let mut remaining = start_offset;
+        let mut buffer = vec![0u8; crate::core::session::COPY_BLOCK_SIZE as usize];
+        while remaining > 0 {
+            let read_limit = remaining.min(buffer.len() as u64) as usize;
+            let read = source.read(&mut buffer[..read_limit])?;
+            if read == 0 {
+                return Err(BcmrError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!("destination prefix ended with {remaining} bytes left to seed"),
+                )));
+            }
+            stage_file.write_all(&buffer[..read])?;
+            remaining -= read as u64;
+        }
+        stage_file.set_len(start_offset)?;
+        if !observed.matches_path(&dst)? {
+            return Err(BcmrError::DestinationChanged(dst));
+        }
+        Ok(())
+    })
+    .await?
+}
+
+#[cfg(feature = "test-support")]
+fn inject_destination_replacement(dst: &Path, bytes: &[u8]) -> Result<(), BcmrError> {
+    use std::io::Write;
+
+    let replacement = create_staging(dst)?;
+    let mut file = replacement.try_clone_file()?;
+    file.write_all(bytes)?;
+    file.sync_data()?;
+    drop(file);
+    replacement.commit(dst, &CommitPolicy::ReplaceAny, None)
+}
+
+#[cfg(all(feature = "test-support", unix))]
+fn inject_destination_fifo(dst: &Path) -> Result<(), BcmrError> {
+    use std::os::unix::ffi::OsStrExt;
+
+    std::fs::remove_file(dst)?;
+    let dst = std::ffi::CString::new(dst.as_os_str().as_bytes()).map_err(|_| {
+        BcmrError::InvalidInput("test destination path contains an interior NUL".into())
+    })?;
+    if unsafe { libc::mkfifo(dst.as_ptr(), 0o600) } != 0 {
+        return Err(BcmrError::Io(std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "test-support", not(unix)))]
+fn inject_destination_fifo(_dst: &Path) -> Result<(), BcmrError> {
+    Err(BcmrError::InvalidInput(
+        "FIFO destination injection is only supported on Unix".into(),
+    ))
+}
+
+#[cfg(feature = "test-support")]
+fn inject_destination_hardlink(dst: &Path) -> Result<(), BcmrError> {
+    std::fs::hard_link(dst, dst.with_extension("bcmr-test-hardlink"))?;
+    Ok(())
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -527,10 +1148,32 @@ where
             | TestMode::TruncateSourceAfterSnapshotSpeedLimit
     );
     #[cfg(feature = "test-support")]
+    let create_destination_before_finalize =
+        matches!(test_mode, TestMode::CreateDestinationBeforeFinalize);
+    #[cfg(feature = "test-support")]
+    let replace_destination_before_finalize =
+        matches!(test_mode, TestMode::ReplaceDestinationBeforeFinalize);
+    #[cfg(feature = "test-support")]
+    let replace_destination_after_resume_resolution =
+        matches!(test_mode, TestMode::ReplaceDestinationAfterResumeResolution);
+    #[cfg(feature = "test-support")]
+    let replace_destination_with_fifo_after_observation = matches!(
+        test_mode,
+        TestMode::ReplaceDestinationWithFifoAfterObservation
+    );
+    #[cfg(feature = "test-support")]
+    let create_destination_hardlink_before_finalize =
+        matches!(test_mode, TestMode::CreateDestinationHardlinkBeforeFinalize);
+    #[cfg(feature = "test-support")]
     let test_mode = match test_mode {
         TestMode::TruncateSourceAfterSnapshot => TestMode::None,
         TestMode::TruncateSourceAfterSnapshotDelay => TestMode::Delay(0),
         TestMode::TruncateSourceAfterSnapshotSpeedLimit => TestMode::SpeedLimit(u64::MAX),
+        TestMode::CreateDestinationBeforeFinalize
+        | TestMode::ReplaceDestinationBeforeFinalize
+        | TestMode::ReplaceDestinationAfterResumeResolution
+        | TestMode::ReplaceDestinationWithFifoAfterObservation
+        | TestMode::CreateDestinationHardlinkBeforeFinalize => TestMode::None,
         other => other,
     };
     let crate::core::remote::TransferOptions {
@@ -558,24 +1201,123 @@ where
 
     let sparse_mode = resolve_sparse_mode(sparse_arg);
 
-    if let Some(parent) = dst.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent).await?;
-        }
+    let parent = destination_parent(dst);
+    if !parent.exists() {
+        fs::create_dir_all(parent).await?;
     }
 
-    let use_atomic = !resume && !append && !strict;
-    let corrupt_before_verify = matches!(test_mode, TestMode::CorruptBeforeFinalize);
-    let write_target;
-    let mut staging = None;
-
-    if use_atomic {
-        let stage = create_staging(dst)?;
-        write_target = stage.path().to_path_buf();
-        staging = Some(stage);
+    let _writer_lock = DestinationWriterLock::acquire(dst).await?;
+    let direct_mode = resume || append || strict;
+    let entry_metadata = destination_entry_metadata(dst)?;
+    let initial_entry = entry_metadata
+        .as_ref()
+        .map(DestinationFingerprint::from_metadata);
+    let force_direct_fresh = if direct_mode {
+        validate_direct_destination(dst, entry_metadata.as_ref(), replace_existing)?
     } else {
-        write_target = dst.to_path_buf();
+        false
+    };
+    let observe_target = direct_mode && entry_metadata.as_ref().is_some_and(|m| m.is_file());
+    let observed_destination = Arc::new(DestinationObservation::capture(dst, observe_target)?);
+    if initial_entry != observed_destination.entry {
+        return Err(BcmrError::DestinationChanged(dst.to_path_buf()));
     }
+    if observe_target && observed_destination.target.is_none() {
+        return Err(BcmrError::DestinationChanged(dst.to_path_buf()));
+    }
+    if direct_mode && !replace_existing && observed_destination.target_has_multiple_links() {
+        return Err(BcmrError::InvalidInput(format!(
+            "direct copy destination '{}' has multiple hard links; use -f to replace only this path",
+            dst.display()
+        )));
+    }
+    let commit_policy = if replace_existing {
+        CommitPolicy::ReplaceAny
+    } else if direct_mode && entry_metadata.is_some() {
+        CommitPolicy::ReplaceObserved(Arc::clone(&observed_destination))
+    } else {
+        CommitPolicy::NoClobber
+    };
+    let corrupt_before_verify = matches!(test_mode, TestMode::CorruptBeforeFinalize);
+    #[cfg(feature = "test-support")]
+    if replace_destination_with_fifo_after_observation {
+        inject_destination_fifo(dst)?;
+    }
+
+    // Defer resume progress publication until the selected source snapshot has
+    // been validated. In particular, size-only append completion must not
+    // report success after the source shrinks.
+    let defer_resume_progress = |_: u64| {};
+    let mut direct_resume_state = if direct_mode {
+        let destination = observed_destination.try_clone_target_file()?;
+        let state = match (force_direct_fresh, destination) {
+            (false, Some(destination)) => {
+                crate::core::resume::resolve_observed_file(
+                    crate::core::resume::ObservedResumeRequest {
+                        src,
+                        dst,
+                        file_size,
+                        resume,
+                        strict,
+                        append,
+                        destination,
+                    },
+                    &defer_resume_progress,
+                )
+                .await?
+            }
+            _ => crate::core::resume::ResumeState {
+                start_offset: 0,
+                already_complete: false,
+                loaded_session: None,
+                truncate_tail: false,
+            },
+        };
+        #[cfg(feature = "test-support")]
+        if replace_destination_after_resume_resolution {
+            inject_destination_replacement(dst, b"post-resolution replacement must survive")?;
+        }
+        revalidate_source_snapshot(src, file_size)?;
+        Some(state)
+    } else {
+        None
+    };
+
+    if direct_resume_state
+        .as_ref()
+        .is_some_and(|state| state.already_complete)
+    {
+        if !observed_destination.matches_path(dst)? {
+            return Err(BcmrError::DestinationChanged(dst.to_path_buf()));
+        }
+        let confirmed_destination = observed_destination
+            .try_clone_target_file()?
+            .ok_or_else(|| BcmrError::DestinationChanged(dst.to_path_buf()))?;
+        let confirmed = crate::core::resume::resolve_observed_file(
+            crate::core::resume::ObservedResumeRequest {
+                src,
+                dst,
+                file_size,
+                resume,
+                strict,
+                append,
+                destination: confirmed_destination,
+            },
+            &defer_resume_progress,
+        )
+        .await?;
+        revalidate_source_snapshot(src, file_size)?;
+        if !confirmed.already_complete || !observed_destination.matches_path(dst)? {
+            return Err(BcmrError::DestinationChanged(dst.to_path_buf()));
+        }
+        (callback.callback)(file_size);
+        crate::core::session::Session::remove(src, dst);
+        return Ok(());
+    }
+
+    let stage = create_staging(dst)?;
+    let write_target = stage.path().to_path_buf();
+    let mut staging = Some(stage);
 
     let reflinked = if let Some(stage) = staging.take() {
         let (stage, reflinked) = try_atomic_reflink(
@@ -601,9 +1343,8 @@ where
             dst,
             src,
             expected_file_size: file_size,
-            use_atomic,
             staging: staging.take(),
-            replace_existing,
+            commit_policy: &commit_policy,
             sync,
             preserve,
             verify,
@@ -614,7 +1355,9 @@ where
     }
 
     #[cfg(target_os = "linux")]
-    if use_atomic && matches!(test_mode, TestMode::None) && matches!(sparse_mode, SparseMode::Never)
+    if !direct_mode
+        && matches!(test_mode, TestMode::None)
+        && matches!(sparse_mode, SparseMode::Never)
     {
         match try_copy_file_range(src, &write_target, file_size, &callback.callback).await {
             Some(Ok(())) => {
@@ -623,9 +1366,8 @@ where
                     dst,
                     src,
                     expected_file_size: file_size,
-                    use_atomic,
                     staging: staging.take(),
-                    replace_existing,
+                    commit_policy: &commit_policy,
                     sync,
                     preserve,
                     verify,
@@ -639,69 +1381,56 @@ where
         }
     }
 
-    // Defer resume progress publication until the selected source snapshot has
-    // been validated. In particular, size-only append completion must not
-    // report success after the source shrinks.
-    let defer_resume_progress = |_: u64| {};
-    let resume_state = crate::core::resume::resolve(
-        src,
-        dst,
-        file_size,
-        resume,
-        strict,
-        append,
-        &defer_resume_progress,
-    )
-    .await?;
-    revalidate_source_snapshot(src, file_size)?;
+    let resume_state = match direct_resume_state.take() {
+        Some(state) => state,
+        None => crate::core::resume::ResumeState {
+            start_offset: 0,
+            already_complete: false,
+            loaded_session: None,
+            truncate_tail: false,
+        },
+    };
 
     if resume_state.already_complete {
-        (callback.callback)(file_size);
-        return Ok(());
+        return Err(BcmrError::InvalidInput(
+            "an already-complete direct copy reached staging unexpectedly".into(),
+        ));
     }
 
     let start_offset = resume_state.start_offset;
+    let _loaded_session = resume_state.loaded_session;
+    let _truncate_tail = resume_state.truncate_tail;
+    seed_staging_prefix(
+        dst,
+        staging
+            .as_ref()
+            .expect("every local transfer owns an atomic stage"),
+        start_offset,
+        Arc::clone(&observed_destination),
+    )
+    .await?;
     if start_offset > 0 {
         (callback.callback)(start_offset);
     }
-    let loaded_session = resume_state.loaded_session;
-    let truncate_tail = resume_state.truncate_tail;
     let expected_remaining = file_size.checked_sub(start_offset).ok_or_else(|| {
         BcmrError::InvalidInput("resume offset exceeds the source size snapshot".into())
     })?;
 
     let mut file_flags = fs::OpenOptions::new();
     file_flags.write(true);
-    if start_offset > 0 {
-        file_flags.create(true);
-    } else {
-        file_flags.create(true).truncate(true);
-    }
 
     let mut src_file = File::open(src).await?;
     let mut dst_file = file_flags.open(&write_target).await?;
-
-    if truncate_tail {
-        dst_file.set_len(start_offset).await?;
-    }
 
     if start_offset > 0 {
         src_file.seek(SeekFrom::Start(start_offset)).await?;
         dst_file.seek(SeekFrom::Start(start_offset)).await?;
     }
 
-    let mut session = super::super::copy_strategies::create_session(
-        src,
-        dst,
-        file_size,
-        start_offset,
-        super::super::copy_strategies::SessionIntent {
-            resume,
-            append,
-            strict,
-        },
-        &loaded_session,
-    );
+    // A final-key session may prove only bytes in the final destination.
+    // Private stage progress cannot safely extend that proof because the stage
+    // is discarded on failure.
+    let mut session: Option<crate::core::session::Session> = None;
 
     let inline_src_hash = match test_mode {
         TestMode::Delay(ms) => {
@@ -766,21 +1495,77 @@ where
             .await?
         }
         #[cfg(feature = "test-support")]
+        TestMode::TruncateSourceAfterStageWrite => {
+            let mut buffer = vec![0u8; crate::core::session::COPY_BLOCK_SIZE as usize];
+            let mut remaining = expected_remaining;
+            let mut injected = false;
+            while remaining > 0 {
+                let read_limit = remaining.min(buffer.len() as u64) as usize;
+                let n = src_file.read(&mut buffer[..read_limit]).await?;
+                if n == 0 {
+                    return Err(BcmrError::Io(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        format!("source ended with {remaining} bytes remaining"),
+                    )));
+                }
+                remaining -= n as u64;
+                dst_file.write_all(&buffer[..n]).await?;
+                (callback.callback)(n as u64);
+
+                if !injected {
+                    let truncate_at = start_offset + n as u64;
+                    let truncated = fs::OpenOptions::new().write(true).open(src).await?;
+                    truncated.set_len(truncate_at).await?;
+                    drop(truncated);
+                    injected = true;
+                }
+            }
+            None
+        }
+        #[cfg(feature = "test-support")]
         TestMode::TruncateSourceAfterSnapshot
         | TestMode::TruncateSourceAfterSnapshotDelay
         | TestMode::TruncateSourceAfterSnapshotSpeedLimit => {
             unreachable!("truncate test modes are normalized before transfer")
         }
+        #[cfg(feature = "test-support")]
+        TestMode::CreateDestinationBeforeFinalize
+        | TestMode::ReplaceDestinationBeforeFinalize
+        | TestMode::ReplaceDestinationAfterResumeResolution
+        | TestMode::ReplaceDestinationWithFifoAfterObservation
+        | TestMode::CreateDestinationHardlinkBeforeFinalize => {
+            unreachable!("destination race modes are normalized before transfer")
+        }
     };
+
+    #[cfg(feature = "test-support")]
+    if create_destination_before_finalize {
+        let mut competitor = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dst)
+            .await?;
+        competitor
+            .write_all(b"racing destination must survive")
+            .await?;
+        competitor.sync_data().await?;
+    }
+    #[cfg(feature = "test-support")]
+    if replace_destination_before_finalize {
+        inject_destination_replacement(dst, b"external replacement must survive")?;
+    }
+    #[cfg(feature = "test-support")]
+    if create_destination_hardlink_before_finalize {
+        inject_destination_hardlink(dst)?;
+    }
 
     let ctx = FinalizeCtx {
         write_target: &write_target,
         dst,
         src,
         expected_file_size: file_size,
-        use_atomic,
         staging: staging.take(),
-        replace_existing,
+        commit_policy: &commit_policy,
         sync,
         preserve,
         verify,
@@ -795,6 +1580,92 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
     use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn windows_persist_policy_preserves_readonly_and_clears_only_temporary() {
+        let hidden = 0x0000_0002;
+        let compressed = 0x0000_0800;
+        let sparse = 0x0000_0200;
+        let encrypted = 0x0000_4000;
+        let reparse_point = 0x0000_0400;
+        assert_eq!(
+            windows_attributes_after_persist(
+                WINDOWS_FILE_ATTRIBUTE_READONLY
+                    | WINDOWS_FILE_ATTRIBUTE_TEMPORARY
+                    | hidden
+                    | compressed
+                    | sparse
+                    | encrypted
+                    | reparse_point,
+                None,
+            ),
+            WINDOWS_FILE_ATTRIBUTE_READONLY | hidden
+        );
+        assert_eq!(
+            windows_attributes_after_persist(WINDOWS_FILE_ATTRIBUTE_TEMPORARY, None),
+            WINDOWS_FILE_ATTRIBUTE_NORMAL
+        );
+        assert_eq!(
+            windows_attributes_after_persist(WINDOWS_FILE_ATTRIBUTE_TEMPORARY | hidden, Some(true),),
+            WINDOWS_FILE_ATTRIBUTE_READONLY | hidden
+        );
+        assert_eq!(
+            windows_attributes_after_persist(
+                WINDOWS_FILE_ATTRIBUTE_READONLY | WINDOWS_FILE_ATTRIBUTE_TEMPORARY | hidden,
+                Some(false),
+            ),
+            hidden
+        );
+        assert_eq!(
+            windows_attributes_for_failed_stage_cleanup(
+                WINDOWS_FILE_ATTRIBUTE_READONLY | WINDOWS_FILE_ATTRIBUTE_TEMPORARY | hidden
+            ),
+            hidden
+        );
+    }
+
+    #[test]
+    fn destination_link_count_is_part_of_the_observation_proof() {
+        assert!(observed_link_count_matches(Some(1), Some(1)));
+        assert!(observed_link_count_matches(None, None));
+        assert!(!observed_link_count_matches(Some(1), Some(2)));
+        assert!(!observed_link_count_matches(Some(1), None));
+    }
+
+    #[test]
+    fn writer_locks_serialize_one_destination_without_blocking_another() {
+        let dir = tempfile::tempdir().unwrap();
+        let first_destination = dir.path().join("first.bin");
+        let other_destination = dir.path().join("other.bin");
+
+        let first = DestinationWriterLock::acquire_sync(&first_destination).unwrap();
+        assert!(
+            DestinationWriterLock::try_acquire_sync(&first_destination)
+                .unwrap()
+                .is_none(),
+            "a second BCMR writer must not acquire the same destination lock"
+        );
+        let other = DestinationWriterLock::try_acquire_sync(&other_destination)
+            .unwrap()
+            .expect("a different destination must have an independent lock");
+        drop(other);
+        drop(first);
+        assert!(
+            DestinationWriterLock::try_acquire_sync(&first_destination)
+                .unwrap()
+                .is_some(),
+            "the persistent lock file must be reusable after the holder closes"
+        );
+
+        if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
+            assert!(
+                writer_lock_dir()
+                    .unwrap()
+                    .starts_with(std::path::PathBuf::from(data_home)),
+                "tests must keep writer-lock artifacts under the external XDG data root"
+            );
+        }
+    }
 
     #[test]
     fn unique_sibling_staging_isolated_from_other_staging_files() {
@@ -891,7 +1762,9 @@ mod tests {
         // before the actual commit syscall.
         let old_bytes = b"racing writer wins";
         std::fs::write(&dst, old_bytes).unwrap();
-        let error = stage.commit(&dst, false).unwrap_err();
+        let error = stage
+            .commit(&dst, &CommitPolicy::NoClobber, None)
+            .unwrap_err();
 
         assert!(matches!(error, BcmrError::TargetExists(path) if path == dst));
         assert_eq!(std::fs::read(&dst).unwrap(), old_bytes);
@@ -1106,7 +1979,9 @@ mod tests {
         assert!(reflinked);
         assert_eq!(stage.path(), stage_path);
         assert_eq!(std::fs::read(stage.path()).unwrap(), b"reflink result");
-        stage.commit(&final_path, true).unwrap();
+        stage
+            .commit(&final_path, &CommitPolicy::ReplaceAny, None)
+            .unwrap();
         assert_eq!(std::fs::read(final_path).unwrap(), b"reflink result");
     }
 

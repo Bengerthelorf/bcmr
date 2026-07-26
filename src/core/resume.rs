@@ -2,7 +2,24 @@ use crate::core::checksum;
 use crate::core::error::BcmrError;
 use crate::core::io as durable_io;
 use crate::core::session::Session;
+use std::fs::File;
 use std::path::Path;
+
+struct DestinationReader(File);
+
+impl DestinationReader {
+    fn len(&self) -> std::io::Result<u64> {
+        Ok(self.0.metadata()?.len())
+    }
+
+    fn calculate_hash(self) -> std::io::Result<String> {
+        checksum::calculate_hash_file(self.0)
+    }
+
+    fn find_verified_resume_offset(self, session: &Session, src: &Path) -> std::io::Result<u64> {
+        session.find_verified_resume_offset_file(src, self.0)
+    }
+}
 
 enum Decision {
     Resume,
@@ -17,48 +34,73 @@ pub struct ResumeState {
     pub truncate_tail: bool,
 }
 
-pub async fn resolve(
-    src: &Path,
-    dst: &Path,
-    file_size: u64,
-    resume: bool,
-    strict: bool,
-    append: bool,
+pub struct ObservedResumeRequest<'a> {
+    pub src: &'a Path,
+    pub dst: &'a Path,
+    pub file_size: u64,
+    pub resume: bool,
+    pub strict: bool,
+    pub append: bool,
+    pub destination: File,
+}
+
+pub async fn resolve_observed_file(
+    request: ObservedResumeRequest<'_>,
     callback: &impl Fn(u64),
 ) -> Result<ResumeState, BcmrError> {
-    if !(resume || append || strict) || !dst.exists() {
-        return Ok(ResumeState {
-            start_offset: 0,
-            already_complete: false,
-            loaded_session: None,
-            truncate_tail: false,
-        });
+    if !(request.resume || request.append || request.strict) {
+        return Ok(fresh_state());
     }
+    resolve_with_reader(request, callback).await
+}
 
+fn fresh_state() -> ResumeState {
+    ResumeState {
+        start_offset: 0,
+        already_complete: false,
+        loaded_session: None,
+        truncate_tail: false,
+    }
+}
+
+async fn resolve_with_reader(
+    request: ObservedResumeRequest<'_>,
+    callback: &impl Fn(u64),
+) -> Result<ResumeState, BcmrError> {
+    let ObservedResumeRequest {
+        src,
+        dst,
+        file_size,
+        resume,
+        strict,
+        append,
+        destination,
+    } = request;
+    let destination = DestinationReader(destination);
     let src_pb = src.to_path_buf();
     let dst_pb = dst.to_path_buf();
-    let (dst_len, mut loaded_session) =
-        tokio::task::spawn_blocking(move || -> Result<(u64, Option<Session>), BcmrError> {
-            let dst_len = dst_pb.metadata()?.len();
+    let (dst_len, destination, mut loaded_session) = tokio::task::spawn_blocking(
+        move || -> Result<(u64, DestinationReader, Option<Session>), BcmrError> {
+            let dst_len = destination.len()?;
             let session = if resume && !strict && !append {
                 load_and_validate_session(&src_pb, &dst_pb, file_size)?
             } else {
                 None
             };
-            Ok((dst_len, session))
-        })
-        .await??;
+            Ok((dst_len, destination, session))
+        },
+    )
+    .await??;
 
     let mut session_proof = None;
     let decision = if strict {
-        resolve_strict(src, dst, file_size, dst_len).await?
+        resolve_strict(src, file_size, dst_len, destination).await?
     } else if append {
         resolve_append(file_size, dst_len)?
     } else if let Some(session) = loaded_session.take() {
         let src_pb = src.to_path_buf();
-        let dst_pb = dst.to_path_buf();
         let (verified, session) = tokio::task::spawn_blocking(move || {
-            let verified = session.find_verified_resume_offset(&src_pb, &dst_pb);
+            let verified = destination.find_verified_resume_offset(&session, &src_pb);
             (verified, session)
         })
         .await?;
@@ -73,7 +115,7 @@ pub async fn resolve(
             Decision::Overwrite
         }
     } else {
-        resolve_without_session(src, dst, file_size, dst_len).await?
+        resolve_without_session(src, file_size, dst_len, destination).await?
     };
 
     match decision {
@@ -141,16 +183,15 @@ fn load_and_validate_session(
 
 async fn resolve_strict(
     src: &Path,
-    dst: &Path,
     file_size: u64,
     dst_len: u64,
+    destination: DestinationReader,
 ) -> Result<Decision, BcmrError> {
     if dst_len == file_size {
         let src_path = src.to_path_buf();
-        let dst_path = dst.to_path_buf();
         let (src_hash, dst_hash) = tokio::join!(
             tokio::task::spawn_blocking(move || checksum::calculate_hash(&src_path)),
-            tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)),
+            tokio::task::spawn_blocking(move || destination.calculate_hash()),
         );
         if src_hash?? == dst_hash?? {
             return Ok(Decision::AlreadyComplete);
@@ -158,10 +199,9 @@ async fn resolve_strict(
         Ok(Decision::Overwrite)
     } else if dst_len < file_size {
         let src_path = src.to_path_buf();
-        let dst_path = dst.to_path_buf();
         let limit = dst_len;
         let (dst_hash, src_partial) = tokio::join!(
-            tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)),
+            tokio::task::spawn_blocking(move || destination.calculate_hash()),
             tokio::task::spawn_blocking(move || checksum::calculate_partial_hash(&src_path, limit)),
         );
         Ok(if dst_hash?? == src_partial?? {
@@ -188,19 +228,18 @@ fn resolve_append(file_size: u64, dst_len: u64) -> Result<Decision, BcmrError> {
 
 async fn resolve_without_session(
     src: &Path,
-    dst: &Path,
     file_size: u64,
     dst_len: u64,
+    destination: DestinationReader,
 ) -> Result<Decision, BcmrError> {
     if dst_len != file_size {
         return Ok(Decision::Overwrite);
     }
 
     let src_path = src.to_path_buf();
-    let dst_path = dst.to_path_buf();
     let (src_hash, dst_hash) = tokio::join!(
         tokio::task::spawn_blocking(move || checksum::calculate_hash(&src_path)),
-        tokio::task::spawn_blocking(move || checksum::calculate_hash(&dst_path)),
+        tokio::task::spawn_blocking(move || destination.calculate_hash()),
     );
     Ok(if src_hash?? == dst_hash?? {
         Decision::AlreadyComplete

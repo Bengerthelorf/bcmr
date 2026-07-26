@@ -36,6 +36,68 @@ fn run_bcmr(args: &[&str]) -> (bool, String, String) {
     )
 }
 
+fn run_bcmr_in(dir: &Path, args: &[&str]) -> (bool, String, String) {
+    let output = Command::new(bcmr_bin())
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .expect("failed to execute bcmr");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
+}
+
+#[cfg(unix)]
+fn run_bcmr_in_with_timeout(
+    dir: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> (bool, String, String, bool) {
+    let mut child = Command::new(bcmr_bin())
+        .current_dir(dir)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to execute bcmr");
+    let deadline = Instant::now() + timeout;
+    let timed_out = loop {
+        if child.try_wait().expect("failed to poll bcmr").is_some() {
+            break false;
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("failed to kill hung bcmr");
+            break true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let output = child
+        .wait_with_output()
+        .expect("failed to collect bcmr output");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+        timed_out,
+    )
+}
+
+#[cfg(unix)]
+fn create_fifo(path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    let result = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+    assert_eq!(
+        result,
+        0,
+        "failed to create fifo: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
 fn create_random_file(path: &Path, size: usize) {
     let mut f = fs::File::create(path).unwrap();
     let mut buf = vec![0u8; 4096];
@@ -697,6 +759,760 @@ fn e2e_active_direct_modes_reject_snapshot_shrink_before_touching_destination() 
         "direct modes touched their destination before rejecting the snapshot: \
          {changed_destinations:?}"
     );
+}
+
+#[test]
+fn e2e_failed_active_modes_preserve_the_old_destination_and_resume_proof() {
+    use std::io::Read;
+
+    let dir = tempfile::tempdir().unwrap();
+    let block_size = bcmr::core::session::COPY_BLOCK_SIZE;
+    let source_size = 3 * block_size;
+    let mut changed_destinations = Vec::new();
+
+    for (mode, force) in ["resume", "strict", "append"]
+        .into_iter()
+        .flat_map(|mode| [(mode, false), (mode, true)])
+    {
+        let case = if force {
+            format!("{mode}-forced")
+        } else {
+            mode.to_string()
+        };
+        let src = dir.path().join(format!("{case}-src.bin"));
+        let dst = dir.path().join(format!("{case}-dst.bin"));
+        create_random_file(&src, source_size as usize);
+        let source_snapshot = fs::read(&src).unwrap();
+        let old_destination = match mode {
+            "resume" => {
+                let mut bytes = source_snapshot[..block_size as usize].to_vec();
+                bytes.extend_from_slice(&vec![0xd1; 64 * 1024]);
+                bytes
+            }
+            "strict" => source_snapshot[..block_size as usize].to_vec(),
+            "append" => vec![0x5a; block_size as usize],
+            _ => unreachable!(),
+        };
+        fs::write(&dst, &old_destination).unwrap();
+
+        let session_before = if mode == "resume" {
+            let src_meta = src.metadata().unwrap();
+            let src_mtime = src_meta
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let src_inode = durable_io::get_inode(&src).unwrap_or(0);
+            let mut first_block = vec![0; block_size as usize];
+            fs::File::open(&src)
+                .unwrap()
+                .read_exact(&mut first_block)
+                .unwrap();
+            let mut session = Session::new(&src, &dst, source_size, src_mtime, src_inode);
+            session.add_block(*blake3::hash(&first_block).as_bytes(), block_size);
+            session.save().unwrap();
+            Some(fs::read(Session::session_path(&src, &dst)).unwrap())
+        } else {
+            assert!(!session_exists(&src, &dst));
+            None
+        };
+
+        let old_hash = blake3::hash(&old_destination);
+        let mode_arg = format!("--{mode}");
+        let mut args = vec!["copy", "-t"];
+        if force {
+            args.extend(["-f", "-y"]);
+        }
+        args.extend([
+            &mode_arg,
+            "--reflink",
+            "disable",
+            "--sparse",
+            "disable",
+            "--test-mode",
+            "truncate_source_after_stage_write",
+            src.to_str().unwrap(),
+            dst.to_str().unwrap(),
+        ]);
+        let (ok, stdout, stderr) = run_bcmr(&args);
+
+        assert!(
+            !ok,
+            "{case} must reject EOF after a successful write; source_len={} destination_len={} \
+             stdout={stdout} stderr={stderr}",
+            src.metadata().unwrap().len(),
+            dst.metadata().unwrap().len()
+        );
+        assert!(
+            stderr.contains("source ended") || stderr.contains("UnexpectedEof"),
+            "{case} reported the wrong error: {stderr}"
+        );
+        let destination_after = fs::read(&dst).unwrap();
+        if destination_after.len() != old_destination.len()
+            || blake3::hash(&destination_after) != old_hash
+        {
+            changed_destinations.push(format!(
+                "{case}: len {} -> {}, hash_changed={}",
+                old_destination.len(),
+                destination_after.len(),
+                blake3::hash(&destination_after) != old_hash
+            ));
+        }
+
+        assert!(
+            stdout.contains("Done: 6.00 MiB"),
+            "{case} must report exactly the proved prefix plus one written suffix chunk: {stdout}"
+        );
+        assert!(
+            !stdout.contains("Done: 12.00 MiB"),
+            "{case} must not publish completed progress after one suffix chunk: {stdout}"
+        );
+
+        if let Some(session_before) = session_before {
+            assert_eq!(
+                fs::read(Session::session_path(&src, &dst)).unwrap(),
+                session_before,
+                "failed staged resume must not publish proof for private stage bytes"
+            );
+            Session::remove(&src, &dst);
+        } else {
+            assert!(
+                !session_exists(&src, &dst),
+                "{case} must not publish a session for private stage bytes"
+            );
+        }
+
+        let stages: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".bcmr.stage.")
+            })
+            .collect();
+        assert!(stages.is_empty(), "{case} leaked stages: {stages:?}");
+    }
+
+    assert!(
+        changed_destinations.is_empty(),
+        "failed direct modes changed old destinations: {changed_destinations:?}"
+    );
+}
+
+#[test]
+fn e2e_active_modes_seed_only_the_selected_prefix_then_commit_atomically() {
+    use std::io::Read;
+
+    let dir = tempfile::tempdir().unwrap();
+    let block_size = bcmr::core::session::COPY_BLOCK_SIZE;
+    let source_size = 3 * block_size + 257;
+
+    for mode in ["resume", "strict", "append"] {
+        let src = dir.path().join(format!("{mode}-positive-src.bin"));
+        let dst = dir.path().join(format!("{mode}-positive-dst.bin"));
+        create_random_file(&src, source_size as usize);
+        let source = fs::read(&src).unwrap();
+
+        let old_destination = match mode {
+            "resume" => {
+                let mut bytes = source[..block_size as usize].to_vec();
+                bytes.extend_from_slice(&vec![0xd1; 64 * 1024]);
+                bytes
+            }
+            "strict" => source[..(block_size / 2) as usize].to_vec(),
+            "append" => vec![0x5a; (block_size / 2) as usize],
+            _ => unreachable!(),
+        };
+        fs::write(&dst, &old_destination).unwrap();
+
+        if mode == "resume" {
+            let src_meta = src.metadata().unwrap();
+            let src_mtime = src_meta
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let src_inode = durable_io::get_inode(&src).unwrap_or(0);
+            let mut first_block = vec![0; block_size as usize];
+            fs::File::open(&src)
+                .unwrap()
+                .read_exact(&mut first_block)
+                .unwrap();
+            let mut session = Session::new(&src, &dst, source_size, src_mtime, src_inode);
+            session.add_block(*blake3::hash(&first_block).as_bytes(), block_size);
+            session.save().unwrap();
+        }
+
+        let expected = if mode == "append" {
+            let mut bytes = old_destination.clone();
+            bytes.extend_from_slice(&source[old_destination.len()..]);
+            bytes
+        } else {
+            source
+        };
+        let mode_arg = format!("--{mode}");
+        let mut args = vec![
+            "copy",
+            "-t",
+            mode_arg.as_str(),
+            "--reflink",
+            "disable",
+            "--sparse",
+            "disable",
+        ];
+        if mode != "append" {
+            args.push("-V");
+        }
+        args.extend([src.to_str().unwrap(), dst.to_str().unwrap()]);
+        let (ok, _stdout, stderr) = run_bcmr(&args);
+
+        assert!(ok, "{mode} staged completion failed: {stderr}");
+        assert_eq!(
+            fs::read(&dst).unwrap(),
+            expected,
+            "{mode} did not preserve exactly its selected prefix semantics"
+        );
+        assert!(
+            !session_exists(&src, &dst),
+            "{mode} successful commit must remove final-key session state"
+        );
+        assert!(
+            fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".bcmr.stage.")),
+            "{mode} successful commit leaked an atomic stage"
+        );
+    }
+}
+
+#[test]
+fn e2e_bare_relative_destinations_work_for_normal_and_direct_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), b"proved-prefix-and-tail").unwrap();
+
+    let (ok, _stdout, stderr) = run_bcmr_in(
+        dir.path(),
+        &[
+            "copy",
+            "-t",
+            "--reflink",
+            "disable",
+            "src.bin",
+            "normal.bin",
+        ],
+    );
+    assert!(ok, "normal relative copy failed: {stderr}");
+    assert_eq!(
+        fs::read(dir.path().join("normal.bin")).unwrap(),
+        b"proved-prefix-and-tail"
+    );
+
+    fs::write(dir.path().join("direct.bin"), b"proved-prefix").unwrap();
+    let (ok, _stdout, stderr) = run_bcmr_in(
+        dir.path(),
+        &[
+            "copy",
+            "-t",
+            "--strict",
+            "--reflink",
+            "disable",
+            "src.bin",
+            "direct.bin",
+        ],
+    );
+    assert!(ok, "direct relative copy failed: {stderr}");
+    assert_eq!(
+        fs::read(dir.path().join("direct.bin")).unwrap(),
+        b"proved-prefix-and-tail"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_forced_normal_copy_replaces_fifo_without_opening_it() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), b"ordinary replacement").unwrap();
+    create_fifo(&dir.path().join("dst"));
+
+    let (ok, _stdout, stderr, timed_out) = run_bcmr_in_with_timeout(
+        dir.path(),
+        &[
+            "copy",
+            "-t",
+            "-f",
+            "-y",
+            "--reflink",
+            "disable",
+            "src.bin",
+            "dst",
+        ],
+        Duration::from_secs(10),
+    );
+
+    assert!(
+        !timed_out,
+        "forced normal copy blocked while opening a FIFO"
+    );
+    assert!(ok, "forced normal copy failed: {stderr}");
+    assert!(dir
+        .path()
+        .join("dst")
+        .symlink_metadata()
+        .unwrap()
+        .file_type()
+        .is_file());
+    assert_eq!(
+        fs::read(dir.path().join("dst")).unwrap(),
+        b"ordinary replacement"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_direct_modes_reject_fifo_without_opening_it_even_when_forced() {
+    use std::os::unix::fs::FileTypeExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), b"source bytes").unwrap();
+
+    for force in [false, true] {
+        let dst_name = if force { "forced-fifo" } else { "fifo" };
+        create_fifo(&dir.path().join(dst_name));
+        let mut args = vec!["copy", "-t", "--strict", "--reflink", "disable"];
+        if force {
+            args.extend(["-f", "-y"]);
+        }
+        args.extend(["src.bin", dst_name]);
+
+        let (ok, _stdout, stderr, timed_out) =
+            run_bcmr_in_with_timeout(dir.path(), &args, Duration::from_secs(10));
+        assert!(!timed_out, "direct mode blocked while opening {dst_name}");
+        assert!(!ok, "direct mode unexpectedly accepted {dst_name}");
+        assert!(
+            stderr.contains("regular file"),
+            "direct special-file refusal was not explicit: {stderr}"
+        );
+        assert!(
+            dir.path()
+                .join(dst_name)
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_fifo(),
+            "direct special-file refusal changed {dst_name}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_unforced_direct_copy_rejects_a_file_symlink_without_changing_it() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let target = dir.path().join("target.bin");
+    let dst = dir.path().join("dst.bin");
+    fs::write(&src, b"proved-prefix-and-tail").unwrap();
+    fs::write(&target, b"proved-prefix").unwrap();
+    symlink("target.bin", &dst).unwrap();
+
+    let (ok, _stdout, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "--strict",
+        "--reflink",
+        "disable",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+
+    assert!(!ok, "unforced direct copy silently replaced the symlink");
+    assert!(
+        stderr.contains("symbolic link"),
+        "symlink refusal was not explicit: {stderr}"
+    );
+    assert!(is_symlink(&dst), "unforced direct copy changed the symlink");
+    assert_eq!(fs::read(&target).unwrap(), b"proved-prefix");
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_forced_direct_copy_replaces_the_symlink_entry() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let target = dir.path().join("target.bin");
+    let dst = dir.path().join("dst.bin");
+    fs::write(&src, b"new bytes").unwrap();
+    fs::write(&target, b"old target bytes").unwrap();
+    symlink("target.bin", &dst).unwrap();
+
+    let (ok, _stdout, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "--strict",
+        "-f",
+        "-y",
+        "--reflink",
+        "disable",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+
+    assert!(ok, "forced direct symlink replacement failed: {stderr}");
+    assert!(
+        !is_symlink(&dst),
+        "forced direct copy preserved the symlink"
+    );
+    assert_eq!(fs::read(&dst).unwrap(), b"new bytes");
+    assert_eq!(fs::read(&target).unwrap(), b"old target bytes");
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_already_complete_direct_copy_needs_no_writable_destination_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let read_only = dir.path().join("read-only");
+    fs::create_dir(&read_only).unwrap();
+    fs::write(read_only.join("src.bin"), b"already complete").unwrap();
+    fs::write(read_only.join("dst.bin"), b"already complete").unwrap();
+    fs::set_permissions(&read_only, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let (_ok, _stdout, _stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "--strict",
+        "--reflink",
+        "disable",
+        read_only.join("src.bin").to_str().unwrap(),
+        read_only.join("dst.bin").to_str().unwrap(),
+    ]);
+
+    fs::set_permissions(&read_only, fs::Permissions::from_mode(0o755)).unwrap();
+    let (ok, _stdout, stderr) = (_ok, _stdout, _stderr);
+    assert!(
+        ok,
+        "already-complete direct copy required a writable parent: {stderr}"
+    );
+    assert_eq!(
+        fs::read(read_only.join("dst.bin")).unwrap(),
+        b"already complete"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_unforced_direct_copy_rejects_a_multi_link_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    let alias = dir.path().join("alias.bin");
+    fs::write(&src, b"shared-prefix-and-tail").unwrap();
+    fs::write(&dst, b"shared-prefix").unwrap();
+    if fs::hard_link(&dst, &alias).is_err() {
+        return;
+    }
+
+    let (ok, _stdout, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "--strict",
+        "--reflink",
+        "disable",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+
+    assert!(!ok, "unforced direct copy silently broke a hard-link set");
+    assert!(
+        stderr.contains("multiple hard links"),
+        "hard-link refusal was not explicit: {stderr}"
+    );
+    assert_eq!(fs::read(&dst).unwrap(), b"shared-prefix");
+    assert_eq!(fs::read(&alias).unwrap(), b"shared-prefix");
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_direct_copy_revalidates_a_hardlink_created_before_commit() {
+    for force in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.bin");
+        let dst = dir.path().join("dst.bin");
+        let alias = dst.with_extension("bcmr-test-hardlink");
+        fs::write(&src, b"new source bytes after atomic staging").unwrap();
+        fs::write(&dst, b"new source bytes").unwrap();
+
+        let src_arg = src.to_str().unwrap();
+        let dst_arg = dst.to_str().unwrap();
+        let mut args = vec!["copy", "-t", "-y"];
+        if force {
+            args.push("-f");
+        }
+        args.extend([
+            "--strict",
+            "--reflink",
+            "disable",
+            "--test-mode",
+            "create_destination_hardlink_before_finalize",
+            src_arg,
+            dst_arg,
+        ]);
+        let (ok, _stdout, stderr) = run_bcmr(&args);
+
+        assert!(
+            alias.exists(),
+            "hard-link injection did not create its alias (force={force}, ok={ok}): {stderr}"
+        );
+        assert_eq!(
+            fs::read(&alias).unwrap(),
+            b"new source bytes",
+            "the injected alias must retain the observed inode"
+        );
+        if force {
+            assert!(ok, "force should replace only the named path: {stderr}");
+            assert_eq!(fs::read(&dst).unwrap(), fs::read(&src).unwrap());
+        } else {
+            assert!(!ok, "noforce must reject a newly shared destination inode");
+            assert!(
+                stderr.contains("changed while the copy was in progress"),
+                "hard-link race should report a typed destination change: {stderr}"
+            );
+            assert_eq!(fs::read(&dst).unwrap(), b"new source bytes");
+        }
+        assert!(!session_exists(&src, &dst));
+        assert!(
+            fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".bcmr.stage.")),
+            "hard-link race leaked its private stage"
+        );
+    }
+}
+
+#[test]
+fn e2e_initially_absent_active_destination_remains_no_clobber_at_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    fs::write(&src, b"new staged bytes").unwrap();
+
+    let (ok, _stdout, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "--resume",
+        "--reflink",
+        "disable",
+        "--test-mode",
+        "create_destination_before_finalize",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+
+    assert!(!ok, "a racing destination creator must win no-clobber");
+    assert!(
+        stderr.contains("already exists"),
+        "commit race should report target existence: {stderr}"
+    );
+    assert_eq!(fs::read(&dst).unwrap(), b"racing destination must survive");
+    assert!(!session_exists(&src, &dst));
+    assert!(
+        fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".bcmr.stage.")),
+        "no-clobber failure leaked its stage"
+    );
+}
+
+#[test]
+fn e2e_observed_active_destination_change_aborts_before_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    fs::write(&src, b"verified-prefix-and-new-tail").unwrap();
+    fs::write(&dst, b"verified-prefix").unwrap();
+
+    let (ok, _stdout, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "--strict",
+        "--reflink",
+        "disable",
+        "--test-mode",
+        "replace_destination_before_finalize",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+
+    assert!(!ok, "an externally changed observed destination must win");
+    assert!(
+        stderr.contains("changed while the copy was in progress"),
+        "observed replacement should report a typed change: {stderr}"
+    );
+    assert_eq!(
+        fs::read(&dst).unwrap(),
+        b"external replacement must survive"
+    );
+    assert!(!session_exists(&src, &dst));
+    assert!(
+        fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".bcmr.stage.")),
+        "observed-change failure leaked its stage"
+    );
+}
+
+#[test]
+fn e2e_preserved_readonly_stage_is_cleaned_after_precommit_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    fs::write(&src, b"verified-prefix-and-new-tail").unwrap();
+    fs::write(&dst, b"verified-prefix").unwrap();
+    let original_source_permissions = fs::metadata(&src).unwrap().permissions();
+    let mut source_permissions = original_source_permissions.clone();
+    source_permissions.set_readonly(true);
+    fs::set_permissions(&src, source_permissions).unwrap();
+
+    let (ok, _stdout, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "--strict",
+        "--preserve",
+        "--reflink",
+        "disable",
+        "--test-mode",
+        "replace_destination_before_finalize",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+
+    assert!(!ok, "an observed precommit change must still abort");
+    assert!(
+        stderr.contains("changed while the copy was in progress"),
+        "precommit change should report a typed destination change: {stderr}"
+    );
+    assert!(
+        fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".bcmr.stage.")),
+        "readonly preserve metadata leaked its private stage"
+    );
+
+    fs::set_permissions(&src, original_source_permissions).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_direct_resolution_never_reopens_a_racing_fifo() {
+    use std::os::unix::fs::FileTypeExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), b"initially complete bytes").unwrap();
+    fs::write(dir.path().join("dst.bin"), b"initially complete bytes").unwrap();
+
+    let (ok, _stdout, stderr, timed_out) = run_bcmr_in_with_timeout(
+        dir.path(),
+        &[
+            "copy",
+            "-t",
+            "--strict",
+            "--reflink",
+            "disable",
+            "--test-mode",
+            "replace_destination_with_fifo_after_observation",
+            "src.bin",
+            "dst.bin",
+        ],
+        Duration::from_secs(10),
+    );
+
+    assert!(
+        !timed_out,
+        "direct resolution reopened and blocked on a FIFO"
+    );
+    assert!(!ok, "a destination swapped to FIFO must fail");
+    assert!(
+        stderr.contains("changed while the copy was in progress"),
+        "FIFO replacement should report a typed destination change: {stderr}"
+    );
+    assert!(
+        dir.path()
+            .join("dst.bin")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_fifo(),
+        "the external FIFO replacement must survive"
+    );
+    assert!(
+        !session_exists(&dir.path().join("src.bin"), &dir.path().join("dst.bin")),
+        "FIFO race failure must not publish a session"
+    );
+}
+
+#[test]
+fn e2e_already_complete_rechecks_destination_proof_before_reporting_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    fs::write(&src, b"initially complete bytes").unwrap();
+    fs::write(&dst, b"initially complete bytes").unwrap();
+
+    let (ok, stdout, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "--strict",
+        "--reflink",
+        "disable",
+        "--test-mode",
+        "replace_destination_after_resume_resolution",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+
+    assert!(!ok, "stale already-complete proof must not report success");
+    assert!(
+        stderr.contains("changed while the copy was in progress"),
+        "already-complete recheck should report a typed change: {stderr}"
+    );
+    assert_eq!(
+        fs::read(&dst).unwrap(),
+        b"post-resolution replacement must survive"
+    );
+    assert!(
+        !stdout.contains("Done: 24 B"),
+        "stale proof must not publish completed progress: {stdout}"
+    );
+    assert!(!session_exists(&src, &dst));
 }
 
 #[cfg(target_os = "linux")]
@@ -1388,7 +2204,7 @@ fn e2e_dry_run_resume_and_strict_use_content_proof() {
 }
 
 #[test]
-fn e2e_dry_run_forced_direct_modes_preview_the_forced_overwrite() {
+fn e2e_dry_run_forced_direct_modes_match_non_destructive_resolution() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.bin");
     let dst = dir.path().join("dst.bin");
@@ -1407,8 +2223,8 @@ fn e2e_dry_run_forced_direct_modes_preview_the_forced_overwrite() {
         ]);
         assert!(ok, "{mode} forced dry-run should succeed: {stderr}");
         assert!(
-            stdout.contains("OVERWRITE"),
-            "{mode} dry-run must preview the existing forced direct-mode semantics: {stdout}"
+            stdout.contains("SKIP"),
+            "{mode} dry-run must match the proof-based real operation: {stdout}"
         );
         assert_eq!(fs::read(&dst).unwrap(), b"identical content");
     }

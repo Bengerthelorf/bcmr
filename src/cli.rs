@@ -509,6 +509,18 @@ pub enum TestMode {
     TruncateSourceAfterSnapshotDelay,
     #[cfg(feature = "test-support")]
     TruncateSourceAfterSnapshotSpeedLimit,
+    #[cfg(feature = "test-support")]
+    TruncateSourceAfterStageWrite,
+    #[cfg(feature = "test-support")]
+    CreateDestinationBeforeFinalize,
+    #[cfg(feature = "test-support")]
+    ReplaceDestinationBeforeFinalize,
+    #[cfg(feature = "test-support")]
+    ReplaceDestinationAfterResumeResolution,
+    #[cfg(feature = "test-support")]
+    ReplaceDestinationWithFifoAfterObservation,
+    #[cfg(feature = "test-support")]
+    CreateDestinationHardlinkBeforeFinalize,
     None,
 }
 
@@ -819,6 +831,24 @@ fn parse_test_mode(s: &str) -> Result<TestMode, String> {
         }
         "truncate_source_after_snapshot_speed_limit" => {
             return Ok(TestMode::TruncateSourceAfterSnapshotSpeedLimit);
+        }
+        "truncate_source_after_stage_write" => {
+            return Ok(TestMode::TruncateSourceAfterStageWrite);
+        }
+        "create_destination_before_finalize" => {
+            return Ok(TestMode::CreateDestinationBeforeFinalize);
+        }
+        "replace_destination_before_finalize" => {
+            return Ok(TestMode::ReplaceDestinationBeforeFinalize);
+        }
+        "replace_destination_after_resume_resolution" => {
+            return Ok(TestMode::ReplaceDestinationAfterResumeResolution);
+        }
+        "replace_destination_with_fifo_after_observation" => {
+            return Ok(TestMode::ReplaceDestinationWithFifoAfterObservation);
+        }
+        "create_destination_hardlink_before_finalize" => {
+            return Ok(TestMode::CreateDestinationHardlinkBeforeFinalize);
         }
         _ => {}
     }

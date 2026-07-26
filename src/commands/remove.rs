@@ -174,7 +174,13 @@ async fn report_progress(size: u64, test_mode: &TestMode, callback: &(impl Fn(u6
         #[cfg(feature = "test-support")]
         TestMode::TruncateSourceAfterSnapshot
         | TestMode::TruncateSourceAfterSnapshotDelay
-        | TestMode::TruncateSourceAfterSnapshotSpeedLimit => {
+        | TestMode::TruncateSourceAfterSnapshotSpeedLimit
+        | TestMode::TruncateSourceAfterStageWrite
+        | TestMode::CreateDestinationBeforeFinalize
+        | TestMode::ReplaceDestinationBeforeFinalize
+        | TestMode::ReplaceDestinationAfterResumeResolution
+        | TestMode::ReplaceDestinationWithFifoAfterObservation
+        | TestMode::CreateDestinationHardlinkBeforeFinalize => {
             callback(size);
         }
     }
