@@ -33,6 +33,19 @@ pub fn new_job_id() -> String {
     format!("{:x}{:x}", ts & 0xFFFF_FFFF, pid & 0xFFFF)
 }
 
+pub fn validate_job_id(job_id: &str) -> Result<(), String> {
+    if job_id.is_empty()
+        || !job_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(
+            "invalid job ID; use only ASCII letters, digits, hyphens, and underscores".to_string(),
+        );
+    }
+    Ok(())
+}
+
 pub fn jobs_dir() -> PathBuf {
     if let Some(custom) = std::env::var_os("BCMR_JOBS_DIR") {
         return PathBuf::from(custom);
@@ -43,8 +56,14 @@ pub fn jobs_dir() -> PathBuf {
     base.join("bcmr").join("jobs")
 }
 
-pub fn log_path(job_id: &str) -> PathBuf {
-    jobs_dir().join(format!("{}.jsonl", job_id))
+pub fn log_path(job_id: &str) -> std::io::Result<PathBuf> {
+    log_path_in(&jobs_dir(), job_id)
+}
+
+fn log_path_in(dir: &std::path::Path, job_id: &str) -> std::io::Result<PathBuf> {
+    validate_job_id(job_id)
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
+    Ok(dir.join(format!("{}.jsonl", job_id)))
 }
 
 pub fn ensure_jobs_dir() -> std::io::Result<()> {
@@ -99,7 +118,7 @@ pub fn classify_job(latest_line: &str, pid_alive: bool) -> JobState {
 }
 
 pub fn job_state(job_id: &str) -> Result<(JobState, String), String> {
-    let path = log_path(job_id);
+    let path = log_path(job_id).map_err(|e| e.to_string())?;
     if !path.exists() {
         return Err(format!("job '{}' not found", job_id));
     }
@@ -196,7 +215,7 @@ pub fn remove_all_jobs() -> usize {
 }
 
 fn remove_job_in(dir: &std::path::Path, job_id: &str) -> std::io::Result<bool> {
-    let path = dir.join(format!("{}.jsonl", job_id));
+    let path = log_path_in(dir, job_id)?;
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -278,6 +297,14 @@ pub fn cleanup_old_jobs(max_age_secs: u64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn jobs_dir_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
 
     #[test]
     fn test_remove_job_in_deletes_existing_log() {
@@ -291,6 +318,46 @@ mod tests {
     fn test_remove_job_in_returns_false_for_missing() {
         let dir = tempfile::tempdir().unwrap();
         assert!(!remove_job_in(dir.path(), "nope").unwrap());
+    }
+
+    #[test]
+    fn job_apis_reject_unsafe_ids_without_touching_logs_outside_jobs_dir() {
+        let _guard = jobs_dir_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let jobs = root.path().join("jobs");
+        std::fs::create_dir(&jobs).unwrap();
+        let outside = root.path().join("outside.jsonl");
+        std::fs::write(
+            &outside,
+            "{\"pid\":999999}\n{\"type\":\"result\",\"status\":\"success\"}\n",
+        )
+        .unwrap();
+
+        let previous = std::env::var_os("BCMR_JOBS_DIR");
+        std::env::set_var("BCMR_JOBS_DIR", &jobs);
+        let results: Vec<_> = [
+            "",
+            "/absolute",
+            "has/slash",
+            "has\\backslash",
+            ".",
+            "..",
+            "../outside",
+            "\0",
+        ]
+        .into_iter()
+        .map(|id| (id, job_state(id), remove_job(id)))
+        .collect();
+        match previous {
+            Some(value) => std::env::set_var("BCMR_JOBS_DIR", value),
+            None => std::env::remove_var("BCMR_JOBS_DIR"),
+        }
+
+        for (id, state, removed) in results {
+            assert!(state.is_err(), "unsafe ID must not read a log: {id:?}");
+            assert!(removed.is_err(), "unsafe ID must not remove a log: {id:?}");
+        }
+        assert!(outside.exists(), "outside log must remain untouched");
     }
 
     #[test]

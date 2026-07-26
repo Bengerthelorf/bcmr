@@ -137,7 +137,7 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "NAME")]
     pub profile: Option<String>,
 
-    #[arg(long = "_bg", hide = true)]
+    #[arg(long = "_bg", hide = true, value_parser = parse_job_id)]
     pub _bg: Option<String>,
 }
 
@@ -244,7 +244,7 @@ pub struct CopyMoveArgs {
     pub sync: bool,
 
     /// Parallel local file copies (default: CPU count, capped at 8)
-    #[arg(short = 'j', long = "jobs")]
+    #[arg(short = 'j', long = "jobs", value_parser = parse_positive_usize)]
     pub jobs: Option<usize>,
 
     /// Wire compression: auto, zstd, lz4, none
@@ -309,7 +309,7 @@ pub enum Commands {
         sparse: Option<String>,
 
         /// Number of parallel connections (default from scp.parallel_transfers)
-        #[arg(short = 'P', long)]
+        #[arg(short = 'P', long, value_parser = parse_positive_usize)]
         parallel: Option<usize>,
     },
 
@@ -323,6 +323,7 @@ pub enum Commands {
     /// Show status of background jobs
     Status {
         /// Job ID to query (omit to list all jobs)
+        #[arg(value_parser = parse_job_id)]
         job_id: Option<String>,
 
         /// Remove the named job's log file (use --all to drop every job)
@@ -813,9 +814,79 @@ fn parse_test_mode(s: &str) -> Result<TestMode, String> {
     }
 }
 
+fn parse_positive_usize(s: &str) -> Result<usize, String> {
+    let value = s
+        .parse::<usize>()
+        .map_err(|_| format!("expected a positive integer, got '{s}'"))?;
+    if value == 0 {
+        return Err("must be greater than zero".to_string());
+    }
+    Ok(value)
+}
+
+fn parse_job_id(s: &str) -> Result<String, String> {
+    crate::commands::jobs::validate_job_id(s)?;
+    Ok(s.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_parallel_counts_reject_zero_during_clap_parsing() {
+        for args in [
+            ["bcmr", "copy", "-j0", "src", "dst"].as_slice(),
+            ["bcmr", "copy", "--jobs=0", "src", "dst"].as_slice(),
+            ["bcmr", "copy", "-P0", "src", "host:dst"].as_slice(),
+            ["bcmr", "copy", "--parallel=0", "src", "host:dst"].as_slice(),
+        ] {
+            assert!(
+                Cli::try_parse_from(args).is_err(),
+                "zero concurrency must be rejected by Clap: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn copy_parallel_counts_accept_positive_values() {
+        for args in [
+            ["bcmr", "copy", "-j1", "src", "dst"].as_slice(),
+            ["bcmr", "copy", "--jobs=2", "src", "dst"].as_slice(),
+            ["bcmr", "copy", "-P1", "src", "host:dst"].as_slice(),
+            ["bcmr", "copy", "--parallel=2", "src", "host:dst"].as_slice(),
+        ] {
+            assert!(
+                Cli::try_parse_from(args).is_ok(),
+                "positive concurrency must parse: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn status_and_background_job_ids_reject_unsafe_values_during_clap_parsing() {
+        for id in [
+            "",
+            "/absolute",
+            "has/slash",
+            "has\\backslash",
+            ".",
+            "..",
+            "\0",
+        ] {
+            assert!(
+                Cli::try_parse_from(["bcmr", "status", id]).is_err(),
+                "status must reject unsafe job ID: {id:?}"
+            );
+            assert!(
+                Cli::try_parse_from(["bcmr", "--_bg", id, "--json", "copy", "src", "dst"]).is_err(),
+                "background worker must reject unsafe job ID: {id:?}"
+            );
+        }
+
+        let generated = crate::commands::jobs::new_job_id();
+        assert!(Cli::try_parse_from(["bcmr", "status", &generated]).is_ok());
+    }
 
     fn argv(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()

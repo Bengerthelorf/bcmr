@@ -334,7 +334,18 @@ impl Config {
             }
         }
 
-        s.build()?.try_deserialize()
+        let config: Self = s.build()?.try_deserialize()?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.scp.parallel_transfers == 0 {
+            return Err(ConfigError::Message(
+                "scp.parallel_transfers must be greater than zero".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -360,6 +371,17 @@ mod tests {
     fn test_config_new_loads_defaults() {
         let cfg = Config::new().unwrap();
         assert!(!cfg.progress.style.is_empty());
+    }
+
+    #[test]
+    fn test_config_validation_rejects_zero_parallel_transfers() {
+        let mut config = Config::default();
+        config.scp.parallel_transfers = 0;
+
+        assert!(
+            config.validate().is_err(),
+            "zero configured parallel transfers must fail validation"
+        );
     }
 
     #[test]

@@ -31,14 +31,14 @@ fn maybe_detach(cli: &cli::Cli) -> Result<bool> {
     }
 
     if let Some(ref job_id) = cli._bg {
-        let log_path = commands::jobs::log_path(job_id);
+        let log_path = commands::jobs::log_path(job_id)?;
         config::set_log_file(log_path);
         return Ok(false);
     }
 
     commands::jobs::ensure_jobs_dir()?;
     let job_id = commands::jobs::new_job_id();
-    let log_path = commands::jobs::log_path(&job_id);
+    let log_path = commands::jobs::log_path(&job_id)?;
 
     let exe = std::env::current_exe()?;
     let original_args: Vec<String> = std::env::args().skip(1).collect();

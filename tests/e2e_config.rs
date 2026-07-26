@@ -46,3 +46,29 @@ fn config_absent_file_loads_defaults_without_failing() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn explicit_config_rejects_zero_parallel_transfers_before_copy_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("zero-parallel.toml");
+    std::fs::write(&config, "[scp]\nparallel_transfers = 0\n").unwrap();
+
+    let output = std::process::Command::new(common::bcmr_bin())
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "copy",
+            "src",
+            "host:dst",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "zero parallel config must fail");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("parallel_transfers"),
+        "error must identify invalid concurrency: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

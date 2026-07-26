@@ -147,7 +147,7 @@ pub(crate) fn handle_status_command(job_id: &Option<String>, rm: bool, all: bool
 }
 
 pub(crate) async fn watch_job(job_id: &str) -> Result<()> {
-    let log = commands::jobs::log_path(job_id);
+    let log = commands::jobs::log_path(job_id)?;
 
     let deadline = Instant::now() + STARTUP_GRACE;
     while !log.exists() && Instant::now() < deadline {
