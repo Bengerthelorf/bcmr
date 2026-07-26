@@ -1,9 +1,10 @@
 use super::{
-    ListEntry, Message, TYPE_AUTH_CHALLENGE, TYPE_AUTH_HELLO, TYPE_DATA, TYPE_DATA_COMPRESSED,
-    TYPE_DIRECT_READY, TYPE_DONE, TYPE_ERROR, TYPE_GET, TYPE_GET_CHUNKED, TYPE_HASH,
-    TYPE_HASH_RESPONSE, TYPE_HAVE_BLOCKS, TYPE_HELLO, TYPE_LIST, TYPE_LIST_RESPONSE,
-    TYPE_MISSING_BLOCKS, TYPE_MKDIR, TYPE_OK, TYPE_OPEN_DIRECT, TYPE_PUT, TYPE_PUT_CHUNKED,
-    TYPE_RESUME, TYPE_RESUME_RESPONSE, TYPE_STAT, TYPE_STAT_RESPONSE, TYPE_TRUNCATE, TYPE_WELCOME,
+    compressed_block_size, validate_content_block_size, ListEntry, Message, TYPE_AUTH_CHALLENGE,
+    TYPE_AUTH_HELLO, TYPE_DATA, TYPE_DATA_COMPRESSED, TYPE_DIRECT_READY, TYPE_DONE, TYPE_ERROR,
+    TYPE_GET, TYPE_GET_CHUNKED, TYPE_HASH, TYPE_HASH_RESPONSE, TYPE_HAVE_BLOCKS, TYPE_HELLO,
+    TYPE_LIST, TYPE_LIST_RESPONSE, TYPE_MISSING_BLOCKS, TYPE_MKDIR, TYPE_OK, TYPE_OPEN_DIRECT,
+    TYPE_PUT, TYPE_PUT_CHUNKED, TYPE_RESUME, TYPE_RESUME_RESPONSE, TYPE_STAT, TYPE_STAT_RESPONSE,
+    TYPE_TRUNCATE, TYPE_WELCOME,
 };
 
 // Caps Vec preallocation on peer-supplied u32 counts; prevents OOM DoS.
@@ -277,6 +278,14 @@ impl<'a> Cursor<'a> {
         Some(bytes.to_vec())
     }
 
+    fn read_content_block(&mut self) -> Option<Vec<u8>> {
+        let len = self.read_u32_le()? as usize;
+        validate_content_block_size(len).ok()?;
+        let bytes = self.data.get(self.pos..self.pos + len)?;
+        self.pos += len;
+        Some(bytes.to_vec())
+    }
+
     fn read_fixed<const N: usize>(&mut self) -> Option<[u8; N]> {
         let slice = self.data.get(self.pos..self.pos + N)?;
         self.pos += N;
@@ -372,13 +381,18 @@ pub fn decode_message(data: &[u8]) -> Option<Message> {
             message: p.read_string()?,
         },
         TYPE_DATA => Message::Data {
-            payload: p.read_bytes()?,
+            payload: p.read_content_block()?,
         },
-        TYPE_DATA_COMPRESSED => Message::DataCompressed {
-            algo: p.read_u8()?,
-            original_size: p.read_u32_le()?,
-            payload: p.read_bytes()?,
-        },
+        TYPE_DATA_COMPRESSED => {
+            let algo = p.read_u8()?;
+            let original_size = p.read_u32_le()?;
+            compressed_block_size(algo, original_size).ok()?;
+            Message::DataCompressed {
+                algo,
+                original_size,
+                payload: p.read_bytes()?,
+            }
+        }
         TYPE_HAVE_BLOCKS => {
             let block_size = p.read_u32_le()?;
             let count = p.read_u32_le()? as usize;

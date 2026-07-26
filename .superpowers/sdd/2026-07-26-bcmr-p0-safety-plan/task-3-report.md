@@ -46,3 +46,56 @@ XDG-cache/data/config, and BCMR CAS locations.
 - The pre-existing 16 MiB frame limit still bounds wire-frame allocation before
   protocol parsing. This task adds the stricter 4 MiB bound specifically before
   decompressor allocation/window use. No remaining Task 3 concern identified.
+
+## Review Follow-up (2026-07-26)
+
+### Additional implementation
+
+- Moved the 4 MiB content-block maximum and validation into `protocol`, so
+  plain framing, codec parsing, compression, and AEAD share one boundary.
+- Plain `read_message` now reads the type and the raw `Data` inner length first;
+  it rejects an empty frame, malformed raw header, oversized raw length, or a
+  mismatched outer/inner length before allocating the raw payload. Raw `Data`
+  is returned directly rather than being re-framed and cloned.
+- Codec parsing independently validates raw content length and compressed
+  algorithm/decompressed size before cloning data. Thus AEAD may retain its
+  authenticated, type-oblivious 16 MiB ciphertext cap, but post-auth decoding
+  cannot clone an oversized raw `Data` Vec. AEAD output validates data messages
+  before encryption as well.
+- `encode_block` is now fallible, rejects blocks above 4 MiB before compression,
+  and uses `u32::try_from` for the protocol declaration. All six producers now
+  propagate that result.
+- Added a shared checked transfer-total helper and migrated the reviewed
+  server/client/pipelined accounting and write paths, eliminating unchecked
+  `written + incoming` / `received + incoming` arithmetic.
+
+### Follow-up TDD evidence
+
+- RED 1: focused protocol test initially failed because
+  `protocol::checked_transfer_total` did not exist.
+- RED 2: a 9-byte plain raw-frame header declaring 4 MiB + 1 returned
+  `UnexpectedEof` instead of `InvalidData`, proving the old reader tried to
+  read the declared payload before rejection.
+- RED 3: an empty declared frame returned `UnexpectedEof` instead of
+  `InvalidData`, proving it read a type byte before checking the outer length.
+- GREEN: raw wire, empty-frame, exact-boundary/overflow accounting, encoder
+  bounds, zero/unknown algorithms, and AEAD outbound-bound regressions passed.
+
+### Follow-up verification
+
+- `cargo fmt --all -- --check` passed.
+- `git diff --check` passed.
+- Protocol 42/42, property codec 4/4, basic serve 22/22, and pipelined serve
+  8/8 passed.
+- `cargo test --all --locked --features test-support --quiet` passed after the
+  follow-up (98 library tests, 212 binary tests, and all integration groups).
+
+### Follow-up self-review
+
+- `rg` confirms every `encode_block` producer now handles its `Result`; no
+  reviewed aggregate `written + incoming` or `received + incoming` expression
+  remains.
+- Encrypted records necessarily allocate ciphertext up to the existing 16 MiB
+  record cap before authentication reveals their type. The shared codec check
+  prevents a second oversized raw payload clone after authentication; this is
+  the deliberate finite authenticated-frame strategy requested by review.

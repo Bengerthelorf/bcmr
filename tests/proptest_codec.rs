@@ -1,4 +1,6 @@
-use bcmr::core::protocol::{decode_message, encode_message, ListEntry, Message, PROTOCOL_VERSION};
+use bcmr::core::protocol::{
+    decode_message, encode_message, ListEntry, Message, MAX_CONTENT_BLOCK_SIZE, PROTOCOL_VERSION,
+};
 use proptest::prelude::*;
 
 fn arb_string() -> impl Strategy<Value = String> {
@@ -67,8 +69,8 @@ fn arb_message() -> impl Strategy<Value = Message> {
         arb_string().prop_map(|message| Message::Error { message }),
         prop::collection::vec(any::<u8>(), 0..256).prop_map(|payload| Message::Data { payload }),
         (
-            any::<u8>(),
-            any::<u32>(),
+            prop_oneof![Just(1u8), Just(2u8)],
+            1u32..=MAX_CONTENT_BLOCK_SIZE as u32,
             prop::collection::vec(any::<u8>(), 0..256)
         )
             .prop_map(|(algo, original_size, payload)| Message::DataCompressed {

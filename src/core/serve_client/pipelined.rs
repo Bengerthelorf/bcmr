@@ -199,20 +199,25 @@ impl ServeClient {
                             }
                         };
                         let n_bytes = decoded.len() as u64;
-                        if received + n_bytes > ft.size {
-                            recv_err = Some(BcmrError::InvalidInput(format!(
-                                "server sent {} bytes past declared size {} for {}",
-                                received + n_bytes - ft.size,
-                                ft.size,
-                                ft.local.display()
-                            )));
-                            break 'files_loop;
-                        }
+                        let next_received = match crate::core::protocol::checked_transfer_total(
+                            received,
+                            decoded.len(),
+                            ft.size,
+                        ) {
+                            Ok(total) => total,
+                            Err(e) => {
+                                recv_err = Some(BcmrError::InvalidInput(format!(
+                                    "server data exceeds declared size for {}: {e}",
+                                    ft.local.display(),
+                                )));
+                                break 'files_loop;
+                            }
+                        };
                         if let Err(e) = dst.write_all(&decoded) {
                             recv_err = Some(BcmrError::InvalidInput(format!("write dst: {e}")));
                             break 'files_loop;
                         }
-                        received += n_bytes;
+                        received = next_received;
                         on_chunk(n_bytes);
                     }
                     Ok(Message::Ok { .. }) => {

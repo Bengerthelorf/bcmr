@@ -1,12 +1,16 @@
 use std::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::{decode_message, encode_message, Message};
+use super::{
+    decode_message, encode_message, validate_content_block_size, validate_data_message, Message,
+    TYPE_DATA,
+};
 
 pub async fn write_message<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     msg: &Message,
 ) -> io::Result<()> {
+    validate_data_message(msg)?;
     // DirectChannelReady carries a session key; Zeroizing scrubs the heap.
     if matches!(msg, Message::DirectChannelReady { .. }) {
         let frame = zeroize::Zeroizing::new(encode_message(msg));
@@ -37,9 +41,40 @@ pub async fn read_message<R: AsyncReadExt + Unpin>(reader: &mut R) -> io::Result
             ),
         ));
     }
+    if payload_len == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "empty protocol frame",
+        ));
+    }
+
+    let mut msg_type = [0u8; 1];
+    reader.read_exact(&mut msg_type).await?;
+    if msg_type[0] == TYPE_DATA {
+        if payload_len < 5 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Data frame is shorter than its inner length header",
+            ));
+        }
+        let mut data_len_buf = [0u8; 4];
+        reader.read_exact(&mut data_len_buf).await?;
+        let data_len = u32::from_le_bytes(data_len_buf) as usize;
+        validate_content_block_size(data_len)?;
+        if payload_len != 5 + data_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Data frame length does not match its inner payload length",
+            ));
+        }
+        let mut data = vec![0u8; data_len];
+        reader.read_exact(&mut data).await?;
+        return Ok(Some(Message::Data { payload: data }));
+    }
 
     let mut payload = vec![0u8; payload_len];
-    reader.read_exact(&mut payload).await?;
+    payload[0] = msg_type[0];
+    reader.read_exact(&mut payload[1..]).await?;
 
     let mut frame = Vec::with_capacity(4 + payload_len);
     frame.extend_from_slice(&len_buf);

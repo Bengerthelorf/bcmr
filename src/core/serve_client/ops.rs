@@ -202,7 +202,7 @@ impl ServeClient {
                     "local source truncated: expected {length} bytes from offset {local_offset}"
                 )));
             }
-            let frame = compress::encode_block(algo, buf[..n].to_vec());
+            let frame = compress::encode_block(algo, buf[..n].to_vec())?;
             tx.write_message(w, &frame).await?;
             remaining -= n as u64;
         }
@@ -246,15 +246,13 @@ impl ServeClient {
             match self.recv().await? {
                 message @ (Message::Data { .. } | Message::DataCompressed { .. }) => {
                     let decoded = compress::decode_data_block(message)?;
-                    if written + decoded.len() as u64 > length {
-                        return Err(BcmrError::InvalidInput(format!(
-                            "get_chunked: server sent {} bytes past the requested {}",
-                            written + decoded.len() as u64 - length,
-                            length
-                        )));
-                    }
+                    let next_written = crate::core::protocol::checked_transfer_total(
+                        written,
+                        decoded.len(),
+                        length,
+                    )?;
                     dst.write_all(&decoded).await?;
-                    written += decoded.len() as u64;
+                    written = next_written;
                 }
                 Message::Ok { .. } => {
                     if written != length {
@@ -306,7 +304,7 @@ impl ServeClient {
                 break;
             }
             if (bits.get(idx / 8).copied().unwrap_or(0) >> (idx % 8)) & 1 == 1 {
-                let frame = compress::encode_block(self.algo, buf[..filled].to_vec());
+                let frame = compress::encode_block(self.algo, buf[..filled].to_vec())?;
                 self.send(&frame).await?;
             }
         }

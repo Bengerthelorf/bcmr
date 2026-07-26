@@ -1,7 +1,11 @@
 use bcmr::core::{
-    compress::{decode_data_block, MAX_CONTENT_BLOCK_SIZE},
-    protocol::{decode_message, encode_message, ListEntry, Message, PROTOCOL_VERSION},
+    compress::decode_data_block,
+    protocol::{
+        checked_transfer_total, decode_message, encode_message, read_message, ListEntry, Message,
+        MAX_CONTENT_BLOCK_SIZE, PROTOCOL_VERSION,
+    },
 };
+use tokio::io::AsyncWriteExt;
 
 fn roundtrip(msg: Message) -> Message {
     let encoded = encode_message(&msg);
@@ -66,8 +70,7 @@ fn data_block_rejects_hostile_declared_original_size_before_decompression() {
     });
     assert!(frame.len() < 64, "the hostile frame must stay tiny");
 
-    let message = decode_message(&frame).expect("the tiny protocol frame is well-formed");
-    assert!(decode_data_block(message).is_err());
+    assert!(decode_message(&frame).is_none());
 }
 
 #[test]
@@ -88,6 +91,43 @@ fn data_block_rejects_data_compressed_with_algo_none() {
     };
 
     assert!(decode_data_block(message).is_err());
+}
+
+#[tokio::test]
+async fn plain_wire_rejects_oversized_raw_data_before_reading_its_payload() {
+    let (mut writer, mut reader) = tokio::io::duplex(64);
+    let raw_len = (MAX_CONTENT_BLOCK_SIZE + 1) as u32;
+    let frame_len = 1 + 4 + raw_len;
+    writer.write_all(&frame_len.to_le_bytes()).await.unwrap();
+    writer.write_all(&[0x84]).await.unwrap();
+    writer.write_all(&raw_len.to_le_bytes()).await.unwrap();
+    writer.shutdown().await.unwrap();
+
+    let err = read_message(&mut reader).await.unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[tokio::test]
+async fn plain_wire_rejects_an_empty_declared_frame_before_reading_a_type_byte() {
+    let (mut writer, mut reader) = tokio::io::duplex(64);
+    writer.write_all(&0u32.to_le_bytes()).await.unwrap();
+    writer.shutdown().await.unwrap();
+
+    let err = read_message(&mut reader).await.unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn transfer_accounting_accepts_the_exact_declared_boundary() {
+    assert_eq!(
+        checked_transfer_total(u64::MAX - 1, 1, u64::MAX).unwrap(),
+        u64::MAX
+    );
+}
+
+#[test]
+fn transfer_accounting_rejects_overflow_without_wrapping() {
+    assert!(checked_transfer_total(u64::MAX, 1, u64::MAX).is_err());
 }
 
 #[test]

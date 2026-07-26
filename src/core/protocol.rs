@@ -11,6 +11,36 @@ pub use io::{read_message, write_message};
 
 pub const PROTOCOL_VERSION: u8 = 1;
 
+/// Maximum uncompressed content block carried by a Data message.
+pub const MAX_CONTENT_BLOCK_SIZE: usize = 4 * 1024 * 1024;
+
+/// Advances received-byte accounting without permitting an overflow or an
+/// amount beyond the peer-declared transfer length.
+pub fn checked_transfer_total(
+    written: u64,
+    incoming: usize,
+    declared: u64,
+) -> std::io::Result<u64> {
+    let incoming = u64::try_from(incoming).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "incoming block length does not fit u64",
+        )
+    })?;
+    if written > declared || incoming > declared.saturating_sub(written) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "content block would write past the declared size",
+        ));
+    }
+    written.checked_add(incoming).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "received-byte accounting overflow",
+        )
+    })
+}
+
 pub(super) const TYPE_HELLO: u8 = 0x01;
 pub(super) const TYPE_LIST: u8 = 0x02;
 pub(super) const TYPE_STAT: u8 = 0x03;
@@ -91,6 +121,48 @@ impl CompressionAlgo {
             CompressionAlgo::None
         }
     }
+}
+
+pub fn validate_content_block_size(size: usize) -> std::io::Result<()> {
+    if size > MAX_CONTENT_BLOCK_SIZE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("content block size {size} exceeds protocol maximum {MAX_CONTENT_BLOCK_SIZE}"),
+        ));
+    }
+    Ok(())
+}
+
+pub fn compressed_block_size(algo: u8, original_size: u32) -> std::io::Result<usize> {
+    match algo {
+        1 | 2 => {}
+        0 => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "DataCompressed frame with algo=None",
+            ))
+        }
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("DataCompressed frame with unknown algorithm {algo}"),
+            ))
+        }
+    }
+    let size = usize::try_from(original_size).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "declared decompressed size does not fit usize",
+        )
+    })?;
+    validate_content_block_size(size)?;
+    if size == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "DataCompressed frame declares an empty block",
+        ));
+    }
+    Ok(size)
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -201,4 +273,16 @@ pub enum Message {
     AuthChallenge {
         nonce: [u8; 32],
     },
+}
+
+pub fn validate_data_message(message: &Message) -> std::io::Result<()> {
+    match message {
+        Message::Data { payload } => validate_content_block_size(payload.len()),
+        Message::DataCompressed {
+            algo,
+            original_size,
+            ..
+        } => compressed_block_size(*algo, *original_size).map(|_| ()),
+        _ => Ok(()),
+    }
 }

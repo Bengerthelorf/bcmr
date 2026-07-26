@@ -233,7 +233,7 @@ where
         if n == 0 {
             break;
         }
-        let frame = compress::encode_block(algo, buf[..n].to_vec());
+        let frame = compress::encode_block(algo, buf[..n].to_vec())?;
         tx.write_message(writer, &frame).await?;
         on_chunk(n as u64);
     }

@@ -136,7 +136,7 @@ where
         if let Some(h) = hasher.as_mut() {
             h.update(&buf[..n]);
         }
-        let frame = compress::encode_block(algo, buf[..n].to_vec());
+        let frame = compress::encode_block(algo, buf[..n].to_vec())?;
         framing.write_message(out, &frame).await?;
     }
 
@@ -465,7 +465,11 @@ async fn consume_block(
                 h.update(&cached);
             }
             file.write_all(&cached).await?;
-            *written += cached.len() as u64;
+            *written = crate::core::protocol::checked_transfer_total(
+                *written,
+                cached.len(),
+                declared_size,
+            )?;
             state.cursor += 1;
         }
         if state.cursor < state.hashes.len() && state.is_missing(state.cursor) {
@@ -480,7 +484,7 @@ async fn consume_block(
         h.update(block);
     }
     file.write_all(block).await?;
-    *written += block.len() as u64;
+    *written = crate::core::protocol::checked_transfer_total(*written, block.len(), declared_size)?;
     Ok(())
 }
 
@@ -504,22 +508,15 @@ async fn flush_remaining_cas_blocks(
             h.update(&cached);
         }
         file.write_all(&cached).await?;
-        *written += cached.len() as u64;
+        *written =
+            crate::core::protocol::checked_transfer_total(*written, cached.len(), declared_size)?;
         state.cursor += 1;
     }
     Ok(())
 }
 
 fn enforce_write_bound(written: u64, incoming: usize, declared: u64) -> Result<()> {
-    if written + incoming as u64 > declared {
-        bail!(
-            "put: client would write {} bytes past the declared size of {} \
-             (already wrote {})",
-            written + incoming as u64 - declared,
-            declared,
-            written
-        );
-    }
+    crate::core::protocol::checked_transfer_total(written, incoming, declared).map(|_| ())?;
     Ok(())
 }
 
@@ -548,15 +545,10 @@ where
         match framing.read_message(reader).await? {
             Some(message @ (Message::Data { .. } | Message::DataCompressed { .. })) => {
                 let decoded = compress::decode_data_block(message)?;
-                if written + decoded.len() as u64 > length {
-                    bail!(
-                        "put_chunked: client sent {} bytes past the declared {}",
-                        written + decoded.len() as u64 - length,
-                        length
-                    );
-                }
+                let next_written =
+                    crate::core::protocol::checked_transfer_total(written, decoded.len(), length)?;
                 file.write_all(&decoded).await?;
-                written += decoded.len() as u64;
+                written = next_written;
             }
             Some(Message::Done) => break,
             Some(other) => bail!("put_chunked: unexpected message {other:?}"),
@@ -604,7 +596,7 @@ where
                 remaining
             );
         }
-        let frame = compress::encode_block(algo, buf[..n].to_vec());
+        let frame = compress::encode_block(algo, buf[..n].to_vec())?;
         framing.write_message(out, &frame).await?;
         remaining -= n as u64;
     }
