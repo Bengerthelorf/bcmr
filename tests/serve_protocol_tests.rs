@@ -1,4 +1,7 @@
-use bcmr::core::protocol::{decode_message, encode_message, ListEntry, Message, PROTOCOL_VERSION};
+use bcmr::core::{
+    compress::{decode_data_block, MAX_CONTENT_BLOCK_SIZE},
+    protocol::{decode_message, encode_message, ListEntry, Message, PROTOCOL_VERSION},
+};
 
 fn roundtrip(msg: Message) -> Message {
     let encoded = encode_message(&msg);
@@ -52,6 +55,39 @@ fn test_data_compressed_roundtrip() {
         payload: vec![0xAA; 1024],
     };
     assert_eq!(roundtrip(msg.clone()), msg);
+}
+
+#[test]
+fn data_block_rejects_hostile_declared_original_size_before_decompression() {
+    let frame = encode_message(&Message::DataCompressed {
+        algo: 1,
+        original_size: u32::MAX,
+        payload: vec![0],
+    });
+    assert!(frame.len() < 64, "the hostile frame must stay tiny");
+
+    let message = decode_message(&frame).expect("the tiny protocol frame is well-formed");
+    assert!(decode_data_block(message).is_err());
+}
+
+#[test]
+fn data_block_rejects_raw_payload_larger_than_the_content_block_limit() {
+    let message = Message::Data {
+        payload: vec![0; MAX_CONTENT_BLOCK_SIZE + 1],
+    };
+
+    assert!(decode_data_block(message).is_err());
+}
+
+#[test]
+fn data_block_rejects_data_compressed_with_algo_none() {
+    let message = Message::DataCompressed {
+        algo: 0,
+        original_size: 1,
+        payload: vec![0],
+    };
+
+    assert!(decode_data_block(message).is_err());
 }
 
 #[test]

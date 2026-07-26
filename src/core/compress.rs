@@ -4,6 +4,12 @@ const AUTO_SKIP_RATIO: f64 = 0.95;
 
 const ZSTD_LEVEL: i32 = 3;
 
+/// Maximum uncompressed content block accepted by the transfer protocol.
+///
+/// Encoded frames remain independently limited to 16 MiB; all current content
+/// block producers use 4 MiB chunks.
+pub const MAX_CONTENT_BLOCK_SIZE: usize = 4 * 1024 * 1024;
+
 pub fn encode_block(algo: CompressionAlgo, raw: Vec<u8>) -> Message {
     if algo == CompressionAlgo::None || raw.is_empty() {
         return Message::Data { payload: raw };
@@ -35,21 +41,70 @@ pub fn decode_block(
     original_size: u32,
     compressed: &[u8],
 ) -> std::io::Result<Vec<u8>> {
-    match CompressionAlgo::from_byte(algo_byte) {
-        CompressionAlgo::Lz4 => lz4_flex::decompress(compressed, original_size as usize)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())),
-        CompressionAlgo::Zstd => zstd::bulk::decompress(compressed, original_size as usize)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())),
-        CompressionAlgo::None => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "DataCompressed frame with algo=None",
-        )),
+    let original_size = usize::try_from(original_size)
+        .map_err(|_| invalid_data("declared decompressed size does not fit usize"))?;
+    validate_content_block_size(original_size)?;
+    if original_size == 0 {
+        return Err(invalid_data("DataCompressed frame declares an empty block"));
     }
+
+    let decoded = match CompressionAlgo::from_byte(algo_byte) {
+        CompressionAlgo::Lz4 => lz4_flex::decompress(compressed, original_size)
+            .map_err(|e| invalid_data(e.to_string()))?,
+        CompressionAlgo::Zstd => zstd::bulk::decompress(compressed, original_size)
+            .map_err(|e| invalid_data(e.to_string()))?,
+        CompressionAlgo::None => return Err(invalid_data("DataCompressed frame with algo=None")),
+    };
+
+    if decoded.len() != original_size {
+        return Err(invalid_data(format!(
+            "decoded block size {} does not match declared {original_size}",
+            decoded.len()
+        )));
+    }
+    Ok(decoded)
+}
+
+/// Converts a protocol data frame to bytes after applying the content-block limit.
+pub fn decode_data_block(message: Message) -> std::io::Result<Vec<u8>> {
+    match message {
+        Message::Data { payload } => {
+            validate_content_block_size(payload.len())?;
+            Ok(payload)
+        }
+        Message::DataCompressed {
+            algo,
+            original_size,
+            payload,
+        } => decode_block(algo, original_size, &payload),
+        other => Err(invalid_data(format!("expected data block, got {other:?}"))),
+    }
+}
+
+fn validate_content_block_size(size: usize) -> std::io::Result<()> {
+    if size > MAX_CONTENT_BLOCK_SIZE {
+        return Err(invalid_data(format!(
+            "content block size {size} exceeds protocol maximum {MAX_CONTENT_BLOCK_SIZE}"
+        )));
+    }
+    Ok(())
+}
+
+fn invalid_data(message: impl Into<String>) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message.into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn compressed_with(algo: CompressionAlgo, data: &[u8]) -> Vec<u8> {
+        match algo {
+            CompressionAlgo::Lz4 => lz4_flex::compress(data),
+            CompressionAlgo::Zstd => zstd::bulk::compress(data, ZSTD_LEVEL).unwrap(),
+            CompressionAlgo::None => unreachable!(),
+        }
+    }
 
     #[test]
     fn roundtrip_lz4_compressible() {
@@ -118,5 +173,31 @@ mod tests {
     fn empty_block_is_raw() {
         let msg = encode_block(CompressionAlgo::Zstd, Vec::new());
         assert!(matches!(msg, Message::Data { payload } if payload.is_empty()));
+    }
+
+    #[test]
+    fn lz4_rejects_a_declared_size_larger_than_the_decoded_payload() {
+        let data = b"small lz4 payload";
+        let compressed = compressed_with(CompressionAlgo::Lz4, data);
+
+        assert!(decode_block(
+            CompressionAlgo::Lz4.to_byte(),
+            data.len() as u32 + 1,
+            &compressed
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn zstd_rejects_a_declared_size_larger_than_the_decoded_payload() {
+        let data = b"small zstd payload";
+        let compressed = compressed_with(CompressionAlgo::Zstd, data);
+
+        assert!(decode_block(
+            CompressionAlgo::Zstd.to_byte(),
+            data.len() as u32 + 1,
+            &compressed
+        )
+        .is_err());
     }
 }

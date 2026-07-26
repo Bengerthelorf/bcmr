@@ -84,13 +84,8 @@ impl ServeClient {
         .await?;
         loop {
             match self.recv().await? {
-                Message::Data { payload } => on_data(&payload),
-                Message::DataCompressed {
-                    algo,
-                    original_size,
-                    payload,
-                } => {
-                    let decoded = compress::decode_block(algo, original_size, &payload)?;
+                message @ (Message::Data { .. } | Message::DataCompressed { .. }) => {
+                    let decoded = compress::decode_data_block(message)?;
                     on_data(&decoded);
                 }
                 Message::Ok { hash } => {
@@ -249,23 +244,8 @@ impl ServeClient {
         let mut written = 0u64;
         loop {
             match self.recv().await? {
-                Message::Data { payload } => {
-                    if written + payload.len() as u64 > length {
-                        return Err(BcmrError::InvalidInput(format!(
-                            "get_chunked: server sent {} bytes past the requested {}",
-                            written + payload.len() as u64 - length,
-                            length
-                        )));
-                    }
-                    dst.write_all(&payload).await?;
-                    written += payload.len() as u64;
-                }
-                Message::DataCompressed {
-                    algo,
-                    original_size,
-                    payload,
-                } => {
-                    let decoded = compress::decode_block(algo, original_size, &payload)?;
+                message @ (Message::Data { .. } | Message::DataCompressed { .. }) => {
+                    let decoded = compress::decode_data_block(message)?;
                     if written + decoded.len() as u64 > length {
                         return Err(BcmrError::InvalidInput(format!(
                             "get_chunked: server sent {} bytes past the requested {}",

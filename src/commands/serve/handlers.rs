@@ -387,23 +387,8 @@ where
             },
         };
         match m {
-            Message::Data { payload } => {
-                consume_block(
-                    &payload,
-                    &mut file,
-                    hasher.as_mut(),
-                    dedup_state.as_mut(),
-                    &mut written,
-                    declared_size,
-                )
-                .await?;
-            }
-            Message::DataCompressed {
-                algo,
-                original_size,
-                payload,
-            } => {
-                let decoded = compress::decode_block(algo, original_size, &payload)?;
+            message @ (Message::Data { .. } | Message::DataCompressed { .. }) => {
+                let decoded = compress::decode_data_block(message)?;
                 consume_block(
                     &decoded,
                     &mut file,
@@ -561,23 +546,8 @@ where
             break;
         }
         match framing.read_message(reader).await? {
-            Some(Message::Data { payload }) => {
-                if written + payload.len() as u64 > length {
-                    bail!(
-                        "put_chunked: client sent {} bytes past the declared {}",
-                        written + payload.len() as u64 - length,
-                        length
-                    );
-                }
-                file.write_all(&payload).await?;
-                written += payload.len() as u64;
-            }
-            Some(Message::DataCompressed {
-                algo,
-                original_size,
-                payload,
-            }) => {
-                let decoded = compress::decode_block(algo, original_size, &payload)?;
+            Some(message @ (Message::Data { .. } | Message::DataCompressed { .. })) => {
+                let decoded = compress::decode_data_block(message)?;
                 if written + decoded.len() as u64 > length {
                     bail!(
                         "put_chunked: client sent {} bytes past the declared {}",

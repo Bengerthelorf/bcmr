@@ -189,34 +189,12 @@ impl ServeClient {
             loop {
                 use std::io::Write;
                 match self.recv().await {
-                    Ok(Message::Data { payload }) => {
-                        let n_bytes = payload.len() as u64;
-                        if received + n_bytes > ft.size {
-                            recv_err = Some(BcmrError::InvalidInput(format!(
-                                "server sent {} bytes past declared size {} for {}",
-                                received + n_bytes - ft.size,
-                                ft.size,
-                                ft.local.display()
-                            )));
-                            break 'files_loop;
-                        }
-                        if let Err(e) = dst.write_all(&payload) {
-                            recv_err = Some(BcmrError::InvalidInput(format!("write dst: {e}")));
-                            break 'files_loop;
-                        }
-                        received += n_bytes;
-                        on_chunk(n_bytes);
-                    }
-                    Ok(Message::DataCompressed {
-                        algo,
-                        original_size,
-                        payload,
-                    }) => {
-                        let decoded = match compress::decode_block(algo, original_size, &payload) {
+                    Ok(message @ (Message::Data { .. } | Message::DataCompressed { .. })) => {
+                        let decoded = match compress::decode_data_block(message) {
                             Ok(d) => d,
                             Err(e) => {
                                 recv_err =
-                                    Some(BcmrError::InvalidInput(format!("decompress: {e}")));
+                                    Some(BcmrError::InvalidInput(format!("decode block: {e}")));
                                 break 'files_loop;
                             }
                         };
