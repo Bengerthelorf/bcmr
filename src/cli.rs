@@ -502,6 +502,7 @@ pub enum Commands {
 pub enum TestMode {
     Delay(u64),
     SpeedLimit(u64),
+    CorruptBeforeFinalize,
     None,
 }
 
@@ -799,6 +800,9 @@ fn parse_test_mode(s: &str) -> Result<TestMode, String> {
     if s == "none" {
         return Ok(TestMode::None);
     }
+    if s == "corrupt_before_finalize" {
+        return Ok(TestMode::CorruptBeforeFinalize);
+    }
     let parts: Vec<&str> = s.split(':').collect();
     if parts.len() == 2 {
         match (parts[0], parts[1].parse::<u64>()) {
@@ -808,7 +812,7 @@ fn parse_test_mode(s: &str) -> Result<TestMode, String> {
         }
     } else {
         Err(format!(
-            "Invalid test mode '{}'. Expected: none, delay:<ms>, or speed_limit:<bps>",
+            "Invalid test mode '{}'. Expected: none, corrupt_before_finalize, delay:<ms>, or speed_limit:<bps>",
             s
         ))
     }
@@ -968,6 +972,14 @@ mod tests {
         match parse_test_mode("none").unwrap() {
             TestMode::None => {}
             _ => panic!("Expected None"),
+        }
+    }
+
+    #[test]
+    fn test_parse_test_mode_corrupt_before_finalize() {
+        match parse_test_mode("corrupt_before_finalize").unwrap() {
+            TestMode::CorruptBeforeFinalize => {}
+            _ => panic!("Expected CorruptBeforeFinalize"),
         }
     }
 

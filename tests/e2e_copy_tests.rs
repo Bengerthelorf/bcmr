@@ -486,6 +486,103 @@ fn e2e_copy_preserves_existing_on_no_force() {
     assert_eq!(dst_hash_before, dst_hash_after);
 }
 
+#[test]
+fn e2e_verified_force_corruption_keeps_existing_destination_and_cleans_stage() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    fs::write(&src, b"new verified content").unwrap();
+    let old_bytes = b"old destination must survive";
+    fs::write(&dst, old_bytes).unwrap();
+
+    let (ok, _stdout, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "-f",
+        "-y",
+        "-V",
+        "--test-mode",
+        "corrupt_before_finalize",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+
+    assert!(!ok, "corrupted verified copy must fail");
+    assert!(
+        stderr.contains("Verification failed"),
+        "expected a verification error, got: {stderr}"
+    );
+    assert_eq!(fs::read(&dst).unwrap(), old_bytes);
+    let remaining_stages: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".bcmr.stage.")
+        })
+        .collect();
+    assert!(
+        remaining_stages.is_empty(),
+        "only the failed copy's own stage should be removed: {remaining_stages:?}"
+    );
+}
+
+#[test]
+fn e2e_verified_force_copy_replaces_existing_destination_after_staging() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    fs::write(&src, b"new verified content").unwrap();
+    fs::write(&dst, b"old content").unwrap();
+
+    let (ok, _stdout, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "-f",
+        "-y",
+        "-V",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+
+    assert!(ok, "verified force copy should succeed: {stderr}");
+    assert_eq!(fs::read(&dst).unwrap(), b"new verified content");
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_preserve_and_sync_apply_metadata_to_the_committed_destination() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    fs::write(&src, b"preserved content").unwrap();
+    fs::set_permissions(&src, fs::Permissions::from_mode(0o640)).unwrap();
+    let expected_mtime = filetime::FileTime::from_unix_time(1_700_000_000, 0);
+    filetime::set_file_mtime(&src, expected_mtime).unwrap();
+    fs::write(&dst, b"old content").unwrap();
+
+    let (ok, _stdout, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "-f",
+        "-y",
+        "-p",
+        "--sync",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+
+    assert!(ok, "preserve + sync copy should succeed: {stderr}");
+    let metadata = fs::metadata(&dst).unwrap();
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o640);
+    let actual_mtime = filetime::FileTime::from_last_modification_time(&metadata);
+    assert_eq!(actual_mtime.seconds(), expected_mtime.seconds());
+}
+
 #[cfg(not(windows))]
 #[test]
 fn e2e_pipeline_copy_honors_jobs_concurrency() {

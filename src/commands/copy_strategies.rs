@@ -3,46 +3,87 @@ use crate::core::error::BcmrError;
 use crate::core::io as durable_io;
 use crate::core::session::{Session, CHECKPOINT_INTERVAL_BLOCKS, COPY_BLOCK_SIZE};
 use std::path::Path;
-use tokio::fs;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 
-use crate::core::cleanup::TempFileGuard;
+use crate::commands::copy::AtomicStaging;
 
 pub struct FinalizeParams<'a> {
     pub write_target: &'a Path,
     pub dst: &'a Path,
     pub src: &'a Path,
     pub use_atomic: bool,
-    pub guard: &'a mut Option<TempFileGuard>,
+    pub staging: Option<AtomicStaging>,
+    pub replace_existing: bool,
     pub sync: bool,
     pub preserve: bool,
     pub verify: bool,
     pub inline_src_hash: Option<blake3::Hash>,
+    pub corrupt_before_verify: bool,
 }
 
-pub async fn finalize(dst_file: tokio::fs::File, p: FinalizeParams<'_>) -> Result<(), BcmrError> {
-    if p.sync {
-        durable_io::durable_sync_async(&dst_file).await?;
-    }
-    drop(dst_file);
-
+pub async fn finalize(
+    dst_file: tokio::fs::File,
+    mut p: FinalizeParams<'_>,
+) -> Result<(), BcmrError> {
     if p.use_atomic {
-        fs::rename(p.write_target, p.dst).await?;
+        let mut stage_file = Some(dst_file);
+        let prepare = async {
+            if p.corrupt_before_verify {
+                // Test-only fault injection must close the writer before reopening
+                // the stage, which also exercises Windows handle discipline.
+                drop(stage_file.take());
+                let mut stage = tokio::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(p.write_target)
+                    .await?;
+                let mut first_byte = [0u8; 1];
+                stage.read_exact(&mut first_byte).await?;
+                stage.seek(SeekFrom::Start(0)).await?;
+                first_byte[0] ^= 0xff;
+                stage.write_all(&first_byte).await?;
+                stage.sync_data().await?;
+            }
+            if p.verify {
+                // verify_copy removes its second argument on a mismatch.  This must
+                // remain the private stage, never the pre-existing final destination.
+                super::copy::verify_copy(p.src, p.write_target, p.inline_src_hash).await?;
+            }
+            if p.preserve {
+                super::copy::preserve_attributes(p.src, p.write_target).await?;
+            }
+            if p.sync {
+                if let Some(ref stage_file) = stage_file {
+                    durable_io::durable_sync_async(stage_file).await?;
+                }
+            }
+            Ok::<(), BcmrError>(())
+        }
+        .await;
+        drop(stage_file);
+        prepare?;
+
+        let staging = p.staging.take().ok_or_else(|| {
+            BcmrError::InvalidInput("atomic finalization requires a staging file".into())
+        })?;
+        staging.commit(p.dst, p.replace_existing)?;
         if p.sync {
             if let Some(parent) = p.dst.parent() {
                 durable_io::fsync_dir_async(parent).await;
             }
         }
-        if let Some(ref mut g) = p.guard {
-            g.disarm();
+    } else {
+        // Resume/append/strict retain their pre-existing direct-path ordering.
+        if p.sync {
+            durable_io::durable_sync_async(&dst_file).await?;
         }
-    }
-
-    if p.preserve {
-        super::copy::preserve_attributes(p.src, p.dst).await?;
-    }
-
-    if p.verify {
-        super::copy::verify_copy(p.src, p.dst, p.inline_src_hash).await?;
+        drop(dst_file);
+        if p.preserve {
+            super::copy::preserve_attributes(p.src, p.write_target).await?;
+        }
+        if p.verify {
+            super::copy::verify_copy(p.src, p.write_target, p.inline_src_hash).await?;
+        }
     }
 
     Session::remove(p.src, p.dst);

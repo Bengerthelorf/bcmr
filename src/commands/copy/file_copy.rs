@@ -1,17 +1,67 @@
 use crate::cli::{Commands, SparseMode, TestMode};
 use crate::core::error::BcmrError;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
+use tempfile::TempPath;
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 
 use super::exec::ProgressCallback;
 use crate::core::cleanup::TempFileGuard;
 
-fn temp_path_for(dst: &Path) -> PathBuf {
-    let name = dst.file_name().unwrap_or_default().to_string_lossy();
-    dst.with_file_name(format!(".{}.bcmr.tmp", name))
+pub(crate) struct AtomicStaging {
+    path: TempPath,
+    guard: TempFileGuard,
+}
+
+impl AtomicStaging {
+    pub(crate) fn path(&self) -> &Path {
+        self.path.as_ref()
+    }
+
+    pub(crate) fn commit(self, dst: &Path, replace_existing: bool) -> Result<(), BcmrError> {
+        let AtomicStaging { path, mut guard } = self;
+        let persisted = if replace_existing {
+            path.persist(dst)
+        } else {
+            path.persist_noclobber(dst)
+        };
+        match persisted {
+            Ok(()) => {
+                guard.disarm();
+                Ok(())
+            }
+            Err(error) => {
+                let is_target_exists = error.error.kind() == std::io::ErrorKind::AlreadyExists;
+                drop(error.path);
+                if !replace_existing && is_target_exists {
+                    Err(BcmrError::TargetExists(dst.to_path_buf()))
+                } else {
+                    Err(BcmrError::Io(error.error))
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn create_staging(dst: &Path) -> Result<AtomicStaging, BcmrError> {
+    let parent = dst.parent().unwrap_or_else(|| Path::new("."));
+    let mut builder = tempfile::Builder::new();
+    // Keep this prefix short: a legal 255-byte final name still needs room
+    // for tempfile's random suffix on filesystems with NAME_MAX=255.
+    builder.prefix(".bcmr.stage.").suffix(".tmp");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // tempfile defaults to 0600.  Local copy historically creates files as
+        // 0666 filtered by umask, so preserve that ordinary-copy behavior.
+        builder.permissions(std::fs::Permissions::from_mode(0o666));
+    }
+    let file = builder.tempfile_in(parent)?;
+    let path = file.into_temp_path();
+    let guard = TempFileGuard::new(path.to_path_buf());
+    Ok(AtomicStaging { path, guard })
 }
 
 #[cfg(target_os = "linux")]
@@ -123,6 +173,7 @@ pub(super) struct CopyFileOptions {
     reflink_arg: Option<String>,
     sparse_arg: Option<String>,
     test_mode: TestMode,
+    replace_existing: bool,
 }
 
 impl CopyFileOptions {
@@ -139,6 +190,7 @@ impl CopyFileOptions {
             reflink_arg: cli.get_reflink_mode(),
             sparse_arg: cli.get_sparse_mode(),
             test_mode,
+            replace_existing: cli.is_force(),
         }
     }
 }
@@ -186,6 +238,7 @@ where
         ref reflink_arg,
         ref sparse_arg,
         test_mode,
+        replace_existing,
     } = opts;
     let crate::core::remote::TransferOptions {
         preserve,
@@ -214,16 +267,14 @@ where
     }
 
     let use_atomic = !resume && !append && !strict;
+    let corrupt_before_verify = matches!(test_mode, TestMode::CorruptBeforeFinalize);
     let write_target;
-    let mut guard: Option<TempFileGuard> = None;
+    let mut staging = None;
 
     if use_atomic {
-        let temp = temp_path_for(dst);
-        if temp.exists() {
-            let _ = fs::remove_file(&temp).await;
-        }
-        guard = Some(TempFileGuard::new(temp.clone()));
-        write_target = temp;
+        let stage = create_staging(dst)?;
+        write_target = stage.path().to_path_buf();
+        staging = Some(stage);
     } else {
         write_target = dst.to_path_buf();
     }
@@ -245,11 +296,13 @@ where
             dst,
             src,
             use_atomic,
-            guard: &mut guard,
+            staging: staging.take(),
+            replace_existing,
             sync,
             preserve,
             verify,
             inline_src_hash: None,
+            corrupt_before_verify,
         };
         return run_finalize(ctx, fs::File::open(&write_target).await?).await;
     }
@@ -264,11 +317,13 @@ where
                     dst,
                     src,
                     use_atomic,
-                    guard: &mut guard,
+                    staging: staging.take(),
+                    replace_existing,
                     sync,
                     preserve,
                     verify,
                     inline_src_hash: None,
+                    corrupt_before_verify,
                 };
                 return run_finalize(ctx, fs::File::open(&write_target).await?).await;
             }
@@ -371,7 +426,7 @@ where
             }
             None
         }
-        TestMode::None => {
+        TestMode::None | TestMode::CorruptBeforeFinalize => {
             let need_src_hash = verify || session.is_some();
             super::super::copy_strategies::streaming_copy(
                 &mut src_file,
@@ -391,11 +446,132 @@ where
         dst,
         src,
         use_atomic,
-        guard: &mut guard,
+        staging: staging.take(),
+        replace_existing,
         sync,
         preserve,
         verify,
         inline_src_hash,
+        corrupt_before_verify,
     };
     run_finalize(ctx, dst_file).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn unique_sibling_staging_isolated_from_other_staging_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let dst = Arc::new(dir.path().join("destination.bin"));
+        let preoccupied = dir.path().join(".bcmr.stage.preoccupied.tmp");
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("nowhere", &preoccupied).unwrap();
+        #[cfg(not(unix))]
+        std::fs::write(&preoccupied, b"occupied").unwrap();
+
+        let barrier = Arc::new(Barrier::new(16));
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                let dst = Arc::clone(&dst);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    create_staging(&dst).unwrap()
+                })
+            })
+            .collect();
+        let mut stages: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let paths: HashSet<_> = stages
+            .iter()
+            .map(|stage| stage.path().to_path_buf())
+            .collect();
+        assert_eq!(paths.len(), 16, "every concurrent copy needs its own stage");
+        for path in &paths {
+            assert_eq!(path.parent(), Some(dir.path()));
+            assert!(
+                path.is_file(),
+                "stage must be a regular file: {}",
+                path.display()
+            );
+            assert!(!path.is_symlink(), "stage must not follow a symlink");
+        }
+        assert!(
+            preoccupied.symlink_metadata().is_ok(),
+            "preoccupied path changed"
+        );
+
+        let removed = stages.pop().unwrap();
+        let removed_path = removed.path().to_path_buf();
+        drop(removed);
+        assert!(!removed_path.exists());
+        for stage in stages {
+            assert!(
+                stage.path().is_file(),
+                "one cleanup must not remove another stage"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_uses_the_normal_create_mode_before_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let control = dir.path().join("ordinary-create.bin");
+        std::fs::File::create(&control).unwrap();
+        let stage = create_staging(&dir.path().join("destination.bin")).unwrap();
+        let mode = std::fs::metadata(stage.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let control_mode = std::fs::metadata(&control).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, control_mode,
+            "staging must honor the active umask like File::create"
+        );
+    }
+
+    #[test]
+    fn staging_allows_a_maximum_length_final_file_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path().join("d".repeat(255));
+        let stage = create_staging(&dst).unwrap();
+        assert_eq!(stage.path().parent(), Some(dir.path()));
+    }
+
+    #[test]
+    fn no_replace_commit_rejects_a_target_created_after_preflight() {
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path().join("destination.bin");
+        let stage = create_staging(&dst).unwrap();
+        std::fs::write(stage.path(), b"new bytes").unwrap();
+
+        // This models a concurrent creator winning after the UI preflight but
+        // before the actual commit syscall.
+        let old_bytes = b"racing writer wins";
+        std::fs::write(&dst, old_bytes).unwrap();
+        let error = stage.commit(&dst, false).unwrap_err();
+
+        assert!(matches!(error, BcmrError::TargetExists(path) if path == dst));
+        assert_eq!(std::fs::read(&dst).unwrap(), old_bytes);
+        let remaining_stages: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".bcmr.stage.")
+            })
+            .collect();
+        assert!(remaining_stages.is_empty());
+    }
 }
