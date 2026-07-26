@@ -193,75 +193,6 @@ where
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    async fn source(bytes: Vec<u8>) -> tokio::io::DuplexStream {
-        let (mut writer, reader) = tokio::io::duplex(64);
-        tokio::spawn(async move {
-            writer.write_all(&bytes).await.unwrap();
-            writer.shutdown().await.unwrap();
-        });
-        reader
-    }
-
-    async fn sink_bytes(mut reader: tokio::io::DuplexStream) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        reader.read_to_end(&mut bytes).await.unwrap();
-        bytes
-    }
-
-    #[tokio::test]
-    async fn download_stream_rejects_excess_before_writing_it() {
-        let mut input = source(vec![1, 2, 3, 4]).await;
-        let (mut output, output_reader) = tokio::io::duplex(64);
-
-        assert!(copy_download_stream(&mut input, &mut output, 0, 3, &|_| {})
-            .await
-            .is_err());
-        drop(output);
-        assert!(sink_bytes(output_reader).await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn download_stream_rejects_short_read_at_eof() {
-        let mut input = source(vec![1, 2, 3]).await;
-        let (mut output, output_reader) = tokio::io::duplex(64);
-
-        assert!(copy_download_stream(&mut input, &mut output, 0, 4, &|_| {})
-            .await
-            .is_err());
-        drop(output);
-        assert_eq!(sink_bytes(output_reader).await, vec![1, 2, 3]);
-    }
-
-    #[tokio::test]
-    async fn download_stream_completes_exactly_from_resume_offset() {
-        let mut input = source(vec![3, 4]).await;
-        let (mut output, output_reader) = tokio::io::duplex(64);
-
-        copy_download_stream(&mut input, &mut output, 2, 4, &|_| {})
-            .await
-            .unwrap();
-        drop(output);
-        assert_eq!(sink_bytes(output_reader).await, vec![3, 4]);
-    }
-
-    #[tokio::test]
-    async fn download_stream_rejects_resume_offset_past_remote_size() {
-        let mut input = source(Vec::new()).await;
-        let (mut output, output_reader) = tokio::io::duplex(64);
-
-        assert!(copy_download_stream(&mut input, &mut output, 5, 4, &|_| {})
-            .await
-            .is_err());
-        drop(output);
-        assert!(sink_bytes(output_reader).await.is_empty());
-    }
-}
-
 pub async fn upload_file(
     local_src: &Path,
     remote: &RemotePath,
@@ -566,4 +497,73 @@ pub async fn upload_directory(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn source(bytes: Vec<u8>) -> tokio::io::DuplexStream {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            writer.write_all(&bytes).await.unwrap();
+            writer.shutdown().await.unwrap();
+        });
+        reader
+    }
+
+    async fn sink_bytes(mut reader: tokio::io::DuplexStream) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await.unwrap();
+        bytes
+    }
+
+    #[tokio::test]
+    async fn download_stream_rejects_excess_before_writing_it() {
+        let mut input = source(vec![1, 2, 3, 4]).await;
+        let (mut output, output_reader) = tokio::io::duplex(64);
+
+        assert!(copy_download_stream(&mut input, &mut output, 0, 3, &|_| {})
+            .await
+            .is_err());
+        drop(output);
+        assert!(sink_bytes(output_reader).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn download_stream_rejects_short_read_at_eof() {
+        let mut input = source(vec![1, 2, 3]).await;
+        let (mut output, output_reader) = tokio::io::duplex(64);
+
+        assert!(copy_download_stream(&mut input, &mut output, 0, 4, &|_| {})
+            .await
+            .is_err());
+        drop(output);
+        assert_eq!(sink_bytes(output_reader).await, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn download_stream_completes_exactly_from_resume_offset() {
+        let mut input = source(vec![3, 4]).await;
+        let (mut output, output_reader) = tokio::io::duplex(64);
+
+        copy_download_stream(&mut input, &mut output, 2, 4, &|_| {})
+            .await
+            .unwrap();
+        drop(output);
+        assert_eq!(sink_bytes(output_reader).await, vec![3, 4]);
+    }
+
+    #[tokio::test]
+    async fn download_stream_rejects_resume_offset_past_remote_size() {
+        let mut input = source(Vec::new()).await;
+        let (mut output, output_reader) = tokio::io::duplex(64);
+
+        assert!(copy_download_stream(&mut input, &mut output, 5, 4, &|_| {})
+            .await
+            .is_err());
+        drop(output);
+        assert!(sink_bytes(output_reader).await.is_empty());
+    }
 }

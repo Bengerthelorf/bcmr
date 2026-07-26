@@ -134,3 +134,14 @@ XDG-cache/data/config, and BCMR CAS locations.
   required external KIOXIA locations.
 - `Session::add_block` was assessed but intentionally left unchanged because it
   is outside this follow-up's requested scope. No Task 8 staging logic changed.
+
+## Clippy Layout Review Follow-up (2026-07-26)
+
+- RED: strict all-target clippy reported `items_after_test_module` because the
+  new legacy-download unit-test module preceded later production items.
+- Review-only fix: moved that test module intact to the end of
+  `remote/transfer.rs`; test semantics and production logic are unchanged.
+- GREEN: the four focused remote-transfer tests and the full test suite passed.
+  Strict all-target clippy no longer reports `items_after_test_module`; its only
+  remaining failures are the pre-existing `src/main.rs:263/289`
+  `useless_borrows_in_formatting` findings outside this task.
