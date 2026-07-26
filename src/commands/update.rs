@@ -31,8 +31,8 @@ fn fetch_latest_version() -> Result<String> {
         .build()?
         .fetch()?;
     releases
-        .first()
-        .map(|r| r.version.clone())
+        .latest()
+        .map(|release| release.version().to_owned())
         .ok_or_else(|| anyhow::anyhow!("no releases found"))
 }
 
@@ -83,7 +83,7 @@ pub fn run(check_only: bool) -> Result<()> {
         .build()?
         .update()?;
 
-    if status.updated() {
+    if status.is_updated() {
         println!("Updated to version {}!", status.version());
     } else {
         println!("Already up to date.");
