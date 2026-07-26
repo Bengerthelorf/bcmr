@@ -33,14 +33,14 @@ Installation, shell integration, CLI reference, configuration, and more.
 **Integrity you can trust, by default.** Every copy streams through
 BLAKE3 during the write, not as a separate post-pass. `--verify`
 promotes this to a full 2-pass checksum round-trip; without it you
-still get O(1) tail-block verification on resume. `cp` and `scp`
-don't hash at all; `rsync --checksum` is opt-in and rescans the
-whole file.
+still get block-by-block verification of the published resume prefix
+against both the current source and destination. `cp` and `scp` don't
+hash at all; `rsync --checksum` is opt-in and rescans the whole file.
 
 **Crash-safe resume out of the box.** Interrupt a `bcmr copy`
 (Ctrl-C, laptop closes, network drops) and run the same command
-again — it finds the session file, re-verifies the tail block, and
-picks up where it stopped. No `--partial --append-verify`
+again — it finds the session file, re-verifies its contiguous
+checkpoint prefix, and picks up where proof stops. No `--partial --append-verify`
 incantation; safe resume is the default when the tool can prove
 it's safe.
 
@@ -77,7 +77,7 @@ see the [Internals](https://app.snaix.homes/bcmr/internals/) index.
 ## Highlights
 
 - 📊 **Progress Display** — Fancy TUI box with gradient bar, ETA, speed, per-file tracking. Plain text mode for logs and pipes
-- 🔄 **Resume & Verify** — Crash-safe resume with session files and O(1) tail-block verification. BLAKE3 inline hashing for 2-pass verified copy
+- 🔄 **Resume & Verify** — Crash-safe resume with session files and contiguous source/destination block proof. BLAKE3 inline hashing for 2-pass verified copy
 - 🌐 **Remote Copy (SSH)** — Upload and download via SSH. Binary `bcmr serve` protocol for fast transfers when both sides have bcmr, automatic fallback to legacy SCP
 - 🗜️ **Wire Compression** — `--compress={auto,zstd,lz4,none}`: per-block Zstd / LZ4 negotiated in the serve handshake, ~5× bandwidth on source-code text, auto-skip on incompressible blocks
 - 🧠 **Content-Addressed Dedup** — uploads ≥ 16 MiB exchange block hashes first; the server only asks for blocks it doesn't already have in its local CAS. `BCMR_CAS_CAP_MB` bounds disk usage via LRU

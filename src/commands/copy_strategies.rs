@@ -98,8 +98,8 @@ pub struct SessionIntent {
 }
 
 impl SessionIntent {
-    fn any(&self) -> bool {
-        self.resume || self.append || self.strict
+    fn supports_checkpoint(&self) -> bool {
+        self.resume && !self.append && !self.strict
     }
 }
 
@@ -111,7 +111,7 @@ pub fn create_session(
     intent: SessionIntent,
     loaded_session: &Option<Session>,
 ) -> Option<Session> {
-    if !intent.any() {
+    if !intent.supports_checkpoint() {
         return None;
     }
 
@@ -126,12 +126,19 @@ pub fn create_session(
     let mut s = Session::new(src, dst, file_size, src_mtime, src_inode);
 
     if start_offset > 0 {
-        if let Some(ref loaded) = loaded_session {
-            let keep = (start_offset / COPY_BLOCK_SIZE) as usize;
-            let keep = keep.min(loaded.block_hashes.len());
-            s.block_hashes = loaded.block_hashes[..keep].to_vec();
-            s.bytes_written = keep as u64 * COPY_BLOCK_SIZE;
+        if !start_offset.is_multiple_of(COPY_BLOCK_SIZE) {
+            return None;
         }
+        let loaded = loaded_session.as_ref()?;
+        if !loaded.has_valid_resume_structure() {
+            return None;
+        }
+        let keep = usize::try_from(start_offset / COPY_BLOCK_SIZE).ok()?;
+        if keep > loaded.block_hashes.len() {
+            return None;
+        }
+        s.block_hashes = loaded.block_hashes[..keep].to_vec();
+        s.bytes_written = start_offset;
     }
 
     Some(s)
@@ -170,6 +177,30 @@ pub async fn streaming_copy(
     let (returned_session, hash) = join.await??;
     *session = returned_session;
     Ok(hash)
+}
+
+fn persist_checkpoint_with<SyncFn, SaveFn>(
+    dst_file: &std::fs::File,
+    session: &Session,
+    sync_destination: SyncFn,
+    save_session: SaveFn,
+) -> Result<(), BcmrError>
+where
+    SyncFn: FnOnce(&std::fs::File) -> std::io::Result<()>,
+    SaveFn: FnOnce(&Session) -> std::io::Result<()>,
+{
+    // Sparse writes may still be represented only by a pending seek. Publish
+    // the logical EOF before making this byte range durable and discoverable.
+    if dst_file.metadata()?.len() < session.bytes_written {
+        dst_file.set_len(session.bytes_written)?;
+    }
+    sync_destination(dst_file)?;
+    save_session(session)?;
+    Ok(())
+}
+
+fn persist_checkpoint(dst_file: &std::fs::File, session: &Session) -> Result<(), BcmrError> {
+    persist_checkpoint_with(dst_file, session, durable_io::durable_sync, Session::save)
 }
 
 fn streaming_copy_sync(
@@ -247,8 +278,7 @@ fn streaming_copy_sync(
 
             if blocks_since_checkpoint >= CHECKPOINT_INTERVAL_BLOCKS {
                 if let Some(ref s) = session {
-                    durable_io::durable_sync(&dst_file)?;
-                    let _ = s.save();
+                    persist_checkpoint(&dst_file, s)?;
                 }
                 blocks_since_checkpoint = 0;
 
@@ -290,12 +320,105 @@ fn streaming_copy_sync(
 
     let final_hash = src_hasher.map(|h| h.finalize());
     if start_offset == 0 {
-        if let (Some(ref mut s), Some(h)) = (session.as_mut(), final_hash) {
+        if let (Some(ref mut s), Some(h)) = (session.as_mut(), final_hash.as_ref()) {
             s.set_src_hash(*h.as_bytes());
-            let _ = s.save();
         }
-        Ok((session, final_hash))
-    } else {
-        Ok((session, None))
+    }
+    if let Some(ref s) = session {
+        persist_checkpoint(&dst_file, s)?;
+    }
+
+    Ok((session, if start_offset == 0 { final_hash } else { None }))
+}
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::io;
+
+    #[test]
+    fn checkpoint_materializes_and_syncs_before_publish_and_propagates_failures() {
+        let destination = tempfile::tempfile().unwrap();
+        let mut session = Session::new(Path::new("/source"), Path::new("/destination"), 4096, 0, 0);
+        session.add_block([0; 32], 4096);
+        let events = RefCell::new(Vec::new());
+
+        let publish_error = persist_checkpoint_with(
+            &destination,
+            &session,
+            |file| {
+                assert_eq!(
+                    file.metadata().unwrap().len(),
+                    session.bytes_written,
+                    "a pending sparse hole must have a logical EOF before sync"
+                );
+                events.borrow_mut().push("sync");
+                Ok(())
+            },
+            |_| {
+                assert_eq!(events.borrow().as_slice(), ["sync"]);
+                events.borrow_mut().push("save");
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected session publish failure",
+                ))
+            },
+        )
+        .expect_err("session save failures must reach the copy caller");
+        assert!(matches!(publish_error, BcmrError::Io(_)));
+        assert_eq!(events.borrow().as_slice(), ["sync", "save"]);
+
+        let save_called = Cell::new(false);
+        let sync_error = persist_checkpoint_with(
+            &destination,
+            &session,
+            |_| Err(io::Error::other("injected destination sync failure")),
+            |_| {
+                save_called.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("destination sync failures must reach the copy caller");
+        assert!(matches!(sync_error, BcmrError::Io(_)));
+        assert!(
+            !save_called.get(),
+            "a session must not publish after destination sync fails"
+        );
+
+        let written_ahead = session.bytes_written + 123;
+        destination.set_len(written_ahead).unwrap();
+        persist_checkpoint_with(&destination, &session, |_| Ok(()), |_| Ok(())).unwrap();
+        assert_eq!(
+            destination.metadata().unwrap().len(),
+            written_ahead,
+            "publishing an older block boundary must not truncate bytes already written ahead"
+        );
+    }
+
+    #[test]
+    fn session_is_not_created_for_an_unproved_nonzero_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source");
+        let dst = dir.path().join("destination");
+        std::fs::write(&src, b"complete source").unwrap();
+
+        let session = create_session(
+            &src,
+            &dst,
+            src.metadata().unwrap().len(),
+            8,
+            SessionIntent {
+                resume: false,
+                append: true,
+                strict: false,
+            },
+            &None,
+        );
+
+        assert!(
+            session.is_none(),
+            "checkpoint bytes are absolute; an unhashed destination prefix cannot be published"
+        );
     }
 }

@@ -573,6 +573,7 @@ where
 
     let start_offset = resume_state.start_offset;
     let loaded_session = resume_state.loaded_session;
+    let truncate_tail = resume_state.truncate_tail;
 
     let mut file_flags = fs::OpenOptions::new();
     file_flags.write(true);
@@ -585,22 +586,13 @@ where
     let mut src_file = File::open(src).await?;
     let mut dst_file = file_flags.open(&write_target).await?;
 
+    if truncate_tail {
+        dst_file.set_len(start_offset).await?;
+    }
+
     if start_offset > 0 {
         src_file.seek(SeekFrom::Start(start_offset)).await?;
         dst_file.seek(SeekFrom::Start(start_offset)).await?;
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::io::AsRawFd;
-        let remaining = file_size.saturating_sub(start_offset);
-        if remaining > 0 {
-            let fd = dst_file.as_raw_fd();
-            unsafe {
-                let _ =
-                    libc::fallocate(fd, 0, start_offset as libc::off_t, remaining as libc::off_t);
-            }
-        }
     }
 
     let mut session = super::super::copy_strategies::create_session(

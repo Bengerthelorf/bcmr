@@ -26,10 +26,22 @@ pub async fn durable_sync_async(file: &tokio::fs::File) -> io::Result<()> {
         .map_err(io::Error::other)?
 }
 
+#[cfg(unix)]
+pub fn durable_sync_dir(dir: &Path) -> io::Result<()> {
+    let directory = std::fs::File::open(dir)?;
+    durable_sync(&directory)
+}
+
+#[cfg(not(unix))]
+pub fn durable_sync_dir(_dir: &Path) -> io::Result<()> {
+    // std::fs cannot open directory handles on Windows. The session file
+    // itself is already flushed before rename; directory flushing remains
+    // best-effort on that platform.
+    Ok(())
+}
+
 pub fn fsync_dir(dir: &Path) {
-    if let Ok(d) = std::fs::File::open(dir) {
-        let _ = durable_sync(&d);
-    }
+    let _ = durable_sync_dir(dir);
 }
 
 pub async fn fsync_dir_async(dir: &Path) {
@@ -65,7 +77,7 @@ mod tests {
     #[test]
     fn test_fsync_dir_on_valid_dir() {
         let dir = tempfile::tempdir().unwrap();
-        fsync_dir(dir.path());
+        durable_sync_dir(dir.path()).unwrap();
     }
 
     #[test]

@@ -96,15 +96,18 @@ The two recovery branches that recopy a block are wasteful but
 correct; the only forbidden state ("session says k is durable, but
 k isn't on disk") is unreachable.
 
-### Resume: Tail-Block Verification
+### Resume: Contiguous Prefix Verification
 
-On resume, we exploit the invariant. All blocks except possibly the last are guaranteed by the checkpoint ordering. We only verify the **tail block** --- the one that was being written when the crash occurred:
+Checkpoint ordering proves that the session never gets ahead of durable data,
+but it cannot prove that neither the source nor an older destination block was
+modified later. Current bcmr therefore verifies every published block against
+both the current source and destination, stopping at the first mismatch:
 
-$$T_{\text{resume}} = T_{\text{hash}}(b) = \mathcal{O}(1) \quad \text{independent of } k$$
+$$T_{\text{resume}} = T_{\text{hash-src}}(k) + T_{\text{hash-dst}}(k) = \mathcal{O}(k)$$
 
-versus full prefix rehash:
-
-$$T_{\text{old-resume}} = T_{\text{hash}}(k) = \mathcal{O}(k)$$
+The tail-only measurements below document an earlier performance prototype;
+they are retained as historical ablation data, not as the current safety
+contract.
 
 ### 2-Pass Verified Copy
 
@@ -243,15 +246,15 @@ This conclusion was for the single-file case. The [Local Multi-File Performance]
 | | cp | rsync | curl -C | aria2 | bcmr (SCC) |
 |---|---|---|---|---|---|
 | Resume granularity | None | Block rolling | Byte offset | 16 KiB bitmap | 4 MB blocks |
-| Resume verification | N/A | $\mathcal{O}(n)$ rolling | None | Piece hash (if available) | $\mathcal{O}(1)$ tail-block |
+| Resume verification | N/A | $\mathcal{O}(n)$ rolling | None | Piece hash (if available) | $\mathcal{O}(k)$ contiguous source + destination blocks |
 | State persistence | None | None | None | `.aria2` control file | Binary session file |
 | Crash safety | None | Partial file left | Partial file left | Good (bitmap) | fdatasync ordering invariant |
-| Source change detection | None | mtime+size | None | If-Modified-Since | mtime+size+inode (session) |
+| Source change detection | None | mtime+size | None | If-Modified-Since | Session identity + current block content |
 | Inline hash | No | No | No | No | Always-on BLAKE3 |
 | Verify I/O cost | N/A | $3n$ | N/A | $2n$ (with piece hashes) | $2n$ (inline src hash) |
 
 Key differentiators:
-- **Constant-time resume verification** --- no other `cp`-class tool achieves $\mathcal{O}(1)$.
+- **Bidirectional resume proof** --- every accepted prefix block matches both the current source and destination.
 - **Always-on source hash** --- verification is a byproduct of copying, not a separate pass.
 - **Formal crash safety** --- write ordering invariant with `F_FULLFSYNC` / `fdatasync` + directory fsync.
 

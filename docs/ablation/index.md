@@ -75,7 +75,7 @@ marked *non-goal* are design decisions without a measurement
 | Decision | Lives on | Measured benefit (workload) |
 |----------|----------|------------------|
 | Always-on BLAKE3 (single hash) | [SCC](/ablation/scc#experiment-1-inline-blake3-hash-overhead) | Free on Linux AVX-512 (~5 GB/s > NVMe); 8--56 % overhead on macOS NEON warm cache |
-| Tail-block resume verify | [SCC](/ablation/scc#experiment-3-tail-block-vs-full-prefix-rehash) | 50--145× vs full prefix rehash, 48--768 MiB written, mac/Linux |
+| Historical tail-block resume prototype (superseded by contiguous proof) | [SCC](/ablation/scc#experiment-3-tail-block-vs-full-prefix-rehash) | 50--145× vs full prefix rehash, 48--768 MiB written, mac/Linux; not the current safety mode |
 | 64 MiB checkpoint interval | [SCC](/ablation/scc#experiment-4-sync-interval-overhead) | ≤ 16 % overhead and ≤ 64 MiB rework on both platforms (single-file, warm cache) |
 | `copy_file_range` with offset | [SCC](/ablation/scc#experiment-6-copy-file-range-with-offset-linux) | 8--24 % faster resume on Linux NVMe (64--512 MiB) |
 | Opt-in per-file fsync | [Local Perf](/ablation/local-perf#experiment-7-per-file-durability-cost) | 13× faster (9.9 s → 0.72 s) on 2100 × 4 KiB repo, mac APFS warm cache |

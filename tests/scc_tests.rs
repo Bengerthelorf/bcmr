@@ -98,7 +98,9 @@ fn test_session_load_roundtrip() {
 
     let original = simulate_copy_with_session(&src, &dst);
 
-    let loaded = Session::load(&src, &dst).expect("session should load");
+    let loaded = Session::load(&src, &dst)
+        .unwrap()
+        .expect("session should load");
     assert_eq!(loaded.block_hashes.len(), original.block_hashes.len());
     assert_eq!(loaded.bytes_written, original.bytes_written);
     assert_eq!(loaded.src_size, original.src_size);
@@ -144,7 +146,7 @@ fn test_tail_block_verify_intact() {
     let session = simulate_copy_with_session(&src, &dst);
     assert_eq!(session.block_hashes.len(), 5);
 
-    let resume_offset = session.find_resume_offset(&dst);
+    let resume_offset = session.find_verified_resume_offset(&src, &dst).unwrap();
     assert_eq!(resume_offset, 20 * 1024 * 1024);
 
     Session::remove(&src, &dst);
@@ -163,7 +165,7 @@ fn test_tail_block_verify_truncated() {
     dst_file.set_len(14 * 1024 * 1024).unwrap();
     drop(dst_file);
 
-    let resume_offset = session.find_resume_offset(&dst);
+    let resume_offset = session.find_verified_resume_offset(&src, &dst).unwrap();
     assert_eq!(resume_offset, 12 * 1024 * 1024);
 
     Session::remove(&src, &dst);
@@ -184,7 +186,7 @@ fn test_tail_block_verify_corrupted_last_block() {
     f.write_all(&[0xFF]).unwrap();
     drop(f);
 
-    let resume_offset = session.find_resume_offset(&dst);
+    let resume_offset = session.find_verified_resume_offset(&src, &dst).unwrap();
     assert_eq!(resume_offset, 16 * 1024 * 1024);
 
     Session::remove(&src, &dst);
@@ -201,8 +203,11 @@ fn test_tail_block_verify_empty_dst() {
 
     fs::remove_file(&dst).unwrap();
 
-    let resume_offset = session.find_resume_offset(&dst);
-    assert_eq!(resume_offset, 0);
+    let resume_offset = session.find_verified_resume_offset(&src, &dst);
+    assert!(
+        resume_offset.is_err(),
+        "destination I/O errors must not be converted into a trusted zero offset"
+    );
 
     Session::remove(&src, &dst);
 }
@@ -224,10 +229,158 @@ fn test_tail_block_verify_multiple_corrupt_blocks() {
     f.write_all(&[0xFF]).unwrap();
     drop(f);
 
-    let resume_offset = session.find_resume_offset(&dst);
+    let resume_offset = session.find_verified_resume_offset(&src, &dst).unwrap();
     assert_eq!(resume_offset, 12 * 1024 * 1024);
 
     Session::remove(&src, &dst);
+}
+
+#[test]
+fn resume_proof_stops_at_first_corrupt_block_even_if_later_blocks_match() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    create_test_file(&src, 12 * 1024 * 1024);
+
+    let session = simulate_copy_with_session(&src, &dst);
+    let mut f = fs::OpenOptions::new().write(true).open(&dst).unwrap();
+    f.write_all(&[0xFF]).unwrap();
+    drop(f);
+
+    assert_eq!(
+        session.find_verified_resume_offset(&src, &dst).unwrap(),
+        0,
+        "resume proof must be a contiguous prefix starting at block zero"
+    );
+
+    Session::remove(&src, &dst);
+}
+
+#[test]
+fn resume_proof_rejects_source_changed_with_same_identity_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    create_test_file(&src, 8 * 1024 * 1024);
+
+    let session = simulate_copy_with_session(&src, &dst);
+    let original_mtime = filetime::FileTime::from_last_modification_time(&src.metadata().unwrap());
+
+    let mut source = fs::OpenOptions::new().write(true).open(&src).unwrap();
+    source.write_all(&[0xFF]).unwrap();
+    source.sync_all().unwrap();
+    drop(source);
+    filetime::set_file_mtime(&src, original_mtime).unwrap();
+
+    let meta = src.metadata().unwrap();
+    let mtime = meta
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let inode = durable_io::get_inode(&src).unwrap_or(0);
+    assert!(
+        session.source_matches(meta.len(), mtime, inode),
+        "fixture must preserve the legacy size/mtime/inode identity check"
+    );
+    assert_eq!(
+        session.find_verified_resume_offset(&src, &dst).unwrap(),
+        0,
+        "an old destination prefix is not proof for the current source"
+    );
+
+    Session::remove(&src, &dst);
+}
+
+#[test]
+fn resume_proof_accepts_complete_partial_final_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    let file_size = COPY_BLOCK_SIZE + 123;
+    create_test_file(&src, file_size as usize);
+
+    let session = simulate_copy_with_session(&src, &dst);
+
+    assert_eq!(
+        session.find_verified_resume_offset(&src, &dst).unwrap(),
+        file_size,
+        "the final session hash covers exactly bytes_written, not a padded block"
+    );
+
+    Session::remove(&src, &dst);
+}
+
+#[test]
+fn resume_prefix_structure_requires_exact_bounded_contiguous_coverage() {
+    let mut session = Session::new(
+        Path::new("/source"),
+        Path::new("/destination"),
+        2 * COPY_BLOCK_SIZE,
+        0,
+        0,
+    );
+    assert!(session.has_valid_resume_structure());
+
+    session.bytes_written = COPY_BLOCK_SIZE;
+    assert!(
+        !session.has_valid_resume_structure(),
+        "bytes_written requires exactly one hash"
+    );
+
+    session.block_hashes.push([0; 32]);
+    assert!(session.has_valid_resume_structure());
+    assert!(
+        session.has_valid_resume_structure(),
+        "destination truncation does not corrupt the session's own structure"
+    );
+
+    session.block_hashes.push([0; 32]);
+    assert!(
+        !session.has_valid_resume_structure(),
+        "extra hashes are not part of a contiguous published prefix"
+    );
+
+    session.bytes_written = 2 * COPY_BLOCK_SIZE + 1;
+    assert!(
+        !session.has_valid_resume_structure(),
+        "the prefix may not exceed the source"
+    );
+
+    let mut partial = Session::new(
+        Path::new("/source"),
+        Path::new("/destination"),
+        COPY_BLOCK_SIZE + 123,
+        0,
+        0,
+    );
+    partial.bytes_written = COPY_BLOCK_SIZE + 123;
+    partial.block_hashes = vec![[0; 32], [1; 32]];
+    assert!(partial.has_valid_resume_structure());
+
+    partial.src_size += 1;
+    assert!(
+        !partial.has_valid_resume_structure(),
+        "a partial block is valid only as the source's final block"
+    );
+}
+
+#[test]
+fn resume_proof_rejects_invalid_session_shape_at_its_api_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    fs::write(&src, [1]).unwrap();
+    fs::write(&dst, [1]).unwrap();
+
+    let mut session = Session::new(&src, &dst, 1, 0, 0);
+    session.bytes_written = 1;
+
+    let error = session
+        .find_verified_resume_offset(&src, &dst)
+        .expect_err("bytes_written without its hash is invalid");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
 }
 
 #[test]
@@ -268,7 +421,7 @@ fn test_session_expired() {
     session.updated_at = session.updated_at.saturating_sub(8 * 24 * 3600);
     session.save().unwrap();
 
-    let loaded = Session::load(&src, &dst);
+    let loaded = Session::load(&src, &dst).unwrap();
     assert!(loaded.is_none(), "expired session should not load");
 }
 
@@ -298,8 +451,12 @@ fn test_block_hashes_are_correct() {
 #[test]
 fn test_resume_offset_no_blocks() {
     let session = Session::new(Path::new("/a"), Path::new("/b"), 1000, 0, 0);
-    let resume = session.find_resume_offset(Path::new("/nonexistent"));
-    assert_eq!(resume, 0);
+    let resume =
+        session.find_verified_resume_offset(Path::new("/nonexistent-src"), Path::new("/b"));
+    assert!(
+        resume.is_err(),
+        "source I/O errors must be visible to the caller"
+    );
 }
 
 #[test]
@@ -312,7 +469,7 @@ fn test_resume_offset_single_block_intact() {
     let session = simulate_copy_with_session(&src, &dst);
     assert_eq!(session.block_hashes.len(), 1);
 
-    let resume = session.find_resume_offset(&dst);
+    let resume = session.find_verified_resume_offset(&src, &dst).unwrap();
     assert_eq!(resume, COPY_BLOCK_SIZE);
 
     Session::remove(&src, &dst);
@@ -335,7 +492,7 @@ fn test_session_corrupted_file_rejected() {
     data[mid] ^= 0xFF;
     fs::write(&session_path, &data).unwrap();
 
-    let loaded = Session::load(&src, &dst);
+    let loaded = Session::load(&src, &dst).unwrap();
     assert!(loaded.is_none(), "corrupted session should not load");
 
     Session::remove(&src, &dst);
@@ -354,7 +511,7 @@ fn test_session_truncated_file_rejected() {
     let data = fs::read(&session_path).unwrap();
     fs::write(&session_path, &data[..data.len() / 2]).unwrap();
 
-    let loaded = Session::load(&src, &dst);
+    let loaded = Session::load(&src, &dst).unwrap();
     assert!(loaded.is_none(), "truncated session should not load");
 
     Session::remove(&src, &dst);

@@ -852,6 +852,431 @@ fn e2e_carry_forward_code_path() {
     );
 }
 
+#[test]
+fn e2e_resume_rewrites_preallocated_unverified_tail() {
+    use std::io::Read;
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    let block_size = bcmr::core::session::COPY_BLOCK_SIZE;
+    create_random_file(&src, (2 * block_size) as usize);
+
+    let src_meta = src.metadata().unwrap();
+    let src_mtime = src_meta
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let src_inode = durable_io::get_inode(&src).unwrap_or(0);
+    let mut session = Session::new(&src, &dst, src_meta.len(), src_mtime, src_inode);
+
+    let mut first_block = vec![0u8; block_size as usize];
+    fs::File::open(&src)
+        .unwrap()
+        .read_exact(&mut first_block)
+        .unwrap();
+    let mut destination = fs::File::create(&dst).unwrap();
+    destination.write_all(&first_block).unwrap();
+    destination.set_len(src_meta.len()).unwrap();
+    destination.sync_all().unwrap();
+    session.add_block(*blake3::hash(&first_block).as_bytes(), block_size);
+    session.save().unwrap();
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "-C",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    assert!(ok, "resume should repair the unverified tail: {stderr}");
+    assert!(
+        files_match(&src, &dst),
+        "same length from preallocation is not proof of complete content"
+    );
+}
+
+#[test]
+fn e2e_resume_rejects_session_prefix_after_same_identity_source_rewrite() {
+    use std::io::Read;
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    let block_size = bcmr::core::session::COPY_BLOCK_SIZE;
+    create_random_file(&src, (2 * block_size) as usize);
+
+    let src_meta = src.metadata().unwrap();
+    let original_mtime = filetime::FileTime::from_last_modification_time(&src_meta);
+    let src_mtime = src_meta
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let src_inode = durable_io::get_inode(&src).unwrap_or(0);
+    let mut session = Session::new(&src, &dst, src_meta.len(), src_mtime, src_inode);
+
+    let mut first_block = vec![0; block_size as usize];
+    fs::File::open(&src)
+        .unwrap()
+        .read_exact(&mut first_block)
+        .unwrap();
+    fs::write(&dst, &first_block).unwrap();
+    session.add_block(*blake3::hash(&first_block).as_bytes(), block_size);
+    session.save().unwrap();
+
+    let mut source = fs::OpenOptions::new().write(true).open(&src).unwrap();
+    source.write_all(&[first_block[0] ^ 0xFF]).unwrap();
+    source.sync_all().unwrap();
+    drop(source);
+    filetime::set_file_mtime(&src, original_mtime).unwrap();
+    let current_meta = src.metadata().unwrap();
+    let current_mtime = current_meta
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert!(session.source_matches(
+        current_meta.len(),
+        current_mtime,
+        durable_io::get_inode(&src).unwrap_or(0)
+    ));
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "-C",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    assert!(
+        ok,
+        "resume should restart from current source content: {stderr}"
+    );
+    assert!(files_match(&src, &dst));
+}
+
+#[test]
+fn e2e_sparse_resume_zeroes_an_unverified_dirty_tail() {
+    use std::io::Read;
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    let block_size = bcmr::core::session::COPY_BLOCK_SIZE;
+    create_random_file(&src, block_size as usize);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&src)
+        .unwrap()
+        .write_all(&vec![0; block_size as usize])
+        .unwrap();
+
+    let src_meta = src.metadata().unwrap();
+    let src_mtime = src_meta
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let src_inode = durable_io::get_inode(&src).unwrap_or(0);
+    let mut session = Session::new(&src, &dst, src_meta.len(), src_mtime, src_inode);
+    let mut first_block = vec![0; block_size as usize];
+    fs::File::open(&src)
+        .unwrap()
+        .read_exact(&mut first_block)
+        .unwrap();
+    let mut destination = fs::File::create(&dst).unwrap();
+    destination.write_all(&first_block).unwrap();
+    destination
+        .write_all(&vec![0xA5; block_size as usize])
+        .unwrap();
+    destination.sync_all().unwrap();
+    session.add_block(*blake3::hash(&first_block).as_bytes(), block_size);
+    session.save().unwrap();
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "-C",
+        "--sparse=force",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    assert!(ok, "sparse resume should recreate the zero tail: {stderr}");
+    assert!(
+        files_match(&src, &dst),
+        "seeking over zeros must not preserve old destination bytes"
+    );
+}
+
+#[test]
+fn e2e_resume_without_session_does_not_trust_equal_length_and_mtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    create_random_file(&src, 1024 * 1024);
+    fs::write(&dst, vec![0xA5; 1024 * 1024]).unwrap();
+
+    let source_mtime = filetime::FileTime::from_last_modification_time(&src.metadata().unwrap());
+    filetime::set_file_mtime(&dst, source_mtime).unwrap();
+    assert_eq!(src.metadata().unwrap().len(), dst.metadata().unwrap().len());
+    assert_eq!(
+        src.metadata().unwrap().modified().unwrap(),
+        dst.metadata().unwrap().modified().unwrap()
+    );
+    assert!(!session_exists(&src, &dst));
+    assert!(!files_match(&src, &dst));
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "-C",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    assert!(ok, "resume should safely restart: {stderr}");
+    assert!(
+        files_match(&src, &dst),
+        "equal length and mtime are not content proof"
+    );
+}
+
+#[test]
+fn e2e_resume_truncates_bytes_beyond_fully_verified_source() {
+    use std::io::Read;
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    let block_size = bcmr::core::session::COPY_BLOCK_SIZE;
+    create_random_file(&src, block_size as usize);
+
+    let src_meta = src.metadata().unwrap();
+    let src_mtime = src_meta
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let src_inode = durable_io::get_inode(&src).unwrap_or(0);
+    let mut session = Session::new(&src, &dst, src_meta.len(), src_mtime, src_inode);
+
+    let mut source_bytes = vec![0u8; block_size as usize];
+    fs::File::open(&src)
+        .unwrap()
+        .read_exact(&mut source_bytes)
+        .unwrap();
+    let mut destination = fs::File::create(&dst).unwrap();
+    destination.write_all(&source_bytes).unwrap();
+    destination.write_all(b"unverified trailing bytes").unwrap();
+    destination.sync_all().unwrap();
+    session.add_block(*blake3::hash(&source_bytes).as_bytes(), block_size);
+    session.save().unwrap();
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "-C",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    assert!(ok, "resume should remove the unverified suffix: {stderr}");
+    assert_eq!(dst.metadata().unwrap().len(), src_meta.len());
+    assert!(files_match(&src, &dst));
+}
+
+#[test]
+fn e2e_append_refuses_to_truncate_a_longer_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    fs::write(&src, b"source").unwrap();
+    let original_destination = b"destination-is-longer".to_vec();
+    fs::write(&dst, &original_destination).unwrap();
+
+    let (ok, _, _) = run_bcmr(&[
+        "copy",
+        "-t",
+        "--append",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    assert!(!ok, "append cannot establish a safe offset past source EOF");
+    assert_eq!(
+        fs::read(&dst).unwrap(),
+        original_destination,
+        "a refused append must leave the destination unchanged"
+    );
+}
+
+#[test]
+fn e2e_append_shorter_destination_preserves_prefix_and_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    fs::write(&src, b"verified-prefix-and-tail").unwrap();
+    fs::write(&dst, b"verified-prefix").unwrap();
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "--append",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    assert!(
+        ok,
+        "append should complete from the explicit size offset: {stderr}"
+    );
+    assert_eq!(fs::read(&dst).unwrap(), fs::read(&src).unwrap());
+}
+
+#[test]
+fn e2e_strict_shorter_destination_proves_prefix_and_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    create_random_file(&src, 1024 * 1024 + 123);
+    let source = fs::read(&src).unwrap();
+    fs::write(&dst, &source[..333_333]).unwrap();
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "-t",
+        "--strict",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    assert!(
+        ok,
+        "strict resume should complete a proven prefix: {stderr}"
+    );
+    assert!(files_match(&src, &dst));
+}
+
+#[test]
+fn e2e_dry_run_resume_and_strict_use_content_proof() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    create_random_file(&src, 1024 * 1024);
+    let corrupt_destination = vec![0x5A; 1024 * 1024];
+    fs::write(&dst, &corrupt_destination).unwrap();
+    let source_mtime = filetime::FileTime::from_last_modification_time(&src.metadata().unwrap());
+    filetime::set_file_mtime(&dst, source_mtime).unwrap();
+
+    for mode in ["--resume", "--strict"] {
+        let (ok, stdout, stderr) = run_bcmr(&[
+            "copy",
+            "-n",
+            mode,
+            src.to_str().unwrap(),
+            dst.to_str().unwrap(),
+        ]);
+        assert!(ok, "{mode} dry-run should succeed: {stderr}");
+        assert!(
+            stdout.contains("OVERWRITE"),
+            "{mode} dry-run must match the real content-based restart decision: {stdout}"
+        );
+        assert_eq!(
+            fs::read(&dst).unwrap(),
+            corrupt_destination,
+            "dry-run must not change destination content"
+        );
+    }
+}
+
+#[test]
+fn e2e_dry_run_forced_direct_modes_preview_the_forced_overwrite() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    fs::write(&src, b"identical content").unwrap();
+    fs::write(&dst, b"identical content").unwrap();
+
+    for mode in ["--resume", "--strict", "--append"] {
+        let (ok, stdout, stderr) = run_bcmr(&[
+            "copy",
+            "-n",
+            "-f",
+            "-y",
+            mode,
+            src.to_str().unwrap(),
+            dst.to_str().unwrap(),
+        ]);
+        assert!(ok, "{mode} forced dry-run should succeed: {stderr}");
+        assert!(
+            stdout.contains("OVERWRITE"),
+            "{mode} dry-run must preview the existing forced direct-mode semantics: {stdout}"
+        );
+        assert_eq!(fs::read(&dst).unwrap(), b"identical content");
+    }
+}
+
+#[test]
+fn e2e_dry_run_resume_uses_session_proof_without_mutating_session() {
+    use std::io::Read;
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let dst = dir.path().join("dst.bin");
+    let block_size = bcmr::core::session::COPY_BLOCK_SIZE;
+    create_random_file(&src, (2 * block_size) as usize);
+
+    let src_meta = src.metadata().unwrap();
+    let src_mtime = src_meta
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let src_inode = durable_io::get_inode(&src).unwrap_or(0);
+    let mut session = Session::new(&src, &dst, src_meta.len(), src_mtime, src_inode);
+    let mut first_block = vec![0; block_size as usize];
+    fs::File::open(&src)
+        .unwrap()
+        .read_exact(&mut first_block)
+        .unwrap();
+    let mut destination = fs::File::create(&dst).unwrap();
+    destination.write_all(&first_block).unwrap();
+    destination.set_len(src_meta.len()).unwrap();
+    destination.sync_all().unwrap();
+    session.add_block(*blake3::hash(&first_block).as_bytes(), block_size);
+    session.save().unwrap();
+
+    let session_path = Session::session_path(&src, &dst);
+    let session_before = fs::read(&session_path).unwrap();
+    let destination_hash_before = checksum::calculate_hash(&dst).unwrap();
+    let (ok, stdout, stderr) = run_bcmr(&[
+        "copy",
+        "-n",
+        "--resume",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+
+    assert!(ok, "session-aware dry-run should succeed: {stderr}");
+    assert!(
+        stdout.contains("APPEND"),
+        "dry-run should report the same proven resume decision: {stdout}"
+    );
+    assert_eq!(
+        fs::read(&session_path).unwrap(),
+        session_before,
+        "dry-run must not rewrite or remove session state"
+    );
+    assert_eq!(
+        checksum::calculate_hash(&dst).unwrap(),
+        destination_hash_before,
+        "dry-run must not truncate the unverified destination tail"
+    );
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn test_xattr_preserved_with_p_flag() {
