@@ -15,13 +15,12 @@ fn platform_target() -> Result<&'static str> {
 }
 
 fn version_newer(latest: &str, current: &str) -> bool {
-    let parse = |v: &str| -> Vec<u32> {
-        v.trim_start_matches('v')
-            .split('.')
-            .filter_map(|s| s.parse().ok())
-            .collect()
-    };
-    parse(latest) > parse(current)
+    let parse =
+        |version: &str| semver::Version::parse(version.strip_prefix('v').unwrap_or(version)).ok();
+    match (parse(latest), parse(current)) {
+        (Some(latest), Some(current)) => latest.cmp_precedence(&current).is_gt(),
+        _ => false,
+    }
 }
 
 fn fetch_latest_version() -> Result<String> {
@@ -90,4 +89,35 @@ pub fn run(check_only: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::version_newer;
+
+    #[test]
+    fn version_newer_follows_semver_prerelease_ordering() {
+        assert!(version_newer("v0.7.0", "0.7.0-rc.1"));
+        assert!(version_newer("0.7.0-rc.2", "0.7.0-rc.1"));
+        assert!(version_newer("0.7.0-alpha.10", "v0.7.0-alpha.2"));
+        assert!(!version_newer("0.7.0-rc.1", "0.7.0"));
+    }
+
+    #[test]
+    fn version_newer_ignores_build_metadata_and_rejects_invalid_versions() {
+        assert!(!version_newer("1.2.3+build.2", "1.2.3+build.1"));
+        assert!(!version_newer(
+            "1.2.3-alpha.1+build.2",
+            "1.2.3-alpha.1+build.1"
+        ));
+        assert!(!version_newer("not-a-version", "1.2.3"));
+        assert!(!version_newer("1.2.3", "not-a-version"));
+    }
+
+    #[test]
+    fn version_newer_handles_equal_and_plain_patch_versions() {
+        assert!(version_newer("1.2.4", "v1.2.3"));
+        assert!(!version_newer("1.2.3", "1.2.3"));
+        assert!(!version_newer("1.2.2", "1.2.3"));
+    }
 }
