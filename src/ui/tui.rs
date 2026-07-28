@@ -4,11 +4,14 @@ use crate::ui::state::ProgressData;
 use crate::ui::suspend::{install_suspend_handler, suspend_now};
 use crate::ui::utils::{format_bytes, format_eta, get_gradient_color, parse_hex_color};
 use crossterm::{
-    cursor::{position, Hide, MoveTo, Show},
+    cursor::{Hide, MoveTo, Show},
     event::{self, Event, KeyCode},
     execute,
     style::{Attribute, SetAttribute, SetForegroundColor},
-    terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
 };
 use std::io::{self, stdout, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +25,9 @@ pub struct TuiProgress {
     finished: bool,
     suspended: Arc<AtomicBool>,
     last_rendered_lines: u16,
+    alternate_screen_enabled: bool,
+    last_terminal_size: Option<(u16, u16)>,
+    compact_layout: bool,
 }
 
 impl TuiProgress {
@@ -35,6 +41,9 @@ impl TuiProgress {
             finished: false,
             suspended: Arc::new(AtomicBool::new(false)),
             last_rendered_lines: 0,
+            alternate_screen_enabled: false,
+            last_terminal_size: None,
+            compact_layout: false,
         })
     }
 
@@ -53,34 +62,69 @@ impl TuiProgress {
 
         self.suspended = install_suspend_handler()?;
 
-        let required_height = self.total_lines();
-
-        let (_, term_height) = terminal_size::terminal_size()
-            .map(|(w, h)| (w.0, h.0))
-            .unwrap_or((80, 24));
-
-        let (_col, mut row) = position().unwrap_or((0, 0));
-
-        if row + required_height > term_height {
-            let lines_to_scroll = (row + required_height).saturating_sub(term_height);
-            for _ in 0..lines_to_scroll {
-                println!();
-            }
-            let (_new_col, new_row) = position().unwrap_or((0, 0));
-            row = new_row;
-            if row + required_height > term_height {
-                row = term_height.saturating_sub(required_height);
-            }
+        enable_raw_mode()?;
+        if let Err(error) = execute!(
+            stdout(),
+            EnterAlternateScreen,
+            Clear(ClearType::All),
+            MoveTo(0, 0),
+            Hide
+        ) {
+            let _ = disable_raw_mode();
+            return Err(error);
         }
 
-        self.start_row = row;
-
-        let _ = enable_raw_mode();
-        let _ = execute!(stdout(), Hide);
-
+        self.start_row = 0;
         self.raw_mode_enabled = true;
+        self.alternate_screen_enabled = true;
         self.initialized = true;
 
+        Ok(())
+    }
+
+    fn redraw_compact(&mut self, term_width: u16) -> io::Result<()> {
+        let progress = (self.data.current_bytes as f64 / self.data.total_bytes.max(1) as f64
+            * 100.0)
+            .min(100.0) as u16;
+        let operation = if self.data.operation_type.is_empty() {
+            "Progress"
+        } else {
+            self.data.operation_type.as_str()
+        };
+
+        let mut line = format!(
+            "{} {:>3}% · {} / {}",
+            operation,
+            progress,
+            format_bytes(self.data.current_bytes as f64),
+            format_bytes(self.data.total_bytes as f64)
+        );
+        let max_width = term_width.max(1) as usize;
+        if line.chars().count() > max_width {
+            line = if max_width == 1 {
+                "…".to_string()
+            } else {
+                let mut clipped = line.chars().take(max_width - 1).collect::<String>();
+                clipped.push('…');
+                clipped
+            };
+        }
+
+        let mut output = stdout();
+        execute!(
+            output,
+            MoveTo(0, 0),
+            SetAttribute(Attribute::Reset),
+            SetForegroundColor(parse_hex_color(&CONFIG.progress.theme.text_color))
+        )?;
+        write!(output, "{line}")?;
+        execute!(
+            output,
+            Clear(ClearType::UntilNewLine),
+            SetAttribute(Attribute::Reset)
+        )?;
+        output.flush()?;
+        self.last_rendered_lines = 1;
         Ok(())
     }
 
@@ -95,6 +139,24 @@ impl TuiProgress {
 
         if !self.initialized {
             self.initialize()?;
+        }
+
+        let (term_width, term_height) = terminal_size::terminal_size()
+            .map(|(width, height)| (width.0, height.0))
+            .unwrap_or((80, 24));
+        let compact_layout = term_width < 50 || term_height < self.total_lines();
+        if self.last_terminal_size != Some((term_width, term_height))
+            || self.compact_layout != compact_layout
+        {
+            execute!(stdout(), Clear(ClearType::All), MoveTo(0, 0))?;
+            self.start_row = 0;
+            self.last_rendered_lines = 0;
+        }
+        self.last_terminal_size = Some((term_width, term_height));
+        self.compact_layout = compact_layout;
+
+        if compact_layout {
+            return self.redraw_compact(term_width);
         }
 
         let new_lines = self.total_lines();
@@ -151,10 +213,8 @@ impl TuiProgress {
 
         let mut stdout = stdout();
 
-        use terminal_size::{terminal_size, Height, Width};
-        let (term_width, _) = terminal_size().unwrap_or((Width(80), Height(24)));
-        let box_width = term_width.0 as usize;
-        let right_border_col = (term_width.0).saturating_sub(2);
+        let box_width = term_width as usize;
+        let right_border_col = term_width.saturating_sub(2);
 
         let theme = &CONFIG.progress.theme;
         let layout = &CONFIG.progress.layout;
@@ -480,13 +540,15 @@ impl TuiProgress {
 
 impl Drop for TuiProgress {
     fn drop(&mut self) {
-        if self.raw_mode_enabled && !self.finished {
-            let _ = execute!(
-                stdout(),
-                Show,
-                MoveTo(0, self.start_row + self.total_lines())
-            );
-            let _ = disable_raw_mode();
+        if !self.finished {
+            if self.alternate_screen_enabled {
+                let _ = execute!(stdout(), Show, LeaveAlternateScreen);
+                self.alternate_screen_enabled = false;
+            }
+            if self.raw_mode_enabled {
+                let _ = disable_raw_mode();
+                self.raw_mode_enabled = false;
+            }
         }
     }
 }
@@ -583,12 +645,13 @@ impl ProgressRenderer for TuiProgress {
 
         let _ = self.redraw();
 
+        if self.alternate_screen_enabled && !was_suspended {
+            execute!(stdout(), Show, LeaveAlternateScreen)?;
+            self.alternate_screen_enabled = false;
+        }
         if self.raw_mode_enabled && !was_suspended {
-            let lines_used = self.total_lines();
-            execute!(stdout(), Show, MoveTo(0, self.start_row + lines_used))?;
             disable_raw_mode()?;
             self.raw_mode_enabled = false;
-            println!();
         }
 
         println!("{}", self.data.done_summary_line());
