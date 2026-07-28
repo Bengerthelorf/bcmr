@@ -14,9 +14,9 @@ use std::thread;
 pub fn suspend_now(suspended: &AtomicBool) {
     use crossterm::cursor::Show;
     use crossterm::execute;
-    use crossterm::terminal::disable_raw_mode;
+    use crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
 
-    let _ = execute!(std::io::stdout(), Show);
+    let _ = execute!(std::io::stdout(), Show, LeaveAlternateScreen);
     let _ = disable_raw_mode();
     suspended.store(true, Ordering::SeqCst);
 
@@ -37,14 +37,17 @@ pub fn install_suspend_handler() -> io::Result<Arc<AtomicBool>> {
         let mut signals = Signals::new([SIGTSTP, SIGCONT]).map_err(io::Error::other)?;
 
         thread::spawn(move || {
-            use crossterm::cursor::Show;
+            use crossterm::cursor::{Hide, MoveTo, Show};
             use crossterm::execute;
-            use crossterm::terminal::disable_raw_mode;
+            use crossterm::terminal::{
+                disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen,
+                LeaveAlternateScreen,
+            };
 
             for sig in signals.forever() {
                 match sig {
                     SIGTSTP => {
-                        let _ = execute!(std::io::stdout(), Show);
+                        let _ = execute!(std::io::stdout(), Show, LeaveAlternateScreen);
                         let _ = disable_raw_mode();
                         suspended_clone.store(true, Ordering::SeqCst);
 
@@ -59,10 +62,14 @@ pub fn install_suspend_handler() -> io::Result<Arc<AtomicBool>> {
                         };
 
                         if in_foreground {
-                            use crossterm::cursor::Hide;
-                            use crossterm::terminal::enable_raw_mode;
                             let _ = enable_raw_mode();
-                            let _ = execute!(std::io::stdout(), Hide);
+                            let _ = execute!(
+                                std::io::stdout(),
+                                EnterAlternateScreen,
+                                Clear(ClearType::All),
+                                MoveTo(0, 0),
+                                Hide
+                            );
                             suspended_clone.store(false, Ordering::SeqCst);
                         }
                     }
