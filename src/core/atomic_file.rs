@@ -536,6 +536,175 @@ struct BoundDirectory {
     handle: same_file::Handle,
 }
 
+#[cfg(target_os = "macos")]
+struct MacosInheritedFileAcl {
+    serialized: Vec<u8>,
+}
+
+#[cfg(target_os = "macos")]
+fn capture_macos_inherited_file_acl(
+    parent: &File,
+) -> Result<Option<MacosInheritedFileAcl>, BcmrError> {
+    use std::os::fd::AsRawFd;
+
+    type Acl = *mut std::ffi::c_void;
+    type AclEntry = *mut std::ffi::c_void;
+    type AclFlagset = *mut std::ffi::c_void;
+    const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0100;
+    const ACL_FIRST_ENTRY: libc::c_int = 0;
+    const ACL_NEXT_ENTRY: libc::c_int = -1;
+    const ACL_ENTRY_INHERITED: libc::c_int = 1 << 4;
+    const ACL_ENTRY_FILE_INHERIT: libc::c_int = 1 << 5;
+
+    unsafe extern "C" {
+        fn acl_get_fd_np(fd: libc::c_int, acl_type: libc::c_int) -> Acl;
+        fn acl_init(count: libc::c_int) -> Acl;
+        fn acl_get_entry(acl: Acl, entry_id: libc::c_int, entry: *mut AclEntry) -> libc::c_int;
+        fn acl_create_entry(acl: *mut Acl, entry: *mut AclEntry) -> libc::c_int;
+        fn acl_copy_entry(destination: AclEntry, source: AclEntry) -> libc::c_int;
+        fn acl_get_flagset_np(object: *mut std::ffi::c_void, flags: *mut AclFlagset)
+            -> libc::c_int;
+        fn acl_get_flag_np(flags: AclFlagset, flag: libc::c_int) -> libc::c_int;
+        fn acl_clear_flags_np(flags: AclFlagset) -> libc::c_int;
+        fn acl_add_flag_np(flags: AclFlagset, flag: libc::c_int) -> libc::c_int;
+        fn acl_set_flagset_np(object: *mut std::ffi::c_void, flags: AclFlagset) -> libc::c_int;
+        fn acl_size(acl: Acl) -> isize;
+        fn acl_copy_ext_native(buffer: *mut std::ffi::c_void, acl: Acl, size: isize) -> isize;
+        fn acl_free(object: *mut std::ffi::c_void) -> libc::c_int;
+    }
+
+    struct OwnedAcl(Acl);
+    impl Drop for OwnedAcl {
+        fn drop(&mut self) {
+            unsafe {
+                acl_free(self.0);
+            }
+        }
+    }
+
+    fn check(result: libc::c_int) -> Result<(), BcmrError> {
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(BcmrError::Io(std::io::Error::last_os_error()))
+        }
+    }
+
+    let parent_acl = unsafe { acl_get_fd_np(parent.as_raw_fd(), ACL_TYPE_EXTENDED) };
+    if parent_acl.is_null() {
+        let error = std::io::Error::last_os_error();
+        if error
+            .raw_os_error()
+            .is_some_and(|errno| [libc::ENOENT, libc::ENOTSUP, libc::EOPNOTSUPP].contains(&errno))
+        {
+            return Ok(None);
+        }
+        return Err(BcmrError::Io(error));
+    }
+    let _parent_acl = OwnedAcl(parent_acl);
+
+    let inherited_acl = unsafe { acl_init(0) };
+    if inherited_acl.is_null() {
+        return Err(BcmrError::Io(std::io::Error::last_os_error()));
+    }
+    let mut inherited_acl = OwnedAcl(inherited_acl);
+    let mut entry_count = 0usize;
+    let mut source_entry: AclEntry = std::ptr::null_mut();
+    let mut selector = ACL_FIRST_ENTRY;
+    loop {
+        let result = unsafe { acl_get_entry(parent_acl, selector, &mut source_entry) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if result == -1 && error.raw_os_error() == Some(libc::EINVAL) {
+                break;
+            }
+            return Err(BcmrError::Io(error));
+        }
+        selector = ACL_NEXT_ENTRY;
+
+        let mut source_flags: AclFlagset = std::ptr::null_mut();
+        check(unsafe { acl_get_flagset_np(source_entry, &mut source_flags) })?;
+        let inherits_file = unsafe { acl_get_flag_np(source_flags, ACL_ENTRY_FILE_INHERIT) };
+        if inherits_file < 0 {
+            return Err(BcmrError::Io(std::io::Error::last_os_error()));
+        }
+        if inherits_file == 0 {
+            continue;
+        }
+
+        let mut destination_entry: AclEntry = std::ptr::null_mut();
+        check(unsafe { acl_create_entry(&mut inherited_acl.0, &mut destination_entry) })?;
+        check(unsafe { acl_copy_entry(destination_entry, source_entry) })?;
+
+        let mut destination_flags: AclFlagset = std::ptr::null_mut();
+        check(unsafe { acl_get_flagset_np(destination_entry, &mut destination_flags) })?;
+        check(unsafe { acl_clear_flags_np(destination_flags) })?;
+        check(unsafe { acl_add_flag_np(destination_flags, ACL_ENTRY_INHERITED) })?;
+        check(unsafe { acl_set_flagset_np(destination_entry, destination_flags) })?;
+        entry_count += 1;
+    }
+
+    if entry_count == 0 {
+        return Ok(None);
+    }
+    let serialized_size = unsafe { acl_size(inherited_acl.0) };
+    if serialized_size <= 0 {
+        return Err(BcmrError::Io(std::io::Error::last_os_error()));
+    }
+    let mut serialized = vec![0u8; serialized_size as usize];
+    let copied = unsafe {
+        acl_copy_ext_native(
+            serialized.as_mut_ptr().cast(),
+            inherited_acl.0,
+            serialized_size,
+        )
+    };
+    if copied != serialized_size {
+        return Err(BcmrError::Io(std::io::Error::last_os_error()));
+    }
+    Ok(Some(MacosInheritedFileAcl { serialized }))
+}
+
+#[cfg(target_os = "macos")]
+fn apply_macos_inherited_file_acl(
+    file: &File,
+    inherited: &MacosInheritedFileAcl,
+) -> Result<(), BcmrError> {
+    use std::os::fd::AsRawFd;
+
+    type Acl = *mut std::ffi::c_void;
+    const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0100;
+    unsafe extern "C" {
+        fn acl_copy_int_native(buffer: *const std::ffi::c_void) -> Acl;
+        fn acl_set_fd_np(fd: libc::c_int, acl: Acl, acl_type: libc::c_int) -> libc::c_int;
+        fn acl_free(object: *mut std::ffi::c_void) -> libc::c_int;
+    }
+
+    struct OwnedAcl(Acl);
+    impl Drop for OwnedAcl {
+        fn drop(&mut self) {
+            unsafe {
+                acl_free(self.0);
+            }
+        }
+    }
+
+    let acl = unsafe { acl_copy_int_native(inherited.serialized.as_ptr().cast()) };
+    if acl.is_null() {
+        return Err(BcmrError::Io(std::io::Error::last_os_error()));
+    }
+    let acl = OwnedAcl(acl);
+    if unsafe { acl_set_fd_np(file.as_raw_fd(), acl.0, ACL_TYPE_EXTENDED) } != 0 {
+        return Err(BcmrError::Io(std::io::Error::last_os_error()));
+    }
+    if capture_macos_acl(file)?.as_deref() != Some(inherited.serialized.as_slice()) {
+        return Err(BcmrError::InvalidInput(
+            "atomic receive inherited ACL changed while applying it".into(),
+        ));
+    }
+    Ok(())
+}
+
 impl BoundDirectory {
     fn capture(path: &Path) -> Result<Self, BcmrError> {
         #[cfg(unix)]
@@ -726,35 +895,74 @@ fn clear_and_verify_private_transaction_acl(directory: &BoundDirectory) -> Resul
 fn clear_and_verify_private_transaction_acl(directory: &BoundDirectory) -> Result<(), BcmrError> {
     use xattr::FileExt;
 
-    const ACL_XATTRS: [&str; 2] = ["system.posix_acl_access", "system.posix_acl_default"];
     let file = directory.handle.as_file();
-    for name in ACL_XATTRS {
-        if let Err(error) = file.remove_xattr(name) {
-            if !error.raw_os_error().is_some_and(|errno| {
-                [libc::ENODATA, libc::ENOTSUP, libc::EOPNOTSUPP].contains(&errno)
-            }) {
-                return Err(BcmrError::Io(error));
-            }
+    // A default ACL controls only future children; it grants no access to
+    // this 0700 directory. Retain it until the empty payload is created so
+    // that the payload receives the same access ACL as a direct child.
+    let name = "system.posix_acl_access";
+    if let Err(error) = file.remove_xattr(name) {
+        if !error
+            .raw_os_error()
+            .is_some_and(|errno| [libc::ENODATA, libc::ENOTSUP, libc::EOPNOTSUPP].contains(&errno))
+        {
+            return Err(BcmrError::Io(error));
         }
     }
-    for name in ACL_XATTRS {
-        match file.get_xattr(name) {
-            Ok(None) => {}
-            Ok(Some(_)) => {
-                return Err(BcmrError::InvalidInput(format!(
-                    "atomic receive transaction '{}' retained POSIX ACL '{}'",
-                    directory.path.display(),
-                    name
-                )));
-            }
-            Err(error)
-                if error
-                    .raw_os_error()
-                    .is_some_and(|errno| [libc::ENOTSUP, libc::EOPNOTSUPP].contains(&errno)) => {}
-            Err(error) => return Err(BcmrError::Io(error)),
+    match file.get_xattr(name) {
+        Ok(None) => {}
+        Ok(Some(_)) => {
+            return Err(BcmrError::InvalidInput(format!(
+                "atomic receive transaction '{}' retained POSIX access ACL",
+                directory.path.display(),
+            )));
         }
+        Err(error)
+            if error
+                .raw_os_error()
+                .is_some_and(|errno| [libc::ENOTSUP, libc::EOPNOTSUPP].contains(&errno)) => {}
+        Err(error) => return Err(BcmrError::Io(error)),
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn clear_and_verify_private_transaction_inheritance_acl(
+    directory: &BoundDirectory,
+) -> Result<(), BcmrError> {
+    use xattr::FileExt;
+
+    let file = directory.handle.as_file();
+    let name = "system.posix_acl_default";
+    if let Err(error) = file.remove_xattr(name) {
+        if !error
+            .raw_os_error()
+            .is_some_and(|errno| [libc::ENODATA, libc::ENOTSUP, libc::EOPNOTSUPP].contains(&errno))
+        {
+            return Err(BcmrError::Io(error));
+        }
+    }
+    match file.get_xattr(name) {
+        Ok(None) => clear_and_verify_private_transaction_acl(directory),
+        Ok(Some(_)) => Err(BcmrError::InvalidInput(format!(
+            "atomic receive transaction '{}' retained POSIX default ACL",
+            directory.path.display(),
+        ))),
+        Err(error)
+            if error
+                .raw_os_error()
+                .is_some_and(|errno| [libc::ENOTSUP, libc::EOPNOTSUPP].contains(&errno)) =>
+        {
+            clear_and_verify_private_transaction_acl(directory)
+        }
+        Err(error) => Err(BcmrError::Io(error)),
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn clear_and_verify_private_transaction_inheritance_acl(
+    directory: &BoundDirectory,
+) -> Result<(), BcmrError> {
+    clear_and_verify_private_transaction_acl(directory)
 }
 
 #[cfg(all(
@@ -926,6 +1134,9 @@ fn parent_namespace_is_private(directory: &BoundDirectory) -> bool {
     let mode = metadata.mode();
     let owned_without_shared_write =
         metadata.uid() == unsafe { libc::geteuid() } && mode & 0o022 == 0;
+    // Darwin exposes this mode bit through a narrower libc integer type,
+    // while Linux aliases it to u32.
+    #[allow(clippy::useless_conversion)]
     let sticky_namespace = mode & u32::from(libc::S_ISVTX) != 0;
     if !owned_without_shared_write && !sticky_namespace {
         return false;
@@ -1428,6 +1639,8 @@ pub(crate) struct AtomicFile {
     #[cfg(windows)]
     delete_staging_on_drop: bool,
     observed: DestinationObservation,
+    #[cfg(target_os = "macos")]
+    inherited_file_acl: Option<MacosInheritedFileAcl>,
 }
 
 impl AtomicFile {
@@ -1448,6 +1661,12 @@ impl AtomicFile {
         let destination_name = file_name(destination)?.to_os_string();
         let parent = BoundDirectory::capture(&parent_path)?;
         let observed = DestinationObservation::capture(destination)?;
+        #[cfg(target_os = "macos")]
+        let inherited_file_acl = if matches!(&observed, DestinationObservation::Missing) {
+            capture_macos_inherited_file_acl(parent.handle.as_file())?
+        } else {
+            None
+        };
         if !allow_overwrite && matches!(&observed, DestinationObservation::Existing(_)) {
             return Err(BcmrError::TargetExists(destination.to_path_buf()));
         }
@@ -1472,6 +1691,7 @@ impl AtomicFile {
             // Preserve only setgid inheritance from the final parent. The
             // transaction stays private (0700), while its payload receives the
             // same group inheritance as a direct child of the destination.
+            #[allow(clippy::useless_conversion)]
             let transaction_mode = 0o700 | (parent_mode & u32::from(libc::S_ISGID));
             std::fs::set_permissions(
                 transaction.path(),
@@ -1521,6 +1741,10 @@ impl AtomicFile {
             };
             (file, staging_name, staging_path)
         };
+        // The payload has now inherited any safe platform ACL template.
+        // Remove that template before untrusted bytes are written.
+        #[cfg(unix)]
+        clear_and_verify_private_transaction_inheritance_acl(&transaction_binding)?;
         #[cfg(windows)]
         let (file, staging_name, staging_path) = {
             use std::os::windows::fs::OpenOptionsExt;
@@ -1597,6 +1821,8 @@ impl AtomicFile {
             #[cfg(windows)]
             delete_staging_on_drop: true,
             observed,
+            #[cfg(target_os = "macos")]
+            inherited_file_acl,
         })
     }
 
@@ -1632,6 +1858,12 @@ impl AtomicFile {
                     BcmrError::InvalidInput("atomic receive lost its retained file handle".into())
                 })?,
             )?;
+        }
+        #[cfg(target_os = "macos")]
+        if let (DestinationObservation::Missing, Some(inherited_file_acl), Some(file)) =
+            (&self.observed, &self.inherited_file_acl, self.file.as_ref())
+        {
+            apply_macos_inherited_file_acl(file, inherited_file_acl)?;
         }
         Ok(())
     }
@@ -2149,6 +2381,8 @@ impl Drop for AtomicFile {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    use super::capture_macos_acl;
     use super::AtomicFile;
     #[cfg(unix)]
     use super::{create_payload_at, validate_private_transaction, BoundDirectory};
@@ -2226,6 +2460,116 @@ mod tests {
             macos_extended_acl_entry_count(stage.transaction_binding.handle.as_file()),
             0,
             "the private transaction must not retain an inherited ACL entry"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn new_file_inherits_the_final_parent_macos_acl() {
+        let parent = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("chmod")
+            .arg("+a")
+            .arg("everyone allow read,file_inherit")
+            .arg(parent.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed to install inherited test ACL");
+
+        let reference_path = parent.path().join("reference.bin");
+        std::fs::File::create(&reference_path).unwrap();
+        let reference = std::fs::File::open(&reference_path).unwrap();
+        assert_eq!(
+            macos_extended_acl_entry_count(&reference),
+            1,
+            "the test parent must grant one inherited file ACL entry"
+        );
+
+        let destination = parent.path().join("destination.bin");
+        let stage = AtomicFile::new(&destination).unwrap();
+        stage
+            .try_clone_file()
+            .unwrap()
+            .write_all(b"received")
+            .unwrap();
+        stage.commit(false).unwrap();
+
+        let published = std::fs::File::open(&destination).unwrap();
+        assert_eq!(
+            macos_extended_acl_entry_count(&published),
+            macos_extended_acl_entry_count(&reference),
+            "atomic publication must preserve the ACL a direct child would inherit"
+        );
+        assert_eq!(
+            capture_macos_acl(&published).unwrap(),
+            capture_macos_acl(&reference).unwrap(),
+            "the inherited ACE contents and flags must match direct creation"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn new_file_inherits_the_final_parent_linux_default_acl() {
+        use xattr::FileExt;
+
+        let parent = tempfile::tempdir().unwrap();
+        let inherited_uid = unsafe { libc::geteuid() }.saturating_add(1);
+        let status = match std::process::Command::new("setfacl")
+            .args([
+                "-m",
+                &format!("default:user:{inherited_uid}:r--"),
+                parent.path().to_str().unwrap(),
+            ])
+            .status()
+        {
+            Ok(status) => status,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => panic!("failed to run setfacl: {error}"),
+        };
+        assert!(status.success(), "failed to install default test ACL");
+
+        let reference_path = parent.path().join("reference.bin");
+        let reference = std::fs::File::create(&reference_path).unwrap();
+        let reference_acl = reference
+            .get_xattr("system.posix_acl_access")
+            .unwrap()
+            .expect("the reference file must inherit an access ACL");
+
+        let destination = parent.path().join("destination.bin");
+        let stage = AtomicFile::new(&destination).unwrap();
+        assert_eq!(
+            stage
+                .transaction_binding
+                .handle
+                .as_file()
+                .get_xattr("system.posix_acl_default")
+                .unwrap(),
+            None,
+            "the private transaction must drop its default ACL after creating the payload"
+        );
+        let staged_file = stage.try_clone_file().unwrap();
+        assert_eq!(
+            staged_file
+                .get_xattr("system.posix_acl_access")
+                .unwrap()
+                .as_deref(),
+            Some(reference_acl.as_slice()),
+            "the private payload must inherit exactly the access ACL of a direct child"
+        );
+        staged_file
+            .try_clone()
+            .unwrap()
+            .write_all(b"received")
+            .unwrap();
+        stage.commit(false).unwrap();
+
+        let published = std::fs::File::open(&destination).unwrap();
+        assert_eq!(
+            published
+                .get_xattr("system.posix_acl_access")
+                .unwrap()
+                .as_deref(),
+            Some(reference_acl.as_slice()),
+            "atomic publication must retain the inherited Linux access ACL"
         );
     }
 
