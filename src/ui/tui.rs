@@ -30,6 +30,24 @@ pub struct TuiProgress {
     compact_layout: bool,
 }
 
+fn use_compact_layout(term_width: u16, term_height: u16, required_height: u16) -> bool {
+    term_width < 50 || term_height < required_height
+}
+
+fn clip_line_to_width(line: &str, term_width: u16) -> String {
+    let max_width = term_width.max(1) as usize;
+    if line.chars().count() <= max_width {
+        return line.to_string();
+    }
+    if max_width == 1 {
+        return "…".to_string();
+    }
+
+    let mut clipped = line.chars().take(max_width - 1).collect::<String>();
+    clipped.push('…');
+    clipped
+}
+
 impl TuiProgress {
     pub fn new(total_bytes: u64) -> io::Result<Self> {
         let data = ProgressData::new(total_bytes);
@@ -99,16 +117,7 @@ impl TuiProgress {
             format_bytes(self.data.current_bytes as f64),
             format_bytes(self.data.total_bytes as f64)
         );
-        let max_width = term_width.max(1) as usize;
-        if line.chars().count() > max_width {
-            line = if max_width == 1 {
-                "…".to_string()
-            } else {
-                let mut clipped = line.chars().take(max_width - 1).collect::<String>();
-                clipped.push('…');
-                clipped
-            };
-        }
+        line = clip_line_to_width(&line, term_width);
 
         let mut output = stdout();
         execute!(
@@ -144,7 +153,7 @@ impl TuiProgress {
         let (term_width, term_height) = terminal_size::terminal_size()
             .map(|(width, height)| (width.0, height.0))
             .unwrap_or((80, 24));
-        let compact_layout = term_width < 50 || term_height < self.total_lines();
+        let compact_layout = use_compact_layout(term_width, term_height, self.total_lines());
         if self.last_terminal_size != Some((term_width, term_height))
             || self.compact_layout != compact_layout
         {
@@ -658,5 +667,27 @@ impl ProgressRenderer for TuiProgress {
 
         self.finished = true;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clip_line_to_width, use_compact_layout};
+
+    #[test]
+    fn compact_layout_handles_narrow_or_short_terminals() {
+        assert!(!use_compact_layout(80, 24, 7));
+        assert!(use_compact_layout(49, 24, 7));
+        assert!(use_compact_layout(80, 6, 7));
+        assert!(!use_compact_layout(50, 7, 7));
+    }
+
+    #[test]
+    fn compact_line_never_exceeds_the_terminal_width() {
+        let clipped = clip_line_to_width("Copying 42% · 8.00 MiB / 16.00 MiB", 20);
+        assert_eq!(clipped.chars().count(), 20);
+        assert!(clipped.ends_with('…'));
+        assert_eq!(clip_line_to_width("Copying", 20), "Copying");
+        assert_eq!(clip_line_to_width("Copying", 1), "…");
     }
 }
