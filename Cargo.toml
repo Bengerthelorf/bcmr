@@ -16,6 +16,8 @@ categories = ["command-line-utilities", "filesystem"]
 readme = "README.md"
 include = [
     "/src/**/*",
+    "/bench/*.rs",
+    "/tests/*.rs",
     "/Cargo.toml",
     "/Cargo.lock",
     "/LICENSE",
