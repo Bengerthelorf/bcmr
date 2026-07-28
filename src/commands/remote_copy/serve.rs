@@ -99,6 +99,14 @@ fn to_upload_decision(d: ResumeDecision) -> UploadDecision {
     }
 }
 
+fn serve_upload_pool_size(has_recursive_directory: bool, parallel: usize) -> usize {
+    if has_recursive_directory {
+        parallel
+    } else {
+        1
+    }
+}
+
 pub(super) async fn handle_serve_upload(
     args: &Commands,
     sources: &[PathBuf],
@@ -119,10 +127,13 @@ pub(super) async fn handle_serve_upload(
         ));
     }
 
+    let has_recursive_directory =
+        args.is_recursive() && sources.iter().any(|source| source.is_dir());
+    let pool_size = serve_upload_pool_size(has_recursive_directory, parallel);
     let mut pool = if args.use_direct_tcp() {
-        ServeClientPool::connect_direct_with_caps(ssh_target, args.protocol_caps(), parallel).await
+        ServeClientPool::connect_direct_with_caps(ssh_target, args.protocol_caps(), pool_size).await
     } else {
-        ServeClientPool::connect_with_caps(ssh_target, args.protocol_caps(), parallel).await
+        ServeClientPool::connect_with_caps(ssh_target, args.protocol_caps(), pool_size).await
     }
     .map_err(|e| fallback_error(format!("serve unavailable: {e}")))?;
 
@@ -548,7 +559,9 @@ pub(super) async fn handle_serve_download(
 
 #[cfg(test)]
 mod fallback_tests {
-    use super::{add_transfer_size, allows_legacy_fallback, fallback_error};
+    use super::{
+        add_transfer_size, allows_legacy_fallback, fallback_error, serve_upload_pool_size,
+    };
 
     #[test]
     fn only_typed_preflight_failures_allow_legacy_fallback() {
@@ -571,5 +584,11 @@ mod fallback_tests {
         let mut total = u64::MAX - 1;
         assert!(add_transfer_size(&mut total, 2).is_err());
         assert_eq!(total, u64::MAX - 1);
+    }
+
+    #[test]
+    fn single_file_upload_does_not_open_unused_parallel_sessions() {
+        assert_eq!(serve_upload_pool_size(false, 8), 1);
+        assert_eq!(serve_upload_pool_size(true, 8), 8);
     }
 }
