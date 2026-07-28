@@ -211,41 +211,7 @@ jobs:
 
       - name: Prepare release assets
         shell: bash
-        run: |
-          set -euo pipefail
-          expected=(
-            bcmr-x86_64-linux
-            bcmr-aarch64-linux
-            bcmr-x86_64-macos
-            bcmr-aarch64-macos
-            bcmr-x86_64-windows
-            bcmr-aarch64-windows
-            bcmr-x86_64-freebsd
-          )
-
-          for name in "${expected[@]}"; do
-            test -d "dist/$name" || {
-              echo "::error::missing build artifact $name"
-              exit 1
-            }
-            if [[ "$name" == *-windows ]]; then
-              test -f "dist/$name/bcmr.exe" || {
-                echo "::error::$name does not contain bcmr.exe"
-                exit 1
-              }
-              (cd "dist/$name" && zip -q "../${name}.zip" bcmr.exe)
-            else
-              test -f "dist/$name/bcmr" || {
-                echo "::error::$name does not contain bcmr"
-                exit 1
-              }
-              tar -C "dist/$name" -czf "dist/${name}.tar.gz" bcmr
-            fi
-          done
-
-          cd dist
-          sha256sum *.tar.gz *.zip > sha256sums.txt
-          test "$(wc -l < sha256sums.txt)" -eq 7
+        run: bash scripts/prepare-release-assets.sh dist
 
       - name: Generate changelog
         id: changelog

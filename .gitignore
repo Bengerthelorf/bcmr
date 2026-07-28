@@ -5,6 +5,7 @@
 # Test shell scripts and logs (keep Rust integration tests)
 tests/*.sh
 !tests/install_script_test.sh
+!tests/release_assets_test.sh
 tests/*.log
 *.log
 
