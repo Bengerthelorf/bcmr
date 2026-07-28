@@ -1,8 +1,10 @@
+pub(crate) mod atomic_file;
 pub mod cas;
 pub mod checksum;
 pub mod cleanup;
 pub mod compress;
 pub mod error;
+pub mod file_metadata;
 pub mod framing;
 pub mod io;
 pub mod protocol;

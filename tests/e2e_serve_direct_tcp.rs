@@ -426,6 +426,7 @@ async fn serve_direct_tcp_pipelined_put_many_files_succeeds() {
                 .to_string(),
             local: p.clone(),
             size: p.metadata().unwrap().len(),
+            metadata: None,
         })
         .collect();
 
@@ -473,13 +474,14 @@ async fn serve_direct_tcp_pipelined_get_many_files_succeeds() {
             remote: p.to_string_lossy().to_string(),
             local: dst_dir.join(format!("g_{i}.bin")),
             size: p.metadata().unwrap().len(),
+            metadata: None,
         })
         .collect();
 
     let mut client = ServeClient::connect_direct_local().await.unwrap();
     assert!(client.is_aead_negotiated());
     client
-        .pipelined_get_files(files, false, |_idx, _path: &Path, _size| {}, |_n| {})
+        .pipelined_get_files(files, false, false, |_idx, _path: &Path, _size| {}, |_n| {})
         .await
         .unwrap();
     client.close().await.unwrap();
@@ -518,6 +520,7 @@ async fn serve_direct_tcp_pool_striped_put_n4_succeeds() {
                 .to_string(),
             local: p.clone(),
             size: p.metadata().unwrap().len(),
+            metadata: None,
         })
         .collect();
 
@@ -599,6 +602,108 @@ async fn serve_direct_tcp_striped_get_single_large_file() {
     assert_eq!(bytes_to_hex(&got_hash), src_hash_hex);
     assert_eq!(checksum::calculate_hash(&dst).unwrap(), src_hash_hex);
     assert_eq!(std::fs::metadata(&dst).unwrap().len(), src_size);
+}
+
+#[tokio::test]
+async fn serve_direct_tcp_striped_get_failure_preserves_existing_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("short_remote.bin");
+    let dst = dir.path().join("existing_local.bin");
+    create_file(&src, 1024 * 1024 + 17);
+    let original_destination = b"pre-existing striped destination";
+    std::fs::write(&dst, original_destination).unwrap();
+    let overstated_size = std::fs::metadata(&src).unwrap().len() + 1;
+
+    let mut pool = ServeClientPool::connect_direct_local(4).await.unwrap();
+    let result = pool
+        .striped_get_file(src.to_str().unwrap(), &dst, overstated_size)
+        .await;
+    drop(pool);
+
+    assert!(
+        result.is_err(),
+        "the server must reject a range that extends past remote EOF"
+    );
+    let destination_after_failure = std::fs::read(&dst).unwrap();
+    assert!(
+        destination_after_failure == original_destination,
+        "a failed striped GET must not truncate or replace the destination; got {} bytes",
+        destination_after_failure.len()
+    );
+    let leaked_stages: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name.to_string_lossy().starts_with(".bcmr.receive."))
+        .collect();
+    assert!(
+        leaked_stages.is_empty(),
+        "failed striped GET leaked staging files: {leaked_stages:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn serve_direct_tcp_striped_get_never_follows_a_replaced_staging_path() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("remote.bin");
+    let dst = dir.path().join("existing-local.bin");
+    let victim = dir.path().join("victim.bin");
+    create_file(&src, 1024 * 1024 + 17);
+    std::fs::write(&dst, b"original destination").unwrap();
+    std::fs::write(&victim, b"victim must remain untouched").unwrap();
+    let expected_victim_hash = checksum::calculate_hash(&victim).unwrap();
+    let remote_size = std::fs::metadata(&src).unwrap().len();
+    let victim_for_hook = victim.clone();
+
+    let mut pool = ServeClientPool::connect_direct_local(4).await.unwrap();
+    let result = pool
+        .striped_get_file_with_stage_hook(
+            src.to_str().unwrap(),
+            &dst,
+            remote_size,
+            move |staging_path| {
+                let displaced = staging_path.with_file_name("displaced-payload");
+                std::fs::rename(staging_path, displaced).unwrap();
+                symlink(&victim_for_hook, staging_path).unwrap();
+            },
+        )
+        .await;
+    drop(pool);
+
+    assert!(
+        result.is_err(),
+        "a replaced staging pathname must fail closed"
+    );
+    assert_eq!(std::fs::read(&dst).unwrap(), b"original destination");
+    assert_eq!(
+        checksum::calculate_hash(&victim).unwrap(),
+        expected_victim_hash,
+        "a replaced staging path must never redirect bytes into another file"
+    );
+}
+
+#[tokio::test]
+async fn serve_direct_tcp_zero_length_striped_get_still_checks_remote_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("missing-remote.bin");
+    let dst = dir.path().join("must-not-appear.bin");
+
+    let mut pool = ServeClientPool::connect_direct_local(4).await.unwrap();
+    let result = pool
+        .striped_get_file(missing.to_str().unwrap(), &dst, 0)
+        .await;
+    drop(pool);
+
+    assert!(
+        result.is_err(),
+        "a zero-length manifest entry must still be opened on the server"
+    );
+    assert!(
+        !dst.exists(),
+        "a missing zero-length remote must not publish a local file"
+    );
 }
 
 #[tokio::test]

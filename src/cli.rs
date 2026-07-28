@@ -657,7 +657,7 @@ impl Commands {
     pub fn protocol_caps(&self) -> u8 {
         use crate::core::protocol::{CAP_DEDUP, CAP_FAST, CAP_PUT_OFFSET, CAP_SYNC};
         let mut caps = self.compression_caps() | CAP_DEDUP | CAP_PUT_OFFSET;
-        if self.copy_move_args().is_some_and(|a| a.fast) {
+        if self.copy_move_args().is_some_and(|a| a.fast) && !self.is_verify() {
             caps |= CAP_FAST;
         }
         if self.is_sync() {
@@ -1200,6 +1200,21 @@ mod tests {
         let caps = cmd_sync_fast.protocol_caps();
         assert_eq!(caps & CAP_SYNC, CAP_SYNC, "--sync sets CAP_SYNC");
         assert_eq!(caps & CAP_FAST, CAP_FAST, "--fast still sets CAP_FAST");
+
+        let mut verify_args = test_args(vec![PathBuf::from("dst")]);
+        verify_args.fast = true;
+        verify_args.verify = true;
+        let cmd_verify_fast = Commands::Copy {
+            args: verify_args,
+            reflink: None,
+            sparse: None,
+            parallel: None,
+        };
+        assert_eq!(
+            cmd_verify_fast.protocol_caps() & CAP_FAST,
+            0,
+            "--verify must retain the streaming server hash needed before atomic publish"
+        );
     }
 
     #[test]

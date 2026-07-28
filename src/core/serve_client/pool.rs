@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::core::atomic_file::AtomicFile;
 use crate::core::error::BcmrError;
 use crate::core::protocol::Message;
 
@@ -134,6 +135,7 @@ impl ServeClientPool {
         &mut self,
         files: Vec<FileTransfer>,
         sync_after_each: bool,
+        verify_before_publish: bool,
         on_file_start: FStart,
         on_chunk: FChunk,
     ) -> Result<(), BcmrError>
@@ -164,6 +166,7 @@ impl ServeClientPool {
                         .pipelined_get_files(
                             bucket_files,
                             sync_after_each,
+                            verify_before_publish,
                             move |local_idx, path, size| {
                                 let orig_idx = indices[local_idx];
                                 on_start_c(orig_idx, path, size);
@@ -214,47 +217,123 @@ impl ServeClientPool {
         hash_task.await.map_err(BcmrError::hash_task_join_failed)?
     }
 
+    #[allow(dead_code)]
     pub async fn striped_get_file(
         &mut self,
         remote: &str,
         local: &Path,
         remote_size: u64,
     ) -> Result<[u8; 32], BcmrError> {
+        self.striped_get_file_synced(remote, local, remote_size, false)
+            .await
+    }
+
+    pub async fn striped_get_file_synced(
+        &mut self,
+        remote: &str,
+        local: &Path,
+        remote_size: u64,
+        sync_before_publish: bool,
+    ) -> Result<[u8; 32], BcmrError> {
+        self.striped_get_file_synced_with_metadata(
+            remote,
+            local,
+            remote_size,
+            sync_before_publish,
+            None,
+        )
+        .await
+    }
+
+    pub async fn striped_get_file_synced_with_metadata(
+        &mut self,
+        remote: &str,
+        local: &Path,
+        remote_size: u64,
+        sync_before_publish: bool,
+        metadata: Option<crate::core::file_metadata::PortableFileMetadata>,
+    ) -> Result<[u8; 32], BcmrError> {
+        self.striped_get_file_impl(
+            remote,
+            local,
+            remote_size,
+            sync_before_publish,
+            metadata,
+            |_staging_path| {},
+        )
+        .await
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
+    pub async fn striped_get_file_with_stage_hook<F>(
+        &mut self,
+        remote: &str,
+        local: &Path,
+        remote_size: u64,
+        before_transfer: F,
+    ) -> Result<[u8; 32], BcmrError>
+    where
+        F: FnOnce(&Path),
+    {
+        self.striped_get_file_impl(remote, local, remote_size, false, None, before_transfer)
+            .await
+    }
+
+    async fn striped_get_file_impl<F>(
+        &mut self,
+        remote: &str,
+        local: &Path,
+        remote_size: u64,
+        sync_before_publish: bool,
+        metadata: Option<crate::core::file_metadata::PortableFileMetadata>,
+        before_transfer: F,
+    ) -> Result<[u8; 32], BcmrError>
+    where
+        F: FnOnce(&Path),
+    {
         if self.clients.is_empty() {
             return Err(BcmrError::pool_empty());
         }
-        let f = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(local)
-            .await?;
-        f.set_len(remote_size).await?;
+        let staging = AtomicFile::new(local)?;
+        let f = staging.try_clone_file()?;
+        f.set_len(remote_size)?;
         drop(f);
 
-        let local_owned = local.to_path_buf();
+        let staging_path = staging.staging_path();
+        before_transfer(&staging_path);
+
+        let destination = std::sync::Arc::new(staging.try_clone_file()?);
         let remote_owned = remote.to_owned();
         let ranges = divide_ranges(remote_size, self.clients.len());
         let futs: Vec<_> = self
             .clients
             .iter_mut()
             .zip(ranges)
-            .filter(|(_, (_, length))| *length > 0)
-            .map(|(client, (offset, length))| {
-                let local = local_owned.clone();
+            .enumerate()
+            .filter(|(index, (_, (_, length)))| *length > 0 || (remote_size == 0 && *index == 0))
+            .map(|(_, (client, (offset, length)))| {
+                let destination = std::sync::Arc::clone(&destination);
                 let remote = remote_owned.clone();
                 async move {
                     client
-                        .get_chunked(&remote, &local, offset, offset, length)
+                        .get_chunked_to_file(&remote, destination, offset, offset, length)
                         .await
                 }
             })
             .collect();
         futures::future::try_join_all(futs).await?;
+        drop(destination);
 
-        spawn_blake3_file(local.to_path_buf())
+        let hash = spawn_blake3_file_handle(staging.try_clone_file()?)
             .await
-            .map_err(BcmrError::hash_task_join_failed)?
+            .map_err(BcmrError::hash_task_join_failed)??;
+        if let Some(metadata) = metadata {
+            staging.commit_with_metadata(sync_before_publish, metadata)?;
+        } else {
+            staging.commit(sync_before_publish)?;
+        }
+        Ok(hash)
     }
 
     async fn request_truncate(&mut self, remote: &str, size: u64) -> Result<(), BcmrError> {
@@ -296,19 +375,30 @@ fn divide_ranges(total: u64, n: usize) -> Vec<(u64, u64)> {
 fn spawn_blake3_file(
     path: std::path::PathBuf,
 ) -> tokio::task::JoinHandle<Result<[u8; 32], BcmrError>> {
-    const READ_CHUNK: usize = 4 * 1024 * 1024;
     tokio::task::spawn_blocking(move || {
-        use std::io::Read;
-        let mut f = std::fs::File::open(&path)?;
-        let mut hasher = blake3::Hasher::new();
-        let mut buf = vec![0u8; READ_CHUNK];
-        loop {
-            let n = f.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-        }
-        Ok(*hasher.finalize().as_bytes())
+        let file = std::fs::File::open(&path)?;
+        calculate_blake3_file(file)
     })
+}
+
+fn spawn_blake3_file_handle(
+    file: std::fs::File,
+) -> tokio::task::JoinHandle<Result<[u8; 32], BcmrError>> {
+    tokio::task::spawn_blocking(move || calculate_blake3_file(file))
+}
+
+fn calculate_blake3_file(mut file: std::fs::File) -> Result<[u8; 32], BcmrError> {
+    const READ_CHUNK: usize = 4 * 1024 * 1024;
+    use std::io::{Read, Seek};
+    file.rewind()?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; READ_CHUNK];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(*hasher.finalize().as_bytes())
 }

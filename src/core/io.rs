@@ -1,5 +1,7 @@
 use std::io;
 use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 
 /// macOS `fsync()` only reaches the drive cache; `F_FULLFSYNC` forces a
 /// controller-level flush.
@@ -16,7 +18,9 @@ pub fn durable_sync(file: &std::fs::File) -> io::Result<()> {
 
 #[cfg(not(target_os = "macos"))]
 pub fn durable_sync(file: &std::fs::File) -> io::Result<()> {
-    file.sync_data()
+    // Transfer publication may apply permissions and extended attributes to
+    // the staging inode. `sync_data` is allowed to omit that metadata.
+    file.sync_all()
 }
 
 pub async fn durable_sync_async(file: &tokio::fs::File) -> io::Result<()> {
@@ -27,7 +31,7 @@ pub async fn durable_sync_async(file: &tokio::fs::File) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn sync_directory_with<SyncFn>(directory: &std::fs::File, sync: SyncFn) -> io::Result<()>
+fn sync_progress_directory_with<SyncFn>(directory: &std::fs::File, sync: SyncFn) -> io::Result<()>
 where
     SyncFn: FnOnce(&std::fs::File) -> io::Result<()>,
 {
@@ -47,9 +51,22 @@ where
 }
 
 #[cfg(unix)]
+fn sync_directory_strict_with<SyncFn>(directory: &std::fs::File, sync: SyncFn) -> io::Result<()>
+where
+    SyncFn: FnOnce(&std::fs::File) -> io::Result<()>,
+{
+    sync(directory)
+}
+
+#[cfg(unix)]
+pub(crate) fn durable_sync_directory_handle_strict(directory: &std::fs::File) -> io::Result<()> {
+    sync_directory_strict_with(directory, std::fs::File::sync_all)
+}
+
+#[cfg(unix)]
 pub fn durable_sync_dir(dir: &Path) -> io::Result<()> {
     let directory = std::fs::File::open(dir)?;
-    sync_directory_with(&directory, std::fs::File::sync_all)
+    sync_progress_directory_with(&directory, std::fs::File::sync_all)
 }
 
 #[cfg(not(unix))]
@@ -58,6 +75,76 @@ pub fn durable_sync_dir(_dir: &Path) -> io::Result<()> {
     // itself is already flushed before rename; directory flushing remains
     // best-effort on that platform.
     Ok(())
+}
+
+#[cfg(unix)]
+pub fn create_dir_all_durable(path: &Path) -> io::Result<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        if current.as_os_str().is_empty() {
+            continue;
+        }
+
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
+                continue;
+            }
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "durable directory path '{}' contains a non-directory component",
+                        current.display()
+                    ),
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+
+        match std::fs::create_dir(&current) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let metadata = std::fs::symlink_metadata(&current)?;
+                if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "durable directory path '{}' was replaced during creation",
+                            current.display()
+                        ),
+                    ));
+                }
+            }
+            Err(error) => return Err(error),
+        }
+
+        let created = std::fs::File::open(&current)?;
+        durable_sync_directory_handle_strict(&created)?;
+        let parent = current
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let parent = std::fs::File::open(parent)?;
+        durable_sync_directory_handle_strict(&parent)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn create_dir_all_durable(_path: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "durable recursive directory creation is not implemented on this platform",
+    ))
+}
+
+pub async fn create_dir_all_durable_async(path: &Path) -> io::Result<()> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || create_dir_all_durable(&path))
+        .await
+        .map_err(io::Error::other)?
 }
 
 pub fn fsync_dir(dir: &Path) {
@@ -101,7 +188,7 @@ mod tests {
         let directory = std::fs::File::open(dir.path()).unwrap();
         let called = std::cell::Cell::new(false);
 
-        sync_directory_with(&directory, |_| {
+        sync_progress_directory_with(&directory, |_| {
             called.set(true);
             Ok(())
         })
@@ -117,7 +204,7 @@ mod tests {
         let directory = std::fs::File::open(dir.path()).unwrap();
 
         for errno in [libc::EINVAL, libc::ENOTSUP, libc::EOPNOTSUPP] {
-            sync_directory_with(&directory, |_| Err(io::Error::from_raw_os_error(errno)))
+            sync_progress_directory_with(&directory, |_| Err(io::Error::from_raw_os_error(errno)))
                 .expect("unsupported directory fsync is a safe progress-only downgrade");
         }
     }
@@ -129,9 +216,25 @@ mod tests {
         let directory = std::fs::File::open(dir.path()).unwrap();
 
         for errno in [libc::EIO, libc::ENOSPC, libc::EROFS, libc::EACCES] {
-            let error =
-                sync_directory_with(&directory, |_| Err(io::Error::from_raw_os_error(errno)))
-                    .expect_err("genuine directory sync failures must remain visible");
+            let error = sync_progress_directory_with(&directory, |_| {
+                Err(io::Error::from_raw_os_error(errno))
+            })
+            .expect_err("genuine directory sync failures must remain visible");
+            assert_eq!(error.raw_os_error(), Some(errno));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn strict_directory_sync_never_downgrades_unsupported_errno() {
+        let dir = tempfile::tempdir().unwrap();
+        let directory = std::fs::File::open(dir.path()).unwrap();
+
+        for errno in [libc::EINVAL, libc::ENOTSUP, libc::EOPNOTSUPP] {
+            let error = sync_directory_strict_with(&directory, |_| {
+                Err(io::Error::from_raw_os_error(errno))
+            })
+            .expect_err("a requested durable namespace publish must fail closed");
             assert_eq!(error.raw_os_error(), Some(errno));
         }
     }
@@ -145,6 +248,35 @@ mod tests {
     #[test]
     fn test_fsync_dir_on_nonexistent() {
         fsync_dir(Path::new("/nonexistent/dir/abc"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_recursive_creation_builds_the_complete_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("one").join("two").join("three");
+
+        create_dir_all_durable(&nested).unwrap();
+
+        assert!(nested.is_dir());
+        create_dir_all_durable(&nested).expect("an existing durable path is idempotent");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_recursive_creation_rejects_symlink_components() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let link = dir.path().join("link");
+        symlink(&outside, &link).unwrap();
+
+        let error = create_dir_all_durable(&link.join("child"))
+            .expect_err("durable path creation must never traverse a symlink");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(!outside.join("child").exists());
     }
 
     #[cfg(unix)]

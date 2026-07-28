@@ -582,6 +582,19 @@ where
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
     let mut file = fs::File::open(path).await?;
+    let metadata = file.metadata().await?;
+    if !metadata.is_file() {
+        bail!("get_chunked: source is not a regular file");
+    }
+    let requested_end = offset
+        .checked_add(length)
+        .ok_or_else(|| anyhow::anyhow!("get_chunked: requested range overflows u64"))?;
+    if requested_end > metadata.len() || (length == 0 && metadata.len() != 0) {
+        bail!(
+            "get_chunked: requested range {offset}..{requested_end} does not match source size {}",
+            metadata.len()
+        );
+    }
     file.seek(std::io::SeekFrom::Start(offset)).await?;
 
     let mut remaining = length;

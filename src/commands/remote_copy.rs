@@ -376,6 +376,9 @@ pub async fn handle_remote_copy(
         Ok(()) => return Ok(()),
         Err(e) => {
             let msg = e.to_string();
+            if !serve::allows_legacy_fallback(&e) {
+                return Err(e);
+            }
             if msg.contains("--append refused:") || msg.contains("Use -r flag for recursive copy") {
                 return Err(e);
             }

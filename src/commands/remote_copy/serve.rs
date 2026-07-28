@@ -7,6 +7,25 @@ use crate::ui::runner::ProgressRunner;
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct ServeFallback(String);
+
+fn fallback_error(message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(ServeFallback(message.into()))
+}
+
+fn add_transfer_size(total: &mut u64, size: u64) -> Result<()> {
+    *total = total
+        .checked_add(size)
+        .ok_or_else(|| anyhow::anyhow!("declared transfer size exceeds u64"))?;
+    Ok(())
+}
+
+pub(super) fn allows_legacy_fallback(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<ServeFallback>().is_some()
+}
+
 enum UploadDecision {
     Skip,
     Overwrite,
@@ -88,26 +107,35 @@ pub(super) async fn handle_serve_upload(
     excludes: &[regex::Regex],
     parallel: usize,
 ) -> Result<()> {
+    if args.is_dry_run() {
+        return Err(fallback_error("serve: dry-run fallback to legacy"));
+    }
+    if (args.is_resume() || args.is_strict() || args.is_append())
+        && args.is_recursive()
+        && sources.iter().any(|source| source.is_dir())
+    {
+        return Err(fallback_error(
+            "serve: recursive --resume/--strict/--append not supported, fallback to legacy",
+        ));
+    }
+
     let mut pool = if args.use_direct_tcp() {
         ServeClientPool::connect_direct_with_caps(ssh_target, args.protocol_caps(), parallel).await
     } else {
         ServeClientPool::connect_with_caps(ssh_target, args.protocol_caps(), parallel).await
     }
-    .map_err(|e| anyhow::anyhow!("serve unavailable: {}", e))?;
-
-    if args.is_dry_run() {
-        pool.close().await?;
-        return Err(anyhow::anyhow!("serve: dry-run fallback to legacy"));
-    }
+    .map_err(|e| fallback_error(format!("serve unavailable: {e}")))?;
 
     let mut total_size = 0u64;
     for src in sources {
         if src.is_file() {
-            total_size += src.metadata()?.len();
+            add_transfer_size(&mut total_size, src.metadata()?.len())?;
         } else if src.is_dir() && args.is_recursive() {
-            total_size +=
+            add_transfer_size(
+                &mut total_size,
                 crate::commands::copy::get_total_size(std::slice::from_ref(src), true, args, &[])
-                    .await?;
+                    .await?,
+            )?;
         }
     }
 
@@ -210,9 +238,10 @@ pub(super) async fn handle_serve_upload(
         } else if src.is_dir() && args.is_recursive() {
             if args.is_resume() || args.is_strict() || args.is_append() {
                 pool.close().await?;
-                return Err(anyhow::anyhow!(
-                    "serve: recursive --resume/--strict/--append not supported, fallback to legacy"
-                ));
+                bail!(
+                    "serve: source changed to a directory after recursive resume preflight; \
+                     refusing fallback after transfer processing began"
+                );
             }
             serve_upload_dir(&mut pool, src, rdest, &runner, excludes, args).await?;
         } else if src.is_dir() {
@@ -253,6 +282,7 @@ async fn serve_upload_dir(
                 remote: remote_path,
                 local: path.to_path_buf(),
                 size: entry.metadata()?.len(),
+                metadata: None,
             });
         }
     }
@@ -306,30 +336,34 @@ pub(super) async fn handle_serve_download(
     excludes: &[regex::Regex],
     parallel: usize,
 ) -> Result<()> {
+    #[cfg(windows)]
+    if args.is_sync() {
+        bail!(
+            "--sync cannot guarantee durable local namespace publication on Windows; refusing before transfer"
+        );
+    }
+    if args.is_resume() || args.is_strict() || args.is_append() {
+        return Err(fallback_error(
+            "serve: download --resume/--strict/--append not yet supported, fallback to legacy",
+        ));
+    }
+    if args.is_dry_run() {
+        return Err(fallback_error("serve: dry-run fallback to legacy"));
+    }
+
     let mut pool = if args.use_direct_tcp() {
         ServeClientPool::connect_direct_with_caps(ssh_target, args.protocol_caps(), parallel).await
     } else {
         ServeClientPool::connect_with_caps(ssh_target, args.protocol_caps(), parallel).await
     }
-    .map_err(|e| anyhow::anyhow!("serve unavailable: {}", e))?;
-
-    if args.is_resume() || args.is_strict() || args.is_append() {
-        pool.close().await?;
-        return Err(anyhow::anyhow!(
-            "serve: download --resume/--strict/--append not yet supported, fallback to legacy"
-        ));
-    }
-
-    if args.is_dry_run() {
-        pool.close().await?;
-        return Err(anyhow::anyhow!("serve: dry-run fallback to legacy"));
-    }
+    .map_err(|e| fallback_error(format!("serve unavailable: {e}")))?;
 
     struct DownloadItem {
         remote_path: String,
         local_path: PathBuf,
         size: u64,
         is_dir: bool,
+        metadata: Option<crate::core::file_metadata::PortableFileMetadata>,
     }
 
     let mut total_size = 0u64;
@@ -358,6 +392,7 @@ pub(super) async fn handle_serve_download(
                     local_path: local_base.clone(),
                     size: 0,
                     is_dir: true,
+                    metadata: None,
                 });
                 for entry in &entries {
                     if crate::core::traversal::is_excluded(
@@ -374,19 +409,21 @@ pub(super) async fn handle_serve_download(
                             local_path: local,
                             size: 0,
                             is_dir: true,
+                            metadata: None,
                         });
                     } else {
-                        total_size += entry.size;
+                        add_transfer_size(&mut total_size, entry.size)?;
                         items.push(DownloadItem {
                             remote_path: remote,
                             local_path: local,
                             size: entry.size,
                             is_dir: false,
+                            metadata: None,
                         });
                     }
                 }
             } else if !is_dir {
-                total_size += size;
+                add_transfer_size(&mut total_size, size)?;
                 let local = if dest.is_dir() {
                     dest.join(rp.file_name())
                 } else {
@@ -397,8 +434,27 @@ pub(super) async fn handle_serve_download(
                     local_path: local,
                     size,
                     is_dir: false,
+                    metadata: None,
                 });
             }
+        }
+    }
+
+    if args.is_preserve() {
+        let (user, host) = match ssh_target.split_once('@') {
+            Some((user, host)) => (Some(user.to_string()), host.to_string()),
+            None => (None, ssh_target.to_string()),
+        };
+        for item in &mut items {
+            if item.is_dir {
+                continue;
+            }
+            let remote = RemotePath {
+                user: user.clone(),
+                host: host.clone(),
+                path: item.remote_path.clone(),
+            };
+            item.metadata = Some(crate::core::remote::get_remote_attrs(&remote).await?);
         }
     }
 
@@ -413,34 +469,51 @@ pub(super) async fn handle_serve_download(
     runner.set_verify_mode(args.is_verify());
 
     let use_stripe = args.use_direct_tcp() && pool.len() > 1 && !args.is_verify();
-    let mut big_files: Vec<(String, PathBuf, u64)> = Vec::new();
+    let mut big_files: Vec<(
+        String,
+        PathBuf,
+        u64,
+        Option<crate::core::file_metadata::PortableFileMetadata>,
+    )> = Vec::new();
     let mut files_to_get: Vec<FileTransfer> = Vec::new();
     for item in &items {
         if item.is_dir {
-            tokio::fs::create_dir_all(&item.local_path).await?;
+            if args.is_sync() {
+                crate::core::io::create_dir_all_durable_async(&item.local_path).await?;
+            } else {
+                tokio::fs::create_dir_all(&item.local_path).await?;
+            }
         } else if use_stripe && item.size >= STRIPING_MIN_FILE_SIZE {
-            big_files.push((item.remote_path.clone(), item.local_path.clone(), item.size));
+            big_files.push((
+                item.remote_path.clone(),
+                item.local_path.clone(),
+                item.size,
+                item.metadata,
+            ));
         } else {
             files_to_get.push(FileTransfer {
                 remote: item.remote_path.clone(),
                 local: item.local_path.clone(),
                 size: item.size,
+                metadata: item.metadata,
             });
         }
     }
 
-    for (remote_path, local_path, size) in &big_files {
+    for (remote_path, local_path, size, metadata) in &big_files {
         (runner.file_callback())(
             &local_path.file_name().unwrap_or_default().to_string_lossy(),
             *size,
         );
         let _ = pool
-            .striped_get_file(remote_path, local_path, *size)
+            .striped_get_file_synced_with_metadata(
+                remote_path,
+                local_path,
+                *size,
+                args.is_sync(),
+                *metadata,
+            )
             .await?;
-        if args.is_sync() {
-            let f = tokio::fs::File::open(local_path).await?;
-            crate::core::io::durable_sync_async(&f).await?;
-        }
         (runner.inc_callback())(*size);
     }
 
@@ -451,6 +524,7 @@ pub(super) async fn handle_serve_download(
         pool.pipelined_get_files_striped(
             files_to_get,
             sync,
+            args.is_verify(),
             move |_idx, path, size| {
                 file_cb(
                     &path.file_name().unwrap_or_default().to_string_lossy(),
@@ -462,42 +536,34 @@ pub(super) async fn handle_serve_download(
         .await?;
     }
 
-    if args.is_verify() {
-        for item in &items {
-            if item.is_dir {
-                continue;
-            }
-            let p = item.local_path.clone();
-            let local_hash =
-                tokio::task::spawn_blocking(move || crate::core::checksum::calculate_hash(&p))
-                    .await??;
-            let remote_hash = pool.first_mut().hash(&item.remote_path, 0, None).await?;
-            let remote_hex = bytes_to_hex(&remote_hash);
-            if remote_hex != local_hash {
-                pool.close().await?;
-                return runner
-                    .finish_err(format!("hash mismatch for {}", item.local_path.display()));
-            }
-        }
-    }
-    if args.is_preserve() {
-        let (user, host) = match ssh_target.split_once('@') {
-            Some((u, h)) => (Some(u.to_string()), h.to_string()),
-            None => (None, ssh_target.to_string()),
-        };
-        for item in &items {
-            if item.is_dir {
-                continue;
-            }
-            let target = RemotePath {
-                user: user.clone(),
-                host: host.clone(),
-                path: item.remote_path.clone(),
-            };
-            crate::core::remote::apply_remote_attrs_locally(&target, &item.local_path).await?;
-        }
-    }
-
     pool.close().await?;
     runner.finish_ok()
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::{add_transfer_size, allows_legacy_fallback, fallback_error};
+
+    #[test]
+    fn only_typed_preflight_failures_allow_legacy_fallback() {
+        assert!(allows_legacy_fallback(&fallback_error(
+            "serve unavailable: protocol negotiation failed"
+        )));
+        assert!(
+            !allows_legacy_fallback(&anyhow::anyhow!(
+                "transfer failed after mutation; dry-run fallback"
+            )),
+            "message text alone must never authorize a second transport to mutate the destination"
+        );
+        assert!(!allows_legacy_fallback(&anyhow::anyhow!(
+            "destination changed during atomic publish"
+        )));
+    }
+
+    #[test]
+    fn aggregate_transfer_size_fails_closed_on_overflow() {
+        let mut total = u64::MAX - 1;
+        assert!(add_transfer_size(&mut total, 2).is_err());
+        assert_eq!(total, u64::MAX - 1);
+    }
 }

@@ -38,6 +38,7 @@ async fn serve_pipelined_put_many_files_succeeds() {
                 .to_string(),
             local: p.clone(),
             size: p.metadata().unwrap().len(),
+            metadata: None,
         })
         .collect();
     let total_expected: u64 = files.iter().map(|f| f.size).sum();
@@ -109,6 +110,7 @@ async fn serve_pipelined_get_many_files_succeeds() {
             remote: p.to_string_lossy().to_string(),
             local: dst_dir.join(format!("g_{i}.bin")),
             size: p.metadata().unwrap().len(),
+            metadata: None,
         })
         .collect();
     let total_expected: u64 = files.iter().map(|f| f.size).sum();
@@ -120,6 +122,7 @@ async fn serve_pipelined_get_many_files_succeeds() {
         .pipelined_get_files(
             files,
             false,
+            true,
             |_idx, _path: &Path, _size| {
                 started.set(started.get() + 1);
             },
@@ -167,11 +170,13 @@ async fn serve_pipelined_put_writer_error_propagates() {
             remote: dst_dir.join("g.bin").to_string_lossy().to_string(),
             local: good.clone(),
             size: good.metadata().unwrap().len(),
+            metadata: None,
         },
         FileTransfer {
             remote: dst_dir.join("m.bin").to_string_lossy().to_string(),
             local: missing,
             size: 4096,
+            metadata: None,
         },
     ];
 
@@ -198,27 +203,154 @@ async fn serve_pipelined_get_server_error_propagates() {
     create_file(&good, 4096);
 
     let bogus_remote = src_dir.join("does_not_exist.bin");
+    let untouched_destination = dst_dir.join("b.bin");
+    let original_destination = b"pre-existing destination must survive";
+    fs::write(&untouched_destination, original_destination).unwrap();
 
     let files: Vec<FileTransfer> = vec![
         FileTransfer {
             remote: good.to_string_lossy().to_string(),
             local: dst_dir.join("g.bin"),
             size: good.metadata().unwrap().len(),
+            metadata: None,
         },
         FileTransfer {
             remote: bogus_remote.to_string_lossy().to_string(),
-            local: dst_dir.join("b.bin"),
+            local: untouched_destination.clone(),
             size: 4096,
+            metadata: None,
         },
     ];
 
     let mut client = ServeClient::connect_local().await.unwrap();
     let result = client
-        .pipelined_get_files(files, false, |_idx, _path: &Path, _size| {}, |_n| {})
+        .pipelined_get_files(files, false, false, |_idx, _path: &Path, _size| {}, |_n| {})
         .await;
     assert!(
         result.is_err(),
         "expected pipelined_get_files to fail when a remote source is missing"
+    );
+    assert_eq!(
+        fs::read(&untouched_destination).unwrap(),
+        original_destination,
+        "a failed GET must not truncate or delete the destination that existed before transfer"
+    );
+    assert!(
+        fs::read_dir(&dst_dir).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".bcmr.receive.")),
+        "a failed GET must clean its sibling staging file"
+    );
+    drop(client);
+}
+
+#[tokio::test]
+async fn serve_pipelined_get_refuses_a_destination_replaced_after_staging() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("remote.bin");
+    let dst = dir.path().join("destination.bin");
+    let replacement = dir.path().join("replacement.bin");
+    create_file(&src, 4096);
+    fs::write(&dst, b"original destination").unwrap();
+    fs::write(&replacement, b"concurrent replacement").unwrap();
+
+    let files = vec![FileTransfer {
+        remote: src.to_string_lossy().to_string(),
+        local: dst.clone(),
+        size: src.metadata().unwrap().len(),
+        metadata: None,
+    }];
+
+    let mut client = ServeClient::connect_local().await.unwrap();
+    let dst_for_callback = dst.clone();
+    let replacement_for_callback = replacement.clone();
+    let result = client
+        .pipelined_get_files(
+            files,
+            false,
+            false,
+            move |_idx, _path: &Path, _size| {
+                fs::rename(&replacement_for_callback, &dst_for_callback).unwrap();
+            },
+            |_n| {},
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "commit must fail closed when another writer replaces the destination"
+    );
+    assert_eq!(
+        fs::read(&dst).unwrap(),
+        b"concurrent replacement",
+        "the transfer must not overwrite the competing destination entry"
+    );
+    drop(client);
+}
+
+#[tokio::test]
+async fn serve_pipelined_verify_rejects_tampered_staging_before_publish() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("remote.bin");
+    let dst_dir = dir.path().join("dst");
+    let dst = dst_dir.join("destination.bin");
+    fs::create_dir_all(&dst_dir).unwrap();
+    fs::write(&src, b"authentic remote payload").unwrap();
+    fs::write(&dst, b"original destination").unwrap();
+
+    let files = vec![FileTransfer {
+        remote: src.to_string_lossy().to_string(),
+        local: dst.clone(),
+        size: src.metadata().unwrap().len(),
+        metadata: None,
+    }];
+
+    let mut client = ServeClient::connect_local().await.unwrap();
+    let tamper_parent = dst_dir.clone();
+    let tamper_len = src.metadata().unwrap().len() as usize;
+    let result = client
+        .pipelined_get_files(
+            files,
+            false,
+            true,
+            |_idx, _path: &Path, _size| {},
+            move |_n| {
+                let transaction = fs::read_dir(&tamper_parent)
+                    .unwrap()
+                    .map(|entry| entry.unwrap())
+                    .find(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".bcmr.receive.")
+                    })
+                    .expect("the private receive transaction must exist during transfer");
+                fs::write(transaction.path().join("payload"), vec![b'X'; tamper_len]).unwrap();
+            },
+        )
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(bcmr::core::error::BcmrError::VerificationError(ref path)) if path == &dst
+        ),
+        "the streamed hash mismatch must be reported before publication: {result:?}"
+    );
+    assert_eq!(
+        fs::read(&dst).unwrap(),
+        b"original destination",
+        "verification failure must preserve the previously visible destination"
+    );
+    assert!(
+        fs::read_dir(&dst_dir).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".bcmr.receive.")),
+        "verification failure must clean the private transaction"
     );
     drop(client);
 }
@@ -251,6 +383,7 @@ async fn serve_pool_pipelined_put_n4_succeeds() {
                 .to_string(),
             local: p.clone(),
             size: p.metadata().unwrap().len(),
+            metadata: None,
         })
         .collect();
 
@@ -321,6 +454,7 @@ async fn serve_pool_pipelined_get_n4_succeeds() {
             remote: p.to_string_lossy().to_string(),
             local: dst_dir.join(format!("g_{i}.bin")),
             size: p.metadata().unwrap().len(),
+            metadata: None,
         })
         .collect();
 
@@ -333,6 +467,7 @@ async fn serve_pool_pipelined_get_n4_succeeds() {
 
     pool.pipelined_get_files_striped(
         files,
+        false,
         false,
         move |_idx, _path: &Path, _size| {
             starts_c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -374,6 +509,7 @@ async fn serve_pool_n1_degenerate_behaves_like_single_client() {
         remote: dst_dir.join("one.bin").to_string_lossy().to_string(),
         local: src.clone(),
         size: src.metadata().unwrap().len(),
+        metadata: None,
     }];
 
     let mut pool = ServeClientPool::connect_local(1).await.unwrap();
@@ -417,6 +553,7 @@ async fn serve_pool_one_bucket_error_cancels_siblings() {
                 .to_string(),
             local: p,
             size: if i == bad_idx { 4096 } else { 2048 + i * 16 } as u64,
+            metadata: None,
         });
     }
 

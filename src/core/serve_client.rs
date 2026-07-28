@@ -54,6 +54,7 @@ pub struct FileTransfer {
     pub remote: String,
     pub local: std::path::PathBuf,
     pub size: u64,
+    pub metadata: Option<crate::core::file_metadata::PortableFileMetadata>,
 }
 
 impl ServeClient {

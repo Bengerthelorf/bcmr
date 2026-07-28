@@ -5,6 +5,8 @@ mod ssh_cmd;
 mod transfer;
 
 #[allow(unused_imports)]
+pub(crate) use attrs::get_remote_attrs;
+#[allow(unused_imports)]
 pub use attrs::{apply_remote_attrs_locally, preserve_remote_attrs, verify_remote_file};
 #[allow(unused_imports)]
 pub use ops::{

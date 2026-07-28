@@ -299,7 +299,7 @@ pub(crate) enum CommitPolicy {
 const WINDOWS_FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
 #[cfg(any(windows, test))]
 const WINDOWS_FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
-#[cfg(any(windows, test))]
+#[cfg(test)]
 const WINDOWS_FILE_ATTRIBUTE_TEMPORARY: u32 = 0x0000_0100;
 #[cfg(any(windows, test))]
 const WINDOWS_SETTABLE_SPECIFIC_ATTRIBUTES: u32 = WINDOWS_FILE_ATTRIBUTE_READONLY

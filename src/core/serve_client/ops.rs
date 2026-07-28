@@ -216,6 +216,7 @@ impl ServeClient {
         .await
     }
 
+    #[allow(dead_code)]
     pub async fn get_chunked(
         &mut self,
         remote: &str,
@@ -224,22 +225,38 @@ impl ServeClient {
         local_offset: u64,
         length: u64,
     ) -> Result<(), BcmrError> {
-        use tokio::io::{AsyncSeekExt, AsyncWriteExt as _};
+        let destination = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(local)
+            .await?
+            .into_std()
+            .await;
+        self.get_chunked_to_file(
+            remote,
+            std::sync::Arc::new(destination),
+            remote_offset,
+            local_offset,
+            length,
+        )
+        .await
+    }
 
+    pub(crate) async fn get_chunked_to_file(
+        &mut self,
+        remote: &str,
+        destination: std::sync::Arc<std::fs::File>,
+        remote_offset: u64,
+        local_offset: u64,
+        length: u64,
+    ) -> Result<(), BcmrError> {
         self.send(&Message::GetChunked {
             path: remote.to_owned(),
             offset: remote_offset,
             length,
         })
         .await?;
-
-        let mut dst = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(local)
-            .await?;
-        dst.seek(std::io::SeekFrom::Start(local_offset)).await?;
 
         let mut written = 0u64;
         loop {
@@ -251,7 +268,20 @@ impl ServeClient {
                         decoded.len(),
                         length,
                     )?;
-                    dst.write_all(&decoded).await?;
+                    let write_offset = local_offset.checked_add(written).ok_or_else(|| {
+                        BcmrError::InvalidInput(
+                            "get_chunked local write offset overflowed u64".into(),
+                        )
+                    })?;
+                    let file = std::sync::Arc::clone(&destination);
+                    tokio::task::spawn_blocking(move || {
+                        crate::core::atomic_file::positional_write_all(
+                            &file,
+                            &decoded,
+                            write_offset,
+                        )
+                    })
+                    .await??;
                     written = next_written;
                 }
                 Message::Ok { .. } => {

@@ -260,7 +260,7 @@ fn resolve_bookmark(p: &mut std::path::PathBuf) -> Result<()> {
         anyhow::bail!(
             "invalid alias name '@{name}'; alias names must match [A-Za-z_][A-Za-z0-9_-]*. \
              To refer to a literal file whose name starts with '@', use './{}'",
-            &s
+            s
         );
     }
     let table = &config::CONFIG.paths;
@@ -286,7 +286,7 @@ fn resolve_bookmark(p: &mut std::path::PathBuf) -> Result<()> {
             }
             msg.push_str(&format!(
                 "\nTo refer to a literal file named '@{name}', use './{}'",
-                &s
+                s
             ));
             anyhow::bail!("{msg}");
         }
