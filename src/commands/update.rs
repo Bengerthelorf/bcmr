@@ -47,17 +47,22 @@ pub fn check_for_update() -> Option<String> {
 
 pub fn run(check_only: bool) -> Result<()> {
     let current = cargo_crate_version!();
+    let json = crate::config::is_json_mode();
 
     if check_only {
         let latest = fetch_latest_version()?;
         let available = version_newer(&latest, current);
-        if crate::config::is_json_mode() {
-            let json = serde_json::json!({
-                "current": current,
-                "latest": latest,
+        if json {
+            let result = serde_json::json!({
+                "type": "result",
+                "status": "success",
+                "operation": "update_check",
+                "current_version": current,
+                "latest_version": latest,
                 "update_available": available,
             });
-            println!("{}", json);
+            println!("{result}");
+            crate::config::mark_json_terminal_emitted();
         } else {
             println!("Current version: {}", current);
             if available {
@@ -69,20 +74,33 @@ pub fn run(check_only: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!("Current version: {}", current);
-    println!("Checking for updates...");
+    if !json {
+        println!("Current version: {}", current);
+        println!("Checking for updates...");
+    }
 
     let status = self_update::backends::github::Update::configure()
         .repo_owner("Bengerthelorf")
         .repo_name("bcmr")
         .bin_name("bcmr")
         .target(platform_target()?)
-        .show_download_progress(true)
+        .show_download_progress(!json)
         .current_version(current)
         .build()?
         .update()?;
 
-    if status.is_updated() {
+    if json {
+        let result = serde_json::json!({
+            "type": "result",
+            "status": "success",
+            "operation": "update",
+            "previous_version": current,
+            "current_version": status.version(),
+            "updated": status.is_updated(),
+        });
+        println!("{result}");
+        crate::config::mark_json_terminal_emitted();
+    } else if status.is_updated() {
         println!("Updated to version {}!", status.version());
     } else {
         println!("Already up to date.");
