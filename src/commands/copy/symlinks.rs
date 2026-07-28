@@ -60,7 +60,28 @@ fn symlink_entry_metadata(
 ) -> std::result::Result<Option<std::fs::Metadata>, BcmrError> {
     match path.symlink_metadata() {
         Ok(metadata) => Ok(Some(metadata)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Windows maps both a missing leaf and an intermediate regular
+            // file to NotFound. Only accept the former when the immediate
+            // parent is a directory (possibly reached through a symlink).
+            let Some(parent) = path.parent() else {
+                return Ok(None);
+            };
+            match parent.metadata() {
+                Ok(metadata) if metadata.is_dir() => Ok(None),
+                Ok(_) => Err(BcmrError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    format!(
+                        "destination parent '{}' is not a directory",
+                        parent.display()
+                    ),
+                ))),
+                Err(parent_error) if parent_error.kind() == std::io::ErrorKind::NotFound => {
+                    Ok(None)
+                }
+                Err(parent_error) => Err(BcmrError::Io(parent_error)),
+            }
+        }
         Err(error) => Err(BcmrError::Io(error)),
     }
 }
