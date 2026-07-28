@@ -769,6 +769,79 @@ before replacing LPT.
 
 ---
 
+## Experiment 23: High-Bandwidth Compression Crossovers
+
+**Problem**: `--compress auto` advertises LZ4 and Zstd, after which
+the current negotiation always selects Zstd-3 when both peers
+support it. That is a strong WAN default, but the send loop
+currently performs `encode + write` sequentially. On a modern fast
+link, saved bytes can cost more CPU time than sending raw data.
+
+For a codec with encode rate $E$, size ratio $r$, and effective link
+rate $B$, the present sender cost per raw byte is:
+
+$$T = 1/E + r/B$$
+
+The codec/raw break-even is therefore $B = E(1-r)$. Two codecs
+cross where their respective $T$ values are equal. The updated
+`compress_probe` prints both quantities and unit-tests the equations
+instead of leaving the interpretation to hand calculation.
+
+**Method**: release-mode 4 MiB codec probe on Apple Silicon, ten
+paired repetitions. Each repetition processes 256 MiB per
+algorithm and workload. Ratios were stable, while encode rates
+varied materially with host load; report the median derived
+crossovers rather than selecting a fast run.
+
+| Workload | Stable LZ4 / Zstd-3 ratio | Zstd-3 → LZ4 median | LZ4 → raw median |
+|----------|---------------------------|----------------------|------------------|
+| Text-like | 0.390 / 0.198 | ~262 MB/s (~2.1 Gbit/s) | ~395 MB/s (~3.2 Gbit/s) |
+| 50% text + 50% random | 0.697 / 0.599 | ~118 MB/s (~0.94 Gbit/s) | ~365 MB/s (~2.9 Gbit/s) |
+
+The ten derived `Zstd-3 -> LZ4` / `LZ4 -> raw` samples
+(MB/s), in run order, were:
+
+- text-like: `315.0/426.7`, `232.0/398.5`, `590.2/249.6`,
+  `247.7/441.7`, `298.2/391.2`, `352.1/391.5`,
+  `270.2/444.6`, `254.5/436.9`, `146.6/209.2`,
+  `87.8/376.0`;
+- mixed: `73.2/289.4`, `89.5/377.3`, `150.1/378.4`,
+  `141.3/354.8`, `143.5/381.5`, `135.9/398.2`,
+  `120.1/375.3`, `112.5/336.0`, `100.8/323.7`,
+  `115.9/338.9`.
+
+These are **sender cost-model crossovers**, not end-to-end link
+benchmarks. SSH encryption, disk speed, receiver CPU and future
+pipeline overlap can move them. The earlier real-WAN workload in
+Experiment 12 was around 10 MB/s, far below every crossover, and
+correctly favored Zstd.
+
+**Negative result**: changing `auto` globally from Zstd to LZ4 or
+raw would improve some 2.5/5/10 GbE paths but regress the slow,
+lossy and relayed environments that need compression most. A
+single compile-time bandwidth threshold is also invalid: encode
+rates moved enough across the ten runs to shift individual
+crossovers substantially.
+
+**Adaptive promotion gate**:
+
+1. sample 64--256 KiB from several file positions, not just an
+   extension or the first block;
+2. calibrate sender encode and receiver decode rates, then update
+   actual link goodput with EWMA transfer windows;
+3. compare raw, LZ4, Zstd-fast, Zstd-1 and Zstd-3 using a bounded
+   memory/CPU pool;
+4. require a 10--15% predicted margin plus hysteresis before
+   switching, and re-sample only on a distribution change;
+5. ablate 5/20/100 Mbps and 1/2.5/10 Gbps paths, old single-core
+   servers, Cloudflare/Tailscale relays, and incompressible data.
+
+Until that controller and the encode/network overlap pipeline are
+measured together, explicit `--compress lz4` or
+`--compress none` remains the honest fast-LAN control.
+
+---
+
 ## Summary
 
 Each row below states the specific workload behind the number.
@@ -789,3 +862,4 @@ Don't lift this table out of context without the qualifiers.
 | `--direct=direct` data plane | SSH used only for auth + rendezvous; data over a dedicated AES-256-GCM-framed TCP socket (Path B) | **2.84× vs `scp`** on 1 GiB GET host-N → host-L (best-of-3): scp 9.4 → bcmr-ssh 8.7 → bcmr-direct 26.7 MiB/s; 65% of iperf3's 41 MiB/s ceiling (Exp 20) |
 | Protocol v2 atomic PUT | Private sibling transaction, security metadata derivation, and final rename/exchange; single-file striped PUT disabled until transactional | No-force, force, recursive `-P4`, download, and killed-transfer cases preserve the specified final-path contract on a real older-glibc Linux peer (Exp 21) |
 | Size-aware LPT file scheduling | Sort + least-loaded selection before each multi-file batch; no wire change | 46.3% lower modeled tail bytes on a deliberately skewed batch; 2.39% lower median wall time across 8+8 interleaved real-SSH runs (Exp 22) |
+| Fixed Zstd `auto` on fast links | Current sender serializes encode and write; ten codec repetitions show load-sensitive crossover points | Zstd remains right around 10 MB/s WAN, but median model crossovers put LZ4/raw ahead on representative multi-Gbit links; adaptive default deferred until calibrated (Exp 23) |

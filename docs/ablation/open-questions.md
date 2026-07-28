@@ -81,6 +81,21 @@ The leftover gap to `cp` on the streaming path comes from per-block
 hash, per-checkpoint `posix_fadvise`, and tokio I/O scheduling
 overhead --- those are separate experiments.
 
+## Adaptive Compression and Encode/Network Overlap
+
+`--compress auto` still negotiates Zstd-3 whenever both peers have
+it. [Wire Experiment 23](/ablation/wire-protocol#experiment-23-high-bandwidth-compression-crossovers)
+shows why that remains a good slow-WAN default and why it can become
+a CPU bottleneck on multi-gigabit paths.
+
+Do not replace it with a static bandwidth guess. The implementation
+needs a bounded multi-position sample, sender/receiver codec
+calibration, EWMA link goodput and hysteresis. The current send loop
+also serializes encoding and network writes; a two-stage bounded
+pipeline should be ablated with the adaptive chooser because overlap
+changes every crossover. The memory budget must be negotiated before
+double-buffering across many parallel sessions.
+
 ## Recursive Tree Dedup
 
 Dedup currently fires only on individual file PUTs. Extending it to
