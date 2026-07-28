@@ -217,6 +217,10 @@ server-side integrity verification.
 - Probes silent SSH sessions every 15 seconds and closes them after
   20 unanswered probes; slow sessions with continuing traffic remain
   valid
+- Synced downloads resolve the deepest existing directory prefix
+  once before durable creation. Existing symlinked home or storage
+  prefixes work; a broken symlink still fails without creating data
+  at an ambiguous destination
 - Streams data through SSH with progress tracking
 - Supports both upload and download directions
 

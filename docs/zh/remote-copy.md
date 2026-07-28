@@ -181,6 +181,7 @@ bcmr copy --fast -V user@host:/big.bin ./local.bin
 - **传统模式**：默认通过 ControlMaster 复用 SSH 连接；设置 `BCMR_SSH_NO_MULTIPLEX=1` 可关闭
 - **Serve 会话池**：显式禁用 ControlMaster，使并行成员使用相互独立的 TCP/加密流
 - 每 15 秒探测无流量的 SSH 会话，连续 20 次无响应后关闭；持续有流量的慢连接不会被误判
+- 同步下载会先一次性解析最深的既存目录前缀；指向有效目录的 symlink home/存储前缀可用，断裂 symlink 会在任何含糊目标被创建前报错
 - 通过 SSH 流式传输数据并追踪进度
 - 支持上传和下载两个方向
 

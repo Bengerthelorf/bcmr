@@ -178,6 +178,7 @@ bcmr copy --fast -V user@host:/big.bin ./local.bin
 - **傳統模式**：預設透過 ControlMaster 複用 SSH 連線；設定 `BCMR_SSH_NO_MULTIPLEX=1` 可停用
 - **Serve 工作階段池**：明確停用 ControlMaster，使並行成員使用互相獨立的 TCP/加密串流
 - 每 15 秒探測無流量的 SSH 工作階段，連續 20 次無回應後關閉；持續有流量的慢速連線不會被誤判
+- 同步下載會先一次解析最深的既存目錄前綴；指向有效目錄的 symlink home/儲存前綴可用，斷裂 symlink 會在建立任何含糊目標前報錯
 - 透過 SSH 串流傳輸資料並追蹤進度
 - 支援上傳和下載兩個方向
 
