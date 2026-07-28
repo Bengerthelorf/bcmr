@@ -1409,32 +1409,27 @@ fn rename_noreplace(
 }
 
 #[cfg(windows)]
-fn rename_handle_noreplace(
+fn set_windows_handle_rename_noreplace(
     source: &File,
-    to_dir: &BoundDirectory,
-    to_name: &OsStr,
-) -> Result<(), BcmrError> {
-    use std::os::windows::ffi::OsStrExt;
+    root_directory: usize,
+    destination_name: &[u16],
+) -> std::io::Result<()> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Storage::FileSystem::{
         FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO,
     };
 
-    let basename: Vec<u16> = to_name.encode_wide().collect();
-    if basename.is_empty()
-        || basename.iter().any(|character| {
-            *character == 0 || *character == u16::from(b'/') || *character == u16::from(b'\\')
-        })
-    {
-        return Err(BcmrError::InvalidInput(
-            "Windows atomic publish requires a single non-empty destination name".into(),
+    if destination_name.is_empty() || destination_name.contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Windows rename destination must be non-empty and contain no NUL",
         ));
     }
-    let name_bytes = basename
+    let name_bytes = destination_name
         .len()
         .checked_mul(std::mem::size_of::<u16>())
-        .ok_or_else(|| BcmrError::InvalidInput("Windows destination name is too long".into()))?;
+        .ok_or_else(|| std::io::Error::other("Windows destination name is too long"))?;
     // FILE_RENAME_INFO declares FileName as a one-element trailing array.
     // Windows requires a buffer of at least sizeof(FILE_RENAME_INFO) plus the
     // variable filename bytes, rather than merely offset_of(FileName) plus the
@@ -1442,26 +1437,26 @@ fn rename_handle_noreplace(
     // authoritative, and also leaves a terminator for compatibility layers.
     let buffer_len = std::mem::size_of::<FILE_RENAME_INFO>()
         .checked_add(name_bytes)
-        .ok_or_else(|| BcmrError::InvalidInput("Windows rename buffer is too large".into()))?;
+        .ok_or_else(|| std::io::Error::other("Windows rename buffer is too large"))?;
     let file_name_length = u32::try_from(name_bytes)
-        .map_err(|_| BcmrError::InvalidInput("Windows destination name is too long".into()))?;
+        .map_err(|_| std::io::Error::other("Windows destination name is too long"))?;
     let buffer_size = u32::try_from(buffer_len)
-        .map_err(|_| BcmrError::InvalidInput("Windows rename buffer is too large".into()))?;
+        .map_err(|_| std::io::Error::other("Windows rename buffer is too large"))?;
     let word_size = std::mem::size_of::<usize>();
     let word_count = buffer_len.div_ceil(word_size);
     let mut buffer = vec![0usize; word_count];
     let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
     unsafe {
         (*info).Anonymous.ReplaceIfExists = false;
-        // Bind final name resolution to the already-validated destination
-        // directory. A full path (or a null-root relative path) would be
-        // resolved through mutable process/path namespace state.
-        (*info).RootDirectory = to_dir.handle.as_file().as_raw_handle() as HANDLE;
+        // A nonzero handle binds relative resolution to the validated parent.
+        // RootDirectory=0 is reserved for the absolute-path compatibility
+        // retry required by SMB and some Windows filesystems.
+        (*info).RootDirectory = root_directory as HANDLE;
         (*info).FileNameLength = file_name_length;
         std::ptr::copy_nonoverlapping(
-            basename.as_ptr(),
+            destination_name.as_ptr(),
             std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
-            basename.len(),
+            destination_name.len(),
         );
     }
     if unsafe {
@@ -1473,9 +1468,111 @@ fn rename_handle_noreplace(
         )
     } == 0
     {
-        return Err(BcmrError::Io(std::io::Error::last_os_error()));
+        return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn windows_root_relative_retry_error(raw_os_error: Option<i32>) -> bool {
+    const ERROR_NOT_SUPPORTED: i32 = 50;
+    const ERROR_INVALID_PARAMETER: i32 = 87;
+    matches!(
+        raw_os_error,
+        Some(ERROR_NOT_SUPPORTED) | Some(ERROR_INVALID_PARAMETER)
+    )
+}
+
+#[cfg(any(windows, test))]
+fn windows_absolute_rename_name(absolute: &[u16]) -> std::io::Result<Vec<u16>> {
+    const SEP: u16 = b'\\' as u16;
+    const QUERY: u16 = b'?' as u16;
+    const DOT: u16 = b'.' as u16;
+    const COLON: u16 = b':' as u16;
+    const VERBATIM_PREFIX: &[u16] = &[SEP, SEP, QUERY, SEP];
+    const NT_PREFIX: &[u16] = &[SEP, QUERY, QUERY, SEP];
+    const UNC_PREFIX: &[u16] = &[
+        SEP,
+        SEP,
+        QUERY,
+        SEP,
+        b'U' as u16,
+        b'N' as u16,
+        b'C' as u16,
+        SEP,
+    ];
+    const LEGACY_MAX_PATH: usize = 248;
+
+    if absolute.contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Windows rename destination contains an interior NUL",
+        ));
+    }
+    if absolute.starts_with(VERBATIM_PREFIX) || absolute.starts_with(NT_PREFIX) {
+        return Ok(absolute.to_vec());
+    }
+    if absolute.len().saturating_add(1) < LEGACY_MAX_PATH {
+        return Ok(absolute.to_vec());
+    }
+
+    let mut output = Vec::with_capacity(absolute.len() + UNC_PREFIX.len());
+    match absolute {
+        [drive, COLON, SEP, ..] if *drive != SEP => {
+            output.extend_from_slice(VERBATIM_PREFIX);
+            output.extend_from_slice(absolute);
+        }
+        [SEP, SEP, DOT, SEP, rest @ ..] => {
+            output.extend_from_slice(VERBATIM_PREFIX);
+            output.extend_from_slice(rest);
+        }
+        [SEP, SEP, rest @ ..] => {
+            output.extend_from_slice(UNC_PREFIX);
+            output.extend_from_slice(rest);
+        }
+        _ => output.extend_from_slice(absolute),
+    }
+    Ok(output)
+}
+
+#[cfg(windows)]
+fn rename_handle_noreplace(
+    source: &File,
+    to_dir: &BoundDirectory,
+    to_name: &OsStr,
+) -> Result<(), BcmrError> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::AsRawHandle;
+
+    let basename: Vec<u16> = to_name.encode_wide().collect();
+    if basename.is_empty()
+        || basename.iter().any(|character| {
+            *character == 0 || *character == u16::from(b'/') || *character == u16::from(b'\\')
+        })
+    {
+        return Err(BcmrError::InvalidInput(
+            "Windows atomic publish requires a single non-empty destination name".into(),
+        ));
+    }
+
+    let root_directory = to_dir.handle.as_file().as_raw_handle() as usize;
+    match set_windows_handle_rename_noreplace(source, root_directory, &basename) {
+        Ok(()) => Ok(()),
+        Err(error) if windows_root_relative_retry_error(error.raw_os_error()) => {
+            // MS-FSCC requires RootDirectory=0 for network rename requests.
+            // Retry through the same retained source handle with an absolute
+            // destination. Revalidate the bound parent immediately before the
+            // fallback so a stale path is never used knowingly.
+            if !to_dir.matches_path()? {
+                return Err(BcmrError::DestinationChanged(to_dir.path.join(to_name)));
+            }
+            let absolute_destination = std::path::absolute(to_dir.path.join(to_name))?;
+            let absolute_wide: Vec<u16> = absolute_destination.as_os_str().encode_wide().collect();
+            let absolute_name = windows_absolute_rename_name(&absolute_wide)?;
+            set_windows_handle_rename_noreplace(source, 0, &absolute_name).map_err(BcmrError::Io)
+        }
+        Err(error) => Err(BcmrError::Io(error)),
+    }
 }
 
 #[cfg(windows)]
@@ -3079,6 +3176,34 @@ mod tests {
         stage.commit(false).unwrap();
 
         assert_eq!(std::fs::read(destination).unwrap(), b"handle-bound payload");
+    }
+
+    #[test]
+    fn windows_handle_rename_retries_only_unsupported_root_relative_requests() {
+        for error in [50, 87] {
+            assert!(super::windows_root_relative_retry_error(Some(error)));
+        }
+        for error in [1, 5, 32, 80, 120, 183] {
+            assert!(!super::windows_root_relative_retry_error(Some(error)));
+        }
+        assert!(!super::windows_root_relative_retry_error(None));
+    }
+
+    #[test]
+    fn windows_absolute_rename_name_preserves_unicode_and_supports_long_paths() {
+        let unicode = r"C:\destination\现代-目标-🛰️.bin";
+        let unicode_wide: Vec<u16> = unicode.encode_utf16().collect();
+        assert_eq!(
+            super::windows_absolute_rename_name(&unicode_wide).unwrap(),
+            unicode_wide
+        );
+
+        let long_path = format!(r"C:\destination\{}\payload.bin", "x".repeat(300));
+        let long_wide: Vec<u16> = long_path.encode_utf16().collect();
+        assert_eq!(
+            String::from_utf16(&super::windows_absolute_rename_name(&long_wide).unwrap()).unwrap(),
+            format!(r"\\?\{long_path}")
+        );
     }
 
     #[cfg(windows)]
