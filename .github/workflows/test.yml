@@ -24,6 +24,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Test installer integrity and atomic install
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash tests/install_script_test.sh
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
