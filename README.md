@@ -185,7 +185,7 @@ Create `~/.config/bcmr/config.toml`:
 
 ```toml
 [progress]
-style = "fancy"
+style = "auto"          # "auto", "tui", "inline", "plain", or "off"
 
 [progress.theme]
 bar_gradient = ["#CABBE9", "#7E6EAC"]

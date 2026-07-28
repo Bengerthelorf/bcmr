@@ -4,9 +4,18 @@ section: guide
 order: 4
 ---
 
-BCMR provides two progress display modes for all file operations.
+BCMR provides five explicit progress modes for all file operations. Select one with
+`--progress=auto|tui|inline|plain|off`, or set `progress.style` to the same value.
 
-## Fancy Mode (Default)
+## Auto Mode (Default)
+
+Auto chooses the richest renderer the output can safely support:
+
+- TUI on a color-capable TTY with enough space
+- Uncolored inline progress when `NO_COLOR` is set or the terminal is smaller
+- Plain final summaries for pipes, redirected output, and `TERM=dumb`
+
+## TUI Mode
 
 A TUI box with:
 
@@ -18,17 +27,21 @@ A TUI box with:
 
 Supports Ctrl+C (clean exit with partial file cleanup) and Ctrl+Z (suspend/resume on Unix).
 
-## Plain Mode
+## Inline Mode
 
-A 3-line text display suitable for logs, pipes, and terminals without box-drawing support.
-
-Enable with `--tui` / `-t` flag, or set `progress.style = "plain"` in config.
+An uncolored 3-line live display for terminals where a full TUI is undesirable:
 
 ```
 Copying: [=========-----------] 45%
 12.34 MiB / 27.00 MiB | 5.67 MiB/s | ETA: 00:03
 File: largefile.zip [====----] 50%
 ```
+
+## Plain and Off Modes
+
+`plain` prints a stable final summary and never uses cursor controls, so it is safe
+for logs and pipelines. `off` suppresses progress entirely; `-q` / `--quiet` is the
+convenient shortcut.
 
 ## Pipeline Scanning
 

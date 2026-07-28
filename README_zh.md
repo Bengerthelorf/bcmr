@@ -157,7 +157,7 @@ eval "$(bcmr init zsh --cmd '')"   # 创建 cp, mv, rm
 
 ```toml
 [progress]
-style = "fancy"
+style = "auto"          # "auto"、"tui"、"inline"、"plain" 或 "off"
 
 [progress.theme]
 bar_gradient = ["#CABBE9", "#7E6EAC"]
