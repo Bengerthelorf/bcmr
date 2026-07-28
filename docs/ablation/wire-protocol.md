@@ -708,6 +708,67 @@ fallback, not by accepting ambiguous PUT semantics.
 
 ---
 
+## Experiment 22: Size-Aware Multi-File Scheduling
+
+**Problem**: `ServeClientPool` assigned files to connections by
+input index (`i % N`). For a traversal ordered
+`15, 1, 14, 1, 13, 1, 12, 1 MiB`, two workers therefore received
+`54 MiB` and `4 MiB`. The faster worker cannot take work from the
+slow bucket, so the last oversized bucket determines completion.
+
+**Change**: schedule Longest Processing Time first (LPT). Sort job
+indices by descending declared size and repeatedly assign the next
+job to the currently least-loaded worker. Buckets retain original
+input order internally, while callbacks and PUT hashes are remapped
+to their original indices. Every file counts for at least one
+scheduling unit so a batch of empty files still uses the whole
+available pool.
+
+This changes no wire messages and adds only
+$O(n \log n + nP)$ client-side scheduling work for $n$ files and
+$P$ connections. It applies equally to pipelined PUT and GET.
+
+**Deterministic model control**:
+
+| Scheduler | Worker byte loads | Predicted tail load |
+|-----------|-------------------|---------------------|
+| Index round-robin | 54 / 4 MiB | 54 MiB |
+| Size-aware LPT | 29 / 29 MiB | 29 MiB (**46.3% lower**) |
+
+Unit controls also cover deterministic ties, `u64` saturation,
+empty input and distributing zero-length files across all workers.
+The existing four serve-pool integration tests then verify PUT,
+GET, original-index hash ordering, the one-client case and sibling
+cancellation.
+
+**Real SSH method**: compare release binaries from `9b87ce6`
+(round-robin) and `d94c5e4` (LPT) on the same peer. Use `-P 2`,
+`--direct ssh`, and `--compress none`; all eight random-content
+files remain below the 16 MiB CAS threshold. Exclude one warm-up
+per binary, then run eight trials per scheduler in an interleaved
+order, always into a fresh directory. The received 60,817,408 bytes
+were checked file-by-file with independent SHA-256.
+
+| Statistic (8 runs each) | Round-robin | LPT | LPT change |
+|-------------------------|-------------|-----|------------|
+| Median wall time | 2.925 s | 2.855 s | **2.39% faster** |
+| Trimmed mean (drop each min/max) | 2.908 s | 2.828 s | **2.75% faster** |
+| Raw mean | 2.989 s | 2.806 s | 6.11% faster |
+
+The raw mean is not the primary result because one round-robin run
+took 4.03 s. The modest median gain, despite the 46.3% modeled
+bucket reduction, shows that this peer was dominated mostly by
+shared link throughput rather than a per-connection ceiling.
+
+**Decision**: keep LPT as a protocol-free tail-risk improvement,
+not as a claim of universal large speedup. A future adaptive
+work-stealing scheduler would handle heterogeneous connection
+rates better, but issuing files one at a time would discard the
+small-file pipelining benefit; it needs a batched-window ablation
+before replacing LPT.
+
+---
+
 ## Summary
 
 Each row below states the specific workload behind the number.
@@ -727,3 +788,4 @@ Don't lift this table out of context without the qualifiers.
 | `ServeClientPool` parallel SSH | Directory batches use up to `--parallel N` sessions, capped by available files; a single top-level upload uses one | 4.58× scaling N=1→N=8 on host-L under load 93; bcmr N=8 **beats `scp -r` by 24%** (14.7 vs 19.4 s) on 10000 × 64 KiB (Exp 19) |
 | `--direct=direct` data plane | SSH used only for auth + rendezvous; data over a dedicated AES-256-GCM-framed TCP socket (Path B) | **2.84× vs `scp`** on 1 GiB GET host-N → host-L (best-of-3): scp 9.4 → bcmr-ssh 8.7 → bcmr-direct 26.7 MiB/s; 65% of iperf3's 41 MiB/s ceiling (Exp 20) |
 | Protocol v2 atomic PUT | Private sibling transaction, security metadata derivation, and final rename/exchange; single-file striped PUT disabled until transactional | No-force, force, recursive `-P4`, download, and killed-transfer cases preserve the specified final-path contract on a real older-glibc Linux peer (Exp 21) |
+| Size-aware LPT file scheduling | Sort + least-loaded selection before each multi-file batch; no wire change | 46.3% lower modeled tail bytes on a deliberately skewed batch; 2.39% lower median wall time across 8+8 interleaved real-SSH runs (Exp 22) |
