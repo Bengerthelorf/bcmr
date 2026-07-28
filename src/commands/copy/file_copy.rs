@@ -1018,7 +1018,7 @@ where
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 pub(super) fn copy_xattrs(src: &Path, dst: &Path) -> std::result::Result<(), BcmrError> {
     let names = match xattr::list(src) {
         Ok(n) => n,
@@ -1037,10 +1037,10 @@ pub(super) fn copy_xattrs(src: &Path, dst: &Path) -> std::result::Result<(), Bcm
     Ok(())
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 fn is_unsupported(e: &std::io::Error) -> bool {
-    // 95 = ENOTSUP on Linux, 45 = ENOTSUP on macOS.
-    matches!(e.raw_os_error(), Some(95) | Some(45))
+    e.raw_os_error()
+        .is_some_and(|errno| [libc::ENOTSUP, libc::EOPNOTSUPP].contains(&errno))
 }
 
 pub(super) struct CopyFileOptions {
