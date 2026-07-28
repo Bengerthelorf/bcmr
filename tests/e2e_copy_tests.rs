@@ -154,7 +154,12 @@ fn e2e_fresh_copy_produces_correct_output() {
     let dst = dir.path().join("dst.bin");
     create_random_file(&src, 80 * 1024 * 1024);
 
-    let (ok, _, stderr) = run_bcmr(&["copy", "-t", src.to_str().unwrap(), dst.to_str().unwrap()]);
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "--progress=plain",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
     assert!(ok, "copy should succeed: {}", stderr);
     assert!(dst.exists(), "destination should exist");
     assert!(files_match(&src, &dst), "files should be identical");
@@ -191,7 +196,7 @@ fn e2e_copy_with_verify_flag() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-V",
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
@@ -210,7 +215,7 @@ fn e2e_resume_after_simulated_crash() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-C",
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
@@ -250,7 +255,7 @@ fn e2e_resume_after_simulated_crash() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-C",
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
@@ -273,7 +278,7 @@ fn e2e_resume_with_corrupted_tail_block() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-C",
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
@@ -315,7 +320,7 @@ fn e2e_resume_with_corrupted_tail_block() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-C",
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
@@ -359,7 +364,7 @@ fn e2e_resume_detects_source_change() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-C",
         "-f",
         "-y",
@@ -380,7 +385,12 @@ fn e2e_small_file_no_session() {
     let dst = dir.path().join("small_dst.bin");
     create_random_file(&src, 1024 * 1024);
 
-    let (ok, _, stderr) = run_bcmr(&["copy", "-t", src.to_str().unwrap(), dst.to_str().unwrap()]);
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "--progress=plain",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
     assert!(ok, "copy should succeed: {}", stderr);
     assert!(files_match(&src, &dst));
 
@@ -394,7 +404,12 @@ fn e2e_copy_verify_detects_corruption() {
     let dst = dir.path().join("dst.bin");
     create_random_file(&src, 80 * 1024 * 1024);
 
-    let (ok, _, stderr) = run_bcmr(&["copy", "-t", src.to_str().unwrap(), dst.to_str().unwrap()]);
+    let (ok, _, stderr) = run_bcmr(&[
+        "copy",
+        "--progress=plain",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
     assert!(ok, "initial copy should succeed: {}", stderr);
 
     {
@@ -406,7 +421,7 @@ fn e2e_copy_verify_detects_corruption() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-V",
         "-f",
         "-y",
@@ -453,7 +468,7 @@ fn e2e_resume_with_verify() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-C",
         "-V",
         src.to_str().unwrap(),
@@ -502,7 +517,7 @@ fn e2e_multi_crash_resume_preserves_block_history() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-C",
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
@@ -529,7 +544,7 @@ fn e2e_multi_crash_resume_preserves_block_history() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-C",
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
@@ -551,8 +566,12 @@ fn e2e_copy_preserves_existing_on_no_force() {
 
     let dst_hash_before = checksum::calculate_hash(&dst).unwrap();
 
-    let (ok, stdout, stderr) =
-        run_bcmr(&["copy", "-t", src.to_str().unwrap(), dst.to_str().unwrap()]);
+    let (ok, stdout, stderr) = run_bcmr(&[
+        "copy",
+        "--progress=plain",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
     assert!(
         !ok,
         "copy without -f should fail when target exists; stdout: {} stderr: {}",
@@ -574,7 +593,7 @@ fn e2e_verified_force_corruption_keeps_existing_destination_and_cleans_stage() {
 
     let (ok, _stdout, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-f",
         "-y",
         "-V",
@@ -616,7 +635,7 @@ fn e2e_verified_force_copy_replaces_existing_destination_after_staging() {
 
     let (ok, _stdout, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-f",
         "-y",
         "-V",
@@ -645,7 +664,7 @@ fn e2e_snapshot_truncation_never_commits_streaming_delay_or_speed_limit() {
 
         let (ok, _stdout, stderr) = run_bcmr(&[
             "copy",
-            "-t",
+            "--progress=plain",
             "-f",
             "-y",
             "--reflink",
@@ -692,7 +711,7 @@ fn e2e_append_cannot_report_complete_after_the_source_snapshot_shrinks() {
 
     let (ok, _stdout, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "--append",
         "--reflink",
         "disable",
@@ -739,7 +758,7 @@ fn e2e_active_direct_modes_reject_snapshot_shrink_before_touching_destination() 
 
         let (ok, _stdout, stderr) = run_bcmr(&[
             "copy",
-            "-t",
+            "--progress=plain",
             mode,
             "--reflink",
             "disable",
@@ -835,7 +854,7 @@ fn e2e_failed_active_modes_preserve_the_old_destination_and_resume_proof() {
 
         let old_hash = blake3::hash(&old_destination);
         let mode_arg = format!("--{mode}");
-        let mut args = vec!["copy", "-t"];
+        let mut args = vec!["copy", "--progress=plain"];
         if force {
             args.extend(["-f", "-y"]);
         }
@@ -972,7 +991,7 @@ fn e2e_active_modes_seed_only_the_selected_prefix_then_commit_atomically() {
         let mode_arg = format!("--{mode}");
         let mut args = vec![
             "copy",
-            "-t",
+            "--progress=plain",
             mode_arg.as_str(),
             "--reflink",
             "disable",
@@ -1017,7 +1036,7 @@ fn e2e_bare_relative_destinations_work_for_normal_and_direct_copy() {
         dir.path(),
         &[
             "copy",
-            "-t",
+            "--progress=plain",
             "--reflink",
             "disable",
             "src.bin",
@@ -1035,7 +1054,7 @@ fn e2e_bare_relative_destinations_work_for_normal_and_direct_copy() {
         dir.path(),
         &[
             "copy",
-            "-t",
+            "--progress=plain",
             "--strict",
             "--reflink",
             "disable",
@@ -1061,7 +1080,7 @@ fn e2e_forced_normal_copy_replaces_fifo_without_opening_it() {
         dir.path(),
         &[
             "copy",
-            "-t",
+            "--progress=plain",
             "-f",
             "-y",
             "--reflink",
@@ -1101,7 +1120,13 @@ fn e2e_direct_modes_reject_fifo_without_opening_it_even_when_forced() {
     for force in [false, true] {
         let dst_name = if force { "forced-fifo" } else { "fifo" };
         create_fifo(&dir.path().join(dst_name));
-        let mut args = vec!["copy", "-t", "--strict", "--reflink", "disable"];
+        let mut args = vec![
+            "copy",
+            "--progress=plain",
+            "--strict",
+            "--reflink",
+            "disable",
+        ];
         if force {
             args.extend(["-f", "-y"]);
         }
@@ -1142,7 +1167,7 @@ fn e2e_unforced_direct_copy_rejects_a_file_symlink_without_changing_it() {
 
     let (ok, _stdout, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "--strict",
         "--reflink",
         "disable",
@@ -1174,7 +1199,7 @@ fn e2e_forced_direct_copy_replaces_the_symlink_entry() {
 
     let (ok, _stdout, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "--strict",
         "-f",
         "-y",
@@ -1207,7 +1232,7 @@ fn e2e_already_complete_direct_copy_needs_no_writable_destination_directory() {
 
     let (_ok, _stdout, _stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "--strict",
         "--reflink",
         "disable",
@@ -1242,7 +1267,7 @@ fn e2e_unforced_direct_copy_rejects_a_multi_link_destination() {
 
     let (ok, _stdout, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "--strict",
         "--reflink",
         "disable",
@@ -1272,7 +1297,7 @@ fn e2e_direct_copy_revalidates_a_hardlink_created_before_commit() {
 
         let src_arg = src.to_str().unwrap();
         let dst_arg = dst.to_str().unwrap();
-        let mut args = vec!["copy", "-t", "-y"];
+        let mut args = vec!["copy", "--progress=plain", "-y"];
         if force {
             args.push("-f");
         }
@@ -1330,7 +1355,7 @@ fn e2e_initially_absent_active_destination_remains_no_clobber_at_commit() {
 
     let (ok, _stdout, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "--resume",
         "--reflink",
         "disable",
@@ -1369,7 +1394,7 @@ fn e2e_observed_active_destination_change_aborts_before_replacement() {
 
     let (ok, _stdout, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "--strict",
         "--reflink",
         "disable",
@@ -1415,7 +1440,7 @@ fn e2e_preserved_readonly_stage_is_cleaned_after_precommit_change() {
 
     let (ok, _stdout, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "--strict",
         "--preserve",
         "--reflink",
@@ -1458,7 +1483,7 @@ fn e2e_direct_resolution_never_reopens_a_racing_fifo() {
         dir.path(),
         &[
             "copy",
-            "-t",
+            "--progress=plain",
             "--strict",
             "--reflink",
             "disable",
@@ -1504,7 +1529,7 @@ fn e2e_already_complete_rechecks_destination_proof_before_reporting_success() {
 
     let (ok, stdout, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "--strict",
         "--reflink",
         "disable",
@@ -1542,7 +1567,7 @@ fn e2e_copy_file_range_rejects_a_source_truncated_after_snapshot() {
 
     let (ok, _stdout, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-f",
         "-y",
         "--reflink",
@@ -1594,7 +1619,7 @@ fn e2e_forced_reflink_uses_the_unique_stage_before_verified_replacement() {
 
     let (ok, _stdout, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-f",
         "-y",
         "-V",
@@ -1614,7 +1639,7 @@ fn e2e_forced_reflink_uses_the_unique_stage_before_verified_replacement() {
     fs::write(&dst, b"old destination again").unwrap();
     let (ok, _stdout, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-f",
         "-y",
         "-V",
@@ -1642,7 +1667,7 @@ fn e2e_forced_reflink_rejects_direct_modes_before_touching_the_destination() {
 
         let (ok, _stdout, stderr) = run_bcmr(&[
             "copy",
-            "-t",
+            "--progress=plain",
             "-f",
             "-y",
             mode,
@@ -1675,7 +1700,7 @@ fn e2e_forced_reflink_rejects_forced_sparse_before_touching_the_destination() {
 
     let (ok, _stdout, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-f",
         "-y",
         "--sparse",
@@ -1714,7 +1739,7 @@ fn e2e_preserve_and_sync_apply_metadata_to_the_committed_destination() {
 
     let (ok, _stdout, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-f",
         "-y",
         "-p",
@@ -1814,7 +1839,7 @@ fn e2e_carry_forward_code_path() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-C",
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
@@ -1841,7 +1866,7 @@ fn e2e_carry_forward_code_path() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-C",
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
@@ -1867,7 +1892,7 @@ fn e2e_carry_forward_code_path() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-C",
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
@@ -1913,7 +1938,7 @@ fn e2e_resume_rewrites_preallocated_unverified_tail() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-C",
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
@@ -1975,7 +2000,7 @@ fn e2e_resume_rejects_session_prefix_after_same_identity_source_rewrite() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-C",
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
@@ -2028,7 +2053,7 @@ fn e2e_sparse_resume_zeroes_an_unverified_dirty_tail() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-C",
         "--sparse=force",
         src.to_str().unwrap(),
@@ -2061,7 +2086,7 @@ fn e2e_resume_without_session_does_not_trust_equal_length_and_mtime() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-C",
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
@@ -2107,7 +2132,7 @@ fn e2e_resume_truncates_bytes_beyond_fully_verified_source() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-C",
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
@@ -2128,7 +2153,7 @@ fn e2e_append_refuses_to_truncate_a_longer_destination() {
 
     let (ok, _, _) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "--append",
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
@@ -2151,7 +2176,7 @@ fn e2e_append_shorter_destination_preserves_prefix_and_completes() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "--append",
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
@@ -2174,7 +2199,7 @@ fn e2e_strict_shorter_destination_proves_prefix_and_completes() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "--strict",
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
@@ -2377,7 +2402,7 @@ fn e2e_no_deref_replicates_top_level_symlink() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "--no-deref",
         link.to_str().unwrap(),
         dst_dir.to_str().unwrap(),
@@ -2405,7 +2430,7 @@ fn e2e_no_deref_default_dereferences() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         link.to_str().unwrap(),
         dst_dir.to_str().unwrap(),
     ]);
@@ -2427,7 +2452,7 @@ fn e2e_no_deref_preserves_dangling_symlink() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "--no-deref",
         link.to_str().unwrap(),
         dst_dir.to_str().unwrap(),
@@ -2454,7 +2479,7 @@ fn e2e_no_deref_preserves_symlink_to_fifo_without_opening_target() {
 
     let (ok, _stdout, stderr, timed_out) = run_bcmr_in_with_timeout(
         dir.path(),
-        &["copy", "-t", "--no-deref", "link.pipe", "dst"],
+        &["copy", "--progress=plain", "--no-deref", "link.pipe", "dst"],
         Duration::from_secs(10),
     );
 
@@ -2490,7 +2515,13 @@ fn e2e_no_deref_still_rejects_an_ordinary_fifo_without_opening_it() {
 
     let (ok, _stdout, stderr, timed_out) = run_bcmr_in_with_timeout(
         dir.path(),
-        &["copy", "-t", "--no-deref", "source.pipe", "dst"],
+        &[
+            "copy",
+            "--progress=plain",
+            "--no-deref",
+            "source.pipe",
+            "dst",
+        ],
         Duration::from_secs(10),
     );
 
@@ -2531,7 +2562,8 @@ fn e2e_no_deref_recursive_preserves_nested_links() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-rt",
+        "-r",
+        "--progress=plain",
         "--no-deref",
         src.to_str().unwrap(),
         dst_root.to_str().unwrap(),
@@ -2568,7 +2600,7 @@ fn e2e_no_deref_overwrite_gate_refuses_existing_dst() {
 
     let (ok, stdout, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "--no-deref",
         link.to_str().unwrap(),
         dst_dir.to_str().unwrap(),
@@ -2598,7 +2630,8 @@ fn e2e_no_deref_overwrite_with_force_replaces() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-tfy",
+        "--progress=plain",
+        "-fy",
         "--no-deref",
         link.to_str().unwrap(),
         dst_dir.to_str().unwrap(),
@@ -2627,7 +2660,8 @@ fn e2e_no_deref_symlink_create_failure_keeps_existing_regular_file() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-tfy",
+        "--progress=plain",
+        "-fy",
         "--no-deref",
         "--test-mode",
         "fail_symlink_create",
@@ -2658,7 +2692,8 @@ fn e2e_no_deref_symlink_create_failure_keeps_existing_symlink() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-tfy",
+        "--progress=plain",
+        "-fy",
         "--no-deref",
         "--test-mode",
         "fail_symlink_create",
@@ -2689,7 +2724,8 @@ fn e2e_no_deref_symlink_commit_failure_keeps_existing_final() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-tfy",
+        "--progress=plain",
+        "-fy",
         "--no-deref",
         "--test-mode",
         "fail_symlink_commit",
@@ -2719,7 +2755,7 @@ fn e2e_no_deref_noforce_commit_race_preserves_competing_destination() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "--no-deref",
         "--test-mode",
         "create_destination_before_symlink_commit",
@@ -2750,7 +2786,7 @@ fn e2e_no_deref_overwrite_gate_treats_dangling_link_as_existing() {
 
     let (ok, stdout, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "--no-deref",
         src_link.to_str().unwrap(),
         dst_dir.to_str().unwrap(),
@@ -2782,7 +2818,8 @@ fn e2e_no_deref_force_atomically_replaces_dangling_link() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-tfy",
+        "--progress=plain",
+        "-fy",
         "--no-deref",
         src_link.to_str().unwrap(),
         dst_dir.to_str().unwrap(),
@@ -2810,7 +2847,7 @@ fn e2e_no_deref_replicates_top_level_symlink_to_dir() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "--no-deref",
         link.to_str().unwrap(),
         dst_dir.to_str().unwrap(),
@@ -2841,7 +2878,7 @@ fn e2e_no_deref_multi_source_mix() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "--no-deref",
         dir.path().join("real.txt").to_str().unwrap(),
         link.to_str().unwrap(),
@@ -2877,7 +2914,8 @@ fn e2e_no_deref_refuses_overwriting_directory_even_with_force() {
 
     let (ok, stdout, stderr) = run_bcmr(&[
         "copy",
-        "-tfy",
+        "--progress=plain",
+        "-fy",
         "--no-deref",
         link.to_str().unwrap(),
         dst_dir.to_str().unwrap(),
@@ -2906,7 +2944,8 @@ fn e2e_no_deref_dry_run_emits_overwrite_for_existing_dst() {
 
     let (ok, stdout, stderr) = run_bcmr(&[
         "copy",
-        "-tnfy",
+        "--progress=plain",
+        "-nfy",
         "--no-deref",
         link.to_str().unwrap(),
         dst_dir.to_str().unwrap(),
@@ -2929,7 +2968,7 @@ fn e2e_no_deref_remote_target_refuses() {
 
     let (ok, stdout, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "--no-deref",
         link.to_str().unwrap(),
         "no-such-host-bcmr-test.invalid:dst/",
@@ -2976,7 +3015,7 @@ fn e2e_subcommand_help_shows_examples() {
 fn e2e_cross_host_copy_refuses_with_clear_error() {
     let (ok, _stdout, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "host-a-bcmr-test.invalid:src.bin",
         "host-b-bcmr-test.invalid:dst/",
     ]);
@@ -3146,7 +3185,7 @@ fn e2e_doctor_json_emits_structured_report() {
 fn e2e_same_host_remote_to_remote_copy_refuses() {
     let (ok, stdout, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "host-x-bcmr-test.invalid:src.bin",
         "host-x-bcmr-test.invalid:dst/",
     ]);
@@ -3165,7 +3204,7 @@ fn e2e_same_host_remote_to_remote_copy_refuses() {
 fn e2e_cross_host_move_refuses_with_clear_error() {
     let (ok, _stdout, stderr) = run_bcmr(&[
         "move",
-        "-t",
+        "--progress=plain",
         "host-a-bcmr-test.invalid:src.bin",
         "host-b-bcmr-test.invalid:dst/",
     ]);

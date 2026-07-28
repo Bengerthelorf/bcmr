@@ -35,7 +35,7 @@ fn e2e_remove_single_file_with_yes() {
     let file = dir.path().join("a.txt");
     fs::write(&file, b"doomed").unwrap();
 
-    let (ok, _, stderr) = run_bcmr(&["remove", "-t", "-y", file.to_str().unwrap()]);
+    let (ok, _, stderr) = run_bcmr(&["remove", "--progress=plain", "-y", file.to_str().unwrap()]);
     assert!(ok, "remove -y should succeed: {}", stderr);
     assert!(!file.exists(), "file should be removed: {}", stderr);
 }
@@ -47,7 +47,7 @@ fn e2e_remove_directory_requires_recursive_flag() {
     fs::create_dir(&target).unwrap();
     fs::write(target.join("f.txt"), b"x").unwrap();
 
-    let (ok, _, stderr) = run_bcmr(&["remove", "-t", "-y", target.to_str().unwrap()]);
+    let (ok, _, stderr) = run_bcmr(&["remove", "--progress=plain", "-y", target.to_str().unwrap()]);
     assert!(
         !ok,
         "removing a directory without -r should fail: {}",
@@ -74,7 +74,13 @@ fn e2e_remove_directory_tree_recursive() {
     fs::write(target.join("sub").join("f2.txt"), b"two").unwrap();
     fs::write(target.join("sub").join("deep").join("f3.txt"), b"three").unwrap();
 
-    let (ok, _, stderr) = run_bcmr(&["remove", "-t", "-r", "-y", target.to_str().unwrap()]);
+    let (ok, _, stderr) = run_bcmr(&[
+        "remove",
+        "--progress=plain",
+        "-r",
+        "-y",
+        target.to_str().unwrap(),
+    ]);
     assert!(ok, "recursive remove should succeed: {}", stderr);
     assert!(
         !target.exists(),
@@ -91,13 +97,23 @@ fn e2e_remove_dry_run_removes_nothing() {
     fs::write(target.join("f1.txt"), b"one").unwrap();
     fs::write(target.join("sub").join("f2.txt"), b"two").unwrap();
 
-    let (ok, stdout, stderr) =
-        run_bcmr(&["remove", "-t", "-r", "-y", "-n", target.to_str().unwrap()]);
+    let (ok, stdout, stderr) = run_bcmr(&[
+        "remove",
+        "--progress=plain",
+        "-r",
+        "-y",
+        "-n",
+        target.to_str().unwrap(),
+    ]);
     assert!(ok, "dry-run remove should succeed: {}", stderr);
     assert!(
         stdout.contains("DRY RUN"),
         "dry-run should announce itself: {}",
         stdout
+    );
+    assert!(
+        !stdout.contains('\u{1b}'),
+        "redirected dry-run output leaked ANSI: {stdout:?}"
     );
     assert!(
         target.join("f1.txt").exists() && target.join("sub").join("f2.txt").exists(),
@@ -111,7 +127,12 @@ fn e2e_remove_nonexistent_path_errors() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("nope.txt");
 
-    let (ok, _, stderr) = run_bcmr(&["remove", "-t", "-y", missing.to_str().unwrap()]);
+    let (ok, _, stderr) = run_bcmr(&[
+        "remove",
+        "--progress=plain",
+        "-y",
+        missing.to_str().unwrap(),
+    ]);
     assert!(!ok, "removing a nonexistent path should fail: {}", stderr);
     assert!(
         stderr.contains("not found"),
@@ -125,7 +146,12 @@ fn e2e_remove_force_skips_nonexistent() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("nope.txt");
 
-    let (ok, _, stderr) = run_bcmr(&["remove", "-t", "-f", missing.to_str().unwrap()]);
+    let (ok, _, stderr) = run_bcmr(&[
+        "remove",
+        "--progress=plain",
+        "-f",
+        missing.to_str().unwrap(),
+    ]);
     assert!(
         ok,
         "remove -f should succeed on a nonexistent path (rm -f semantics): {}",
@@ -144,7 +170,7 @@ fn e2e_remove_recursive_exclude_keeps_parent_dirs() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "remove",
-        "-t",
+        "--progress=plain",
         "-r",
         "-y",
         "-e",
@@ -178,7 +204,7 @@ fn e2e_remove_exclude_leaves_matching_files() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "remove",
-        "-t",
+        "--progress=plain",
         "-y",
         "-e",
         r"\.log$",

@@ -71,7 +71,12 @@ fn e2e_move_single_file() {
     let dst = dir.path().join("dst.txt");
     fs::write(&src, b"move me").unwrap();
 
-    let (ok, _, stderr) = run_bcmr(&["move", "-t", src.to_str().unwrap(), dst.to_str().unwrap()]);
+    let (ok, _, stderr) = run_bcmr(&[
+        "move",
+        "--progress=plain",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
     assert!(ok, "move should succeed: {}", stderr);
     assert!(dst.exists(), "destination should exist: {}", stderr);
     assert!(
@@ -97,7 +102,7 @@ fn e2e_move_directory_recursive() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "move",
-        "-t",
+        "--progress=plain",
         "-r",
         src_dir.to_str().unwrap(),
         dst_dir.to_str().unwrap(),
@@ -130,7 +135,7 @@ fn e2e_move_directory_without_recursive_fails() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "move",
-        "-t",
+        "--progress=plain",
         src_dir.to_str().unwrap(),
         dst_dir.to_str().unwrap(),
     ]);
@@ -157,7 +162,7 @@ fn e2e_move_file_into_existing_dir() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "move",
-        "-t",
+        "--progress=plain",
         src.to_str().unwrap(),
         dst_dir.to_str().unwrap(),
     ]);
@@ -181,7 +186,7 @@ fn e2e_move_dir_into_existing_dir_joins_source_name() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "move",
-        "-t",
+        "--progress=plain",
         "-r",
         src_dir.to_str().unwrap(),
         dst_dir.to_str().unwrap(),
@@ -203,7 +208,12 @@ fn e2e_move_refuses_overwrite_without_force_succeeds_with_force_yes() {
     fs::write(&src, b"new content").unwrap();
     fs::write(&dst, b"old content").unwrap();
 
-    let (ok, _, stderr) = run_bcmr(&["move", "-t", src.to_str().unwrap(), dst.to_str().unwrap()]);
+    let (ok, _, stderr) = run_bcmr(&[
+        "move",
+        "--progress=plain",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
     assert!(
         !ok,
         "move without -f should fail when target exists: {}",
@@ -222,7 +232,7 @@ fn e2e_move_refuses_overwrite_without_force_succeeds_with_force_yes() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "move",
-        "-t",
+        "--progress=plain",
         "-f",
         "-y",
         src.to_str().unwrap(),
@@ -249,7 +259,7 @@ fn e2e_move_force_refuses_same_file_without_data_loss() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "move",
-        "-t",
+        "--progress=plain",
         "-f",
         "-y",
         file.to_str().unwrap(),
@@ -272,7 +282,7 @@ fn e2e_move_force_refuses_file_into_its_own_parent_without_data_loss() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "move",
-        "-t",
+        "--progress=plain",
         "-f",
         "-y",
         file.to_str().unwrap(),
@@ -302,7 +312,7 @@ fn e2e_move_force_refuses_hard_link_alias_without_data_loss() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "move",
-        "-t",
+        "--progress=plain",
         "-f",
         "-y",
         file.to_str().unwrap(),
@@ -332,7 +342,7 @@ fn e2e_move_force_refuses_file_onto_symlink_alias_without_data_loss() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "move",
-        "-t",
+        "--progress=plain",
         "-f",
         "-y",
         file.to_str().unwrap(),
@@ -362,7 +372,7 @@ fn e2e_move_force_refuses_symlink_onto_its_underlying_file_without_data_loss() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "move",
-        "-t",
+        "--progress=plain",
         "-f",
         "-y",
         alias.to_str().unwrap(),
@@ -411,7 +421,7 @@ fn e2e_move_force_rename_failure_preserves_existing_destination() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "move",
-        "-t",
+        "--progress=plain",
         "-f",
         "-y",
         "-q",
@@ -449,7 +459,7 @@ fn e2e_move_dry_run_leaves_everything_untouched() {
 
     let (ok, stdout, stderr) = run_bcmr(&[
         "move",
-        "-t",
+        "--progress=plain",
         "-n",
         src.to_str().unwrap(),
         file_dst.to_str().unwrap(),
@@ -473,7 +483,7 @@ fn e2e_move_dry_run_leaves_everything_untouched() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "move",
-        "-t",
+        "--progress=plain",
         "-n",
         "-r",
         src_dir.to_str().unwrap(),
@@ -500,7 +510,12 @@ fn e2e_move_preserves_content_byte_for_byte() {
     create_random_file(&src, 8 * 1024 * 1024);
     let src_hash = checksum::calculate_hash(&src).unwrap();
 
-    let (ok, _, stderr) = run_bcmr(&["move", "-t", src.to_str().unwrap(), dst.to_str().unwrap()]);
+    let (ok, _, stderr) = run_bcmr(&[
+        "move",
+        "--progress=plain",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
     assert!(ok, "move should succeed: {}", stderr);
     assert!(
         !src.exists(),
