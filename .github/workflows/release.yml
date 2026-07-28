@@ -5,19 +5,61 @@ on:
     tags:
       - 'v*.*.*'
 
-  workflow_dispatch:
-
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  release-gate:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.validate.outputs.version }}
+      prerelease: ${{ steps.validate.outputs.prerelease }}
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag, package version, and main ancestry
+        id: validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/}"
+          if [[ "$GITHUB_REF" != refs/tags/* ]] ||
+             [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::release workflow requires a SemVer tag such as v0.7.0 or v0.7.0-rc.1"
+            exit 1
+          fi
+
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          if [[ "$tag" != "v$version" ]]; then
+            echo "::error::tag $tag does not match Cargo.toml version $version"
+            exit 1
+          fi
+
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo "::error::tag target $GITHUB_SHA is not contained in origin/main"
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$version" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
+    needs: release-gate
     uses: ./.github/workflows/test.yml
 
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
-    needs: test
+    needs: [release-gate, test]
     strategy:
       fail-fast: false
       matrix:
@@ -83,7 +125,7 @@ jobs:
 
       - name: Install cross
         if: matrix.cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --rev 88f49ff79e777bef6d3564531636ee4d3cc2f8d2 --locked
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
@@ -98,11 +140,11 @@ jobs:
 
       - name: Build binary
         if: ${{ !matrix.cross }}
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Build binary (cross)
         if: ${{ matrix.cross }}
-        run: cross build --release --target ${{ matrix.target }}
+        run: cross build --locked --release --target ${{ matrix.target }}
 
       - name: Strip binary
         if: matrix.strip
@@ -120,11 +162,27 @@ jobs:
           name: ${{ matrix.name }}
           path: dist/*
 
+  crate-check:
+    name: Validate crates.io package
+    runs-on: ubuntu-latest
+    needs: [release-gate, test]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Package dry run
+        run: cargo publish --locked --dry-run
+
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [release-gate, build, crate-check]
     permissions:
       contents: write
 
@@ -140,18 +198,42 @@ jobs:
           path: dist
 
       - name: Prepare release assets
+        shell: bash
         run: |
-          cd dist
-          for dir in */; do
-            name="${dir%/}"
-            cd "$dir"
-            if ls *.exe 1>/dev/null 2>&1; then
-              zip "../${name}.zip" bcmr.exe
+          set -euo pipefail
+          expected=(
+            bcmr-x86_64-linux
+            bcmr-aarch64-linux
+            bcmr-x86_64-macos
+            bcmr-aarch64-macos
+            bcmr-x86_64-windows
+            bcmr-aarch64-windows
+            bcmr-x86_64-freebsd
+          )
+
+          for name in "${expected[@]}"; do
+            test -d "dist/$name" || {
+              echo "::error::missing build artifact $name"
+              exit 1
+            }
+            if [[ "$name" == *-windows ]]; then
+              test -f "dist/$name/bcmr.exe" || {
+                echo "::error::$name does not contain bcmr.exe"
+                exit 1
+              }
+              (cd "dist/$name" && zip -q "../${name}.zip" bcmr.exe)
             else
-              tar czf "../${name}.tar.gz" bcmr
+              test -f "dist/$name/bcmr" || {
+                echo "::error::$name does not contain bcmr"
+                exit 1
+              }
+              tar -C "dist/$name" -czf "dist/${name}.tar.gz" bcmr
             fi
-            cd ..
           done
+
+          cd dist
+          sha256sum *.tar.gz *.zip > sha256sums.txt
+          test "$(wc -l < sha256sums.txt)" -eq 7
 
       - name: Generate changelog
         id: changelog
@@ -215,6 +297,8 @@ jobs:
           echo "- **Windows x86_64**: bcmr-x86_64-windows.zip" >> CHANGELOG.md
           echo "- **Windows ARM64**: bcmr-aarch64-windows.zip" >> CHANGELOG.md
           echo "- **FreeBSD x86_64**: bcmr-x86_64-freebsd.tar.gz" >> CHANGELOG.md
+          echo "" >> CHANGELOG.md
+          echo "Verify downloads with \`sha256sums.txt\`." >> CHANGELOG.md
 
       - name: Create Release
         uses: softprops/action-gh-release@v3
@@ -222,18 +306,18 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.zip
+            dist/sha256sums.txt
           body_path: CHANGELOG.md
+          fail_on_unmatched_files: true
           draft: false
-          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+          prerelease: ${{ needs.release-gate.outputs.prerelease == 'true' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   publish-crate:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    needs: test
-    if: startsWith(github.ref, 'refs/tags/')
-    continue-on-error: true
+    needs: release
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -245,13 +329,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Publish to crates.io
-        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   update-tap:
     name: Update Homebrew Formula
     runs-on: ubuntu-latest
-    needs: release
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [release-gate, release]
+    if: needs.release-gate.outputs.prerelease == 'false'
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -263,23 +347,31 @@ jobs:
           TAG=${GITHUB_REF#refs/tags/}
           echo "FORMULA_VERSION=${TAG#v}" >> $GITHUB_OUTPUT
 
-      - name: Download Release Artifacts
-        run: |
-          VERSION=${{ steps.release.outputs.VERSION }}
-          URL_ARM_MAC="https://github.com/Bengerthelorf/bcmr/releases/download/${VERSION}/bcmr-aarch64-macos.tar.gz"
-          URL_INTEL_MAC="https://github.com/Bengerthelorf/bcmr/releases/download/${VERSION}/bcmr-x86_64-macos.tar.gz"
-          URL_LINUX="https://github.com/Bengerthelorf/bcmr/releases/download/${VERSION}/bcmr-x86_64-linux.tar.gz"
-
-          wget -q -O bcmr-aarch64-macos.tar.gz "$URL_ARM_MAC"
-          wget -q -O bcmr-x86_64-macos.tar.gz "$URL_INTEL_MAC"
-          wget -q -O bcmr-x86_64-linux.tar.gz "$URL_LINUX"
-
-      - name: Calculate SHA256
+      - name: Read verified release checksums
         id: shasum
+        shell: bash
         run: |
-          echo "SHA_ARM_MAC=$(sha256sum bcmr-aarch64-macos.tar.gz | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
-          echo "SHA_INTEL_MAC=$(sha256sum bcmr-x86_64-macos.tar.gz | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
-          echo "SHA_LINUX=$(sha256sum bcmr-x86_64-linux.tar.gz | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          VERSION=${{ steps.release.outputs.VERSION }}
+          base="https://github.com/Bengerthelorf/bcmr/releases/download/${VERSION}"
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output sha256sums.txt "${base}/sha256sums.txt"
+
+          checksum() {
+            local asset=$1
+            local hash
+            hash=$(awk -v asset="$asset" '$2 == asset || $2 == "*" asset { print $1; exit }' sha256sums.txt)
+            [[ "$hash" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "::error::invalid or missing checksum for $asset"
+              exit 1
+            }
+            printf '%s' "$hash"
+          }
+
+          echo "SHA_ARM_MAC=$(checksum bcmr-aarch64-macos.tar.gz)" >> "$GITHUB_OUTPUT"
+          echo "SHA_INTEL_MAC=$(checksum bcmr-x86_64-macos.tar.gz)" >> "$GITHUB_OUTPUT"
+          echo "SHA_X86_LINUX=$(checksum bcmr-x86_64-linux.tar.gz)" >> "$GITHUB_OUTPUT"
+          echo "SHA_ARM_LINUX=$(checksum bcmr-aarch64-linux.tar.gz)" >> "$GITHUB_OUTPUT"
 
       - name: Checkout Tap Repository
         uses: actions/checkout@v6
@@ -297,7 +389,7 @@ jobs:
             desc "Better Copy Move Remove - A modern, safe file operation tool"
             homepage "https://github.com/Bengerthelorf/bcmr"
             version "${{ steps.release.outputs.FORMULA_VERSION }}"
-            license "GPL-3.0"
+            license "Apache-2.0"
 
             if OS.mac?
               if Hardware::CPU.arm?
@@ -308,8 +400,13 @@ jobs:
                 sha256 "${{ steps.shasum.outputs.SHA_INTEL_MAC }}"
               end
             elsif OS.linux?
-              url "https://github.com/Bengerthelorf/bcmr/releases/download/${{ steps.release.outputs.VERSION }}/bcmr-x86_64-linux.tar.gz"
-              sha256 "${{ steps.shasum.outputs.SHA_LINUX }}"
+              if Hardware::CPU.arm?
+                url "https://github.com/Bengerthelorf/bcmr/releases/download/${{ steps.release.outputs.VERSION }}/bcmr-aarch64-linux.tar.gz"
+                sha256 "${{ steps.shasum.outputs.SHA_ARM_LINUX }}"
+              else
+                url "https://github.com/Bengerthelorf/bcmr/releases/download/${{ steps.release.outputs.VERSION }}/bcmr-x86_64-linux.tar.gz"
+                sha256 "${{ steps.shasum.outputs.SHA_X86_LINUX }}"
+              end
             end
 
             def install
