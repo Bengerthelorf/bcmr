@@ -25,30 +25,40 @@ length-prefixed frames (`[4B length][1B type][payload]`) and supports:
 extensions covered on this page.
 
 Key properties of the base design:
-- **Single connection**: all operations multiplexed over one SSH
-  session, eliminating $\mathcal{O}(n)$ process spawns for $n$ files.
+- **Persistent sessions**: operations share a long-lived SSH
+  session instead of spawning one process per file. Multi-file
+  batches may opt into several independent sessions with
+  `--parallel`.
 - **Server-side hashing**: the remote bcmr computes BLAKE3 hashes
   locally, avoiding data round-trips for verification.
-- **Automatic fallback**: if the remote does not have bcmr
-  installed, transfers silently fall back to legacy SCP.
+- **Visible fallback**: if the remote lacks a matching `bcmr serve`,
+  the client warns and falls back to legacy SCP before transfer
+  processing starts.
 - **Frame size limit**: `read_message` rejects frames $> 16$ MiB to
   prevent memory exhaustion from malicious peers.
 
-The Hello / Welcome handshake carries an optional trailing
-**capabilities byte** (LZ4 = `0x01`, Zstd = `0x02`, Dedup = `0x04`,
-Fast = `0x08`). Old decoders read `version` and stop; new decoders
-read `caps` too. Talking to a peer that doesn't advertise a bit
-just means the feature stays off, so no protocol version bump is
-needed for backward-compatible additions.
+The current wire version is **2**. `Hello` / `Welcome` carry a
+capabilities byte (LZ4 = `0x01`, Zstd = `0x02`, Dedup = `0x04`,
+Fast = `0x08`, Sync = `0x10`, Direct TCP = `0x20`, AEAD = `0x40`,
+PUT offset = `0x80`). Capability intersection still disables
+optional features safely, but it is not a substitute for versioning
+message semantics.
+
+Version 2 deliberately breaks wire compatibility with version 1:
+`Put` now carries an explicit `overwrite` policy. A mismatched
+client/server pair rejects the serve handshake rather than guessing,
+then the high-level copy command may fall back to legacy SCP. This
+keeps old **devices** usable without pretending that old protocol
+semantics are safe.
 
 ```mermaid
 sequenceDiagram
     participant C as Client
     participant S as Server
     Note over C,S: Both hold their own caps mask.<br/>The intersection drives behaviour.
-    C->>S: Hello { version: 1, caps: client_caps }
+    C->>S: Hello { version: 2, caps: client_caps }
     S->>S: effective = server_caps AND client_caps
-    S->>C: Welcome { version: 1, caps: effective }
+    S->>C: Welcome { version: 2, caps: effective }
     C->>C: algo = negotiate(client_caps, effective)
     Note over C,S: For each Data frame:<br/>encode_block(algo, ...) emits<br/>Data (raw) or DataCompressed.
 ```
@@ -59,6 +69,28 @@ encoder also runs a per-block auto-skip: if `compressed.len()`
 exceeds 95 % of the original (random / already-compressed bytes)
 the block goes raw to save the receiver's decompress pass.
 
+### Current v2 publication and liveness contract
+
+- PUT defaults to no-clobber. Only `--force --yes` sets
+  `overwrite=true`.
+- The server writes through a handle-bound `AtomicFile`
+  transaction, validates declared length and hash, applies security
+  metadata, and only then publishes.
+- Multi-file pipelined PUT remains parallel and atomic per file.
+  The older single-file striped PUT is disabled in production
+  because its `Truncate + PutChunked` shape exposed the final path
+  before all workers completed. Re-enabling it requires a
+  server-owned transaction token shared across connections.
+- SSH sessions use `ServerAliveInterval=15` and
+  `ServerAliveCountMax=20`: a black-holed connection becomes a
+  bounded failure after roughly five minutes, while a very slow
+  connection that still exchanges data is not killed by a total
+  wall-clock deadline.
+- Release Linux binaries use musl targets. A protocol-v2 static
+  x86-64 artifact was executed successfully on both a current Linux
+  host and an older-glibc Linux host; a dynamically linked build
+  failed on the latter before this control.
+
 ### Parallel SSH with Independent Connections
 
 SSH's `ControlMaster` multiplexing serializes all channels through
@@ -66,8 +98,10 @@ one TCP connection and one encryption context. For $P$ parallel
 workers, throughput is bounded by a single core's encryption speed
 regardless of $P$.
 
-bcmr assigns each parallel worker its own `ControlPath`, creating
-$P$ independent TCP connections:
+The serve pool forces `ControlMaster=no` and `ControlPath=none` for
+each member, so $P$ workers really create $P$ independent TCP and
+cipher streams even when the user's SSH config enables
+multiplexing:
 
 $$\text{throughput} \approx \min(P \cdot T_{\text{single}},\; T_{\text{link}})$$
 
@@ -191,10 +225,9 @@ SSH) it grows.
 across the two runs.
 
 :::callout[CAS Eviction]{kind="info"}
-Today the CAS grows monotonically. Manual cleanup with
-`rm -rf ~/.local/share/bcmr/cas` works but is easy to forget. A
-size-capped LRU is on the [Open Questions](/ablation/open-questions)
-list.
+The original measurement predated automatic eviction. The current
+CAS is size-capped with LRU-by-mtime eviction; see Experiment 15
+below. `BCMR_CAS_CAP_MB=0` explicitly selects unbounded storage.
 :::
 
 ## CAP_FAST: Skip Server Hash + Linux Splice
@@ -597,6 +630,84 @@ this branch doesn't yet stripe a single file across streams.
 
 ---
 
+## Experiment 21: Protocol v2 Atomic PUT and Failure Semantics
+
+**Problem found on a real peer**: protocol v1 did not carry the
+caller's overwrite policy. Uploading different content to an
+existing isolated destination without `--force` returned exit 0
+and replaced the file. This violated the CLI contract and made a
+retry capable of destroying the last good remote copy.
+
+**Change**:
+
+1. bump the protocol from 1 to 2;
+2. encode `overwrite: bool` in every `Put`, including pipelined
+   batches;
+3. default to `AtomicFile::new_no_replace`, with
+   `AtomicFile::new` reachable only through explicit force;
+4. receive into a private handle-bound transaction, validate
+   length/hash, apply inherited or preserved security metadata,
+   then publish;
+5. disable production single-file striped PUT until independent
+   connections can join one server-owned transaction.
+
+**Method**: current v2 client and a static-musl v2 server on an
+older-glibc Linux peer. All paths were isolated under a per-revision
+test cache. SHA-256 was checked independently with the host's
+`sha256sum`; downloads were also checked with `cmp`.
+
+| Case | Expected | Observed |
+|------|----------|----------|
+| Fresh 1 MiB PUT, verify + sync | publish | exit 0; remote SHA equals source |
+| Different 1 MiB PUT, no force | reject | exit 1; old remote SHA unchanged |
+| Same replacement with `--force --yes` | replace | exit 0; remote SHA changes to new source |
+| Download after replacement | identical bytes | `cmp` success |
+| Recursive `-P4`, existing files, no force | reject without clobber | exit 1; modified local file's old remote SHA unchanged |
+| Recursive `-P4 --force --yes` | replace atomically per file | exit 0; new SHA present |
+| Kill during forced 512 MiB replacement after transaction appears | retain old final | client exit 130; old 1 MiB final SHA unchanged |
+
+Successful and known-rejection cases left no
+`.bcmr.receive.*` entry. The killed transfer under a group-writable
+(`0775`) parent retained an empty private transaction directory.
+That is deliberate fail-closed behavior: after unlinking the exact
+payload through its retained directory handle, the implementation
+will not remove a directory **name** from a shared namespace where
+another principal could race a substitution. The test verified the
+directory was empty and removed only that exact path manually.
+
+**Security metadata controls**:
+
+- macOS: an initially missing destination receives exactly the
+  serialized inheritable ACEs of a directly-created reference file;
+  the in-flight transaction itself has no effective inherited ACL.
+- Linux ext4: a parent default ACL is retained only long enough to
+  create the empty payload; the resulting access ACL matches a
+  direct child byte-for-byte, then the transaction's default ACL is
+  removed before payload bytes are written.
+- Existing destinations retain non-privileged ACL/xattr metadata;
+  setuid/setgid and privileged content-bound xattrs are stripped.
+
+**Reliability control**: SSH now probes a silent connection every
+15 seconds and gives up after 20 unanswered probes. A third test
+peer transferred only 4.22 MiB in roughly two minutes but continued
+making progress; it was not misclassified as dead. This is why the
+policy is an idle/liveness bound rather than a total transfer
+deadline.
+
+**Performance boundary**: this experiment establishes correctness,
+not a post-change throughput win. Earlier 20 MiB smoke runs on the
+v1 transport reached 20.25 MiB/s for compressible Zstd content and
+13.48 MiB/s for random content on two real SSH paths, but those
+single runs are not used as a v2 before/after claim. Full adaptive
+compression, congestion response, and transactional single-file
+striping require their own controlled ablations.
+
+**Decision**: ship v2 and reject v1 at the serve handshake. Preserve
+device reach through static musl releases and visible legacy-SCP
+fallback, not by accepting ambiguous PUT semantics.
+
+---
+
 ## Summary
 
 Each row below states the specific workload behind the number.
@@ -604,7 +715,7 @@ Don't lift this table out of context without the qualifiers.
 
 | Decision | Measured Cost | Measured Benefit (workload) |
 |----------|-------------|-----------------|
-| Per-worker SSH | 0 % (additive) | Up to ~6× parallel throughput (mscp's 8-connection, 100 Gbps figure; not re-measured on this tree) |
+| Per-worker SSH | N× auth/CPU; serve pool forces independent TCP, while single-file uploads now open only one session | 4.58× scaling N=1→N=8 on host-L under load 93; bcmr N=8 beats `scp -r` by 24% on 10000 × 64 KiB (Exp 19) |
 | Serve protocol | 0 % (replaces SSH spawns) | Eliminates per-file process overhead (qualitative; measured at "~50 ms spawn vs ~0.1 ms frame" in [Serve Protocol Benefits](#serve-protocol-benefits)) |
 | Auto-skip wire compression | Negligible (LZ4 ~4 GB/s encode on random 4 MiB blocks) | Applies to all Data frames; per-block auto-skip keeps incompressible blocks raw |
 | Wire compression (Zstd-3) | ~320 MB/s encode, ~1 GB/s decode on Apple Silicon | 2.48--5.59× over uncompressed on 64 MiB source-text, ~10 MB/s WAN (Exp 12) |
@@ -613,5 +724,6 @@ Don't lift this table out of context without the qualifiers.
 | CAS LRU cap | Walk + sort the CAS dir per PUT (cheap) | Holds store size ≤ cap under 3× 24 MiB repeated uploads (Exp 15) |
 | `CAP_SYNC` per-file fsync gate | Negotiated bit; off by default (matches cp/scp) | 3.9× on 10000 × 64 KiB host-L loopback (24.75 → 6.35 s); ~10 % on 1 GiB single (Exp 17) |
 | Client-side request pipelining | Writer-task spawn per batch; writer.abort() on error path | 1.8× on 10000 × 64 KiB host-L loopback (6.35 → 3.58 s); lands at 1.18× of `scp -r` (Exp 18) |
-| `ServeClientPool` parallel SSH | `--parallel N` opts into N concurrent SSH sessions; default N=1 preserves old behavior | 4.58× scaling N=1→N=8 on host-L under load 93; bcmr N=8 **beats `scp -r` by 24%** (14.7 vs 19.4 s) on 10000 × 64 KiB (Exp 19) |
+| `ServeClientPool` parallel SSH | Directory batches use up to `--parallel N` sessions, capped by available files; a single top-level upload uses one | 4.58× scaling N=1→N=8 on host-L under load 93; bcmr N=8 **beats `scp -r` by 24%** (14.7 vs 19.4 s) on 10000 × 64 KiB (Exp 19) |
 | `--direct=direct` data plane | SSH used only for auth + rendezvous; data over a dedicated AES-256-GCM-framed TCP socket (Path B) | **2.84× vs `scp`** on 1 GiB GET host-N → host-L (best-of-3): scp 9.4 → bcmr-ssh 8.7 → bcmr-direct 26.7 MiB/s; 65% of iperf3's 41 MiB/s ceiling (Exp 20) |
+| Protocol v2 atomic PUT | Private sibling transaction, security metadata derivation, and final rename/exchange; single-file striped PUT disabled until transactional | No-force, force, recursive `-P4`, download, and killed-transfer cases preserve the specified final-path contract on a real older-glibc Linux peer (Exp 21) |

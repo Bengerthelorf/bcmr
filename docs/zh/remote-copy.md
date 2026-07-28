@@ -38,7 +38,10 @@ bcmr copy -r -P 8 ./large_dataset/ user@host:/data/
 bcmr copy -P 3 user@host:/data/a.bin user@host:/data/b.bin ./local/
 ```
 
-默认并行数通过 `[scp] parallel_transfers` 配置（默认：4）。使用 `-P 1` 或小量传输时按顺序执行。
+默认并行数通过 `[scp] parallel_transfers` 配置（默认：4）。
+Serve 模式的目录批次最多使用这么多条相互独立的 SSH 会话。
+即使 `-P` 更大，单文件上传也只建立一条会话，因为生产路径不会
+为了分片而牺牲可见目标文件的崩溃安全性。
 
 TUI 和纯文本模式均会显示每个 worker 的状态：
 
@@ -79,9 +82,12 @@ BCMR 有**两套独立**的压缩层，请区分：
 
 ## Serve 协议（加速传输）
 
-当远端也安装了 bcmr 时，传输自动使用 **bcmr serve 协议** — 通过单个 SSH 连接的二进制帧协议。消除逐文件 SSH 进程开销，并支持服务端哈希计算。
+当远端也安装了匹配版本的 bcmr 时，传输自动使用
+**bcmr serve 协议** — 通过持久 SSH 会话或有界会话池承载的
+二进制帧协议。它消除逐文件 SSH 进程开销，并支持服务端哈希计算。
 
-远端没有 bcmr 时自动回退到传统 SCP。
+当前线路协议版本是 v2，并且有意不接受 v1 的 PUT 语义。远端没有
+bcmr 或协议版本不匹配时，bcmr 会显示回退警告并使用传统 SCP。
 
 ### 在远端安装 bcmr
 
@@ -114,6 +120,26 @@ bcmr copy -V local_file.txt user@host:/backup/
 # 使用 serve 协议时，服务端在写入后计算哈希并返回
 # 无需重新传输数据即可完成校验
 ```
+
+### 原子上传与覆盖策略
+
+Serve PUT 默认不覆盖已存在的目标。只有显式使用
+`--force --yes`，客户端才会在 v2 协议中携带覆盖决定：
+
+```bash
+# 远端已有 report.pdf 时失败，并保留旧文件
+bcmr copy report.pdf user@host:/backup/
+
+# 校验并同步落盘后，原子替换旧文件
+bcmr copy --force --yes --verify --sync report.pdf user@host:/backup/
+```
+
+服务端先写入私有、句柄绑定的事务，校验长度和哈希后才发布。
+中断的强制覆盖会保留旧的最终路径；流水线目录上传对每个文件都
+保持同样的属性。
+
+生产版暂时禁用单文件跨连接分片 PUT，因为独立连接还不能安全加入
+同一个服务端事务。`-P N` 仍会并行处理递归批次中的不同文件。
 
 ### 内容寻址去重（`CAP_DEDUP`）
 
@@ -152,13 +178,16 @@ bcmr copy --fast -V user@host:/big.bin ./local.bin
 - 使用现有的 SSH 配置（`~/.ssh/config`、密钥等）
 - 在开始传输前验证 SSH 连接
 - **Serve 模式**：通过 SSH 启动远端 `bcmr serve`，通过 stdin/stdout 的二进制协议通信
-- **传统模式**：通过 ControlMaster 复用 SSH 连接，并行 worker 使用独立 TCP 连接
+- **传统模式**：默认通过 ControlMaster 复用 SSH 连接；设置 `BCMR_SSH_NO_MULTIPLEX=1` 可关闭
+- **Serve 会话池**：显式禁用 ControlMaster，使并行成员使用相互独立的 TCP/加密流
+- 每 15 秒探测无流量的 SSH 会话，连续 20 次无响应后关闭；持续有流量的慢连接不会被误判
 - 通过 SSH 流式传输数据并追踪进度
 - 支持上传和下载两个方向
 
 :::callout[限制]{kind="warn"}
 - 无法直接在两个远程主机之间复制 — 请使用本地作为中转
 - Serve 快路径的断点续传（`-C`）：单文件上传已原生支持；递归目录上传和所有下载在指定 `--resume/--strict/--append` 时自动回退到传统模式
+- 在共享可写目标目录中，中断的上传可能留下空的私有 `.bcmr.receive.*` 恢复目录；BCMR 不会在可竞争的命名空间中执行不安全的按名称清理
 :::
 
 ## 路径检测

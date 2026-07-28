@@ -37,7 +37,11 @@ bcmr copy -r -P 8 ./large_dataset/ user@host:/data/
 bcmr copy -P 3 user@host:/data/a.bin user@host:/data/b.bin ./local/
 ```
 
-Default parallel count is configured in `[scp] parallel_transfers` (default: 4). When `-P 1` or omitted on small transfers, files are sent sequentially.
+Default parallel count is configured in `[scp] parallel_transfers`
+(default: 4). Serve-mode directory batches use at most that many
+independent SSH sessions. A single upload opens one session even
+when `-P` is larger, because the production upload path deliberately
+does not stripe one visible file across connections.
 
 Both TUI and plain text modes show per-worker status:
 
@@ -89,9 +93,14 @@ for measured ratios and throughput across real links.
 
 ## Serve Protocol (Accelerated Transfers)
 
-When the remote host also has bcmr installed, transfers automatically use the **bcmr serve protocol** — a binary frame protocol over a single SSH connection. This eliminates per-file SSH process overhead and enables server-side hashing.
+When the remote host also has a matching bcmr version, transfers
+automatically use the **bcmr serve protocol** — a binary frame
+protocol over persistent SSH sessions. This eliminates per-file SSH
+process overhead and enables server-side hashing.
 
-If the remote doesn't have bcmr, it falls back to legacy SCP transparently.
+The current wire version is 2 and intentionally does not accept v1
+PUT semantics. If the remote is missing bcmr or has a mismatched
+protocol, bcmr prints a fallback warning and uses legacy SCP.
 
 ### Installing bcmr on Remote
 
@@ -109,7 +118,7 @@ bcmr deploy user@host --path /usr/local/bin/bcmr
 
 | | Legacy SSH | Serve Protocol |
 |---|---|---|
-| Connection setup | New process per file | Single persistent connection |
+| Connection setup | New process per file | Persistent session or bounded pool |
 | File listing | `ssh find` (shell parsing) | Binary LIST message |
 | Hash verification | Transfer data back to local | Server-side BLAKE3 computation |
 | Upload verification | Re-download to verify | Server returns hash in PUT response |
@@ -124,6 +133,29 @@ bcmr copy -V local_file.txt user@host:/backup/
 # With serve protocol, the server computes the hash after writing
 # and returns it — no need to re-transfer data for verification
 ```
+
+### Atomic Upload and Overwrite Policy
+
+Serve PUT is no-clobber by default. The overwrite decision is
+carried on protocol v2 and enforced again by the server:
+
+```bash
+# Fails if report.pdf already exists remotely
+bcmr copy report.pdf user@host:/backup/
+
+# Explicit atomic replacement
+bcmr copy --force --yes --verify --sync report.pdf user@host:/backup/
+```
+
+The server receives into a private handle-bound transaction,
+validates the declared length and hash, and only then publishes the
+file. An interrupted forced replacement retains the old final path.
+Pipelined directory uploads keep this property per file.
+
+Single-file striped PUT is currently disabled in production because
+independent connections cannot yet join the same server-owned
+transaction. `-P N` still parallelizes files in recursive batches;
+it does not trade away crash safety to stripe one upload.
 
 ### Content-Addressed Dedup (`CAP_DEDUP`)
 
@@ -176,13 +208,24 @@ server-side integrity verification.
 - Uses your existing SSH configuration (`~/.ssh/config`, keys, etc.)
 - Validates SSH connectivity before starting transfers
 - **Serve mode**: launches `bcmr serve` on remote via SSH, communicates via binary protocol over stdin/stdout
-- **Legacy mode**: reuses SSH connections via ControlMaster multiplexing, parallel workers use independent TCP connections
+- **Legacy mode**: reuses SSH connections via ControlMaster by
+  default; `BCMR_SSH_NO_MULTIPLEX=1` opts out when the remote sshd is
+  tuned for independent connection bursts
+- **Serve pool**: explicitly disables ControlMaster so parallel
+  members are independent TCP/cipher streams even when user SSH
+  config enables multiplexing
+- Probes silent SSH sessions every 15 seconds and closes them after
+  20 unanswered probes; slow sessions with continuing traffic remain
+  valid
 - Streams data through SSH with progress tracking
 - Supports both upload and download directions
 
 :::callout[Limitations]{kind="warn"}
 - Cannot copy between two remote hosts directly — use a local intermediary
 - Resume (`-C`) on serve fast path: single-file uploads are supported natively. Recursive directory uploads and downloads with `--resume/--strict/--append` fall back to legacy mode automatically.
+- A killed upload in a shared writable destination directory may
+  retain an empty private `.bcmr.receive.*` recovery directory.
+  BCMR refuses unsafe name-based cleanup in a raceable namespace.
 :::
 
 ## Path Detection
