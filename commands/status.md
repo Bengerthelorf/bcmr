@@ -2,7 +2,7 @@
 cmd: bcmr status
 group: system
 sig: "[job_id] [--json]"
-desc: inspect state of --json background jobs (scanning / running / done / failed / interrupted)
+desc: inspect explicit --background jobs (scanning / running / done / failed / interrupted)
 tags: [stable]
 order: 3
 related: [bcmr copy, bcmr move, bcmr remove]
@@ -19,9 +19,9 @@ example:
   - "3f8a5dd0c012   interrupted    —"
 ---
 
-When `bcmr copy/move/remove` runs with `--json`, the command detaches to a
-background process and writes progress as NDJSON to
-`~/.local/share/bcmr/jobs/<id>.jsonl`. `bcmr status` reads those logs and
+When `bcmr copy/move/remove` runs with `--background`, the command detaches to a
+background process. Add `--json` for a structured submission descriptor containing
+the platform-specific log path. `bcmr status` reads those NDJSON logs and
 classifies each job:
 
 - `scanning` — walking source tree, no byte moved yet

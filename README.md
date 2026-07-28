@@ -51,11 +51,11 @@ have bcmr it runs a native protocol over SSH (optionally with an
 AES-256-GCM direct-TCP data plane that bypasses SSH's single-stream
 crypto ceiling); otherwise it falls back to scp transparently.
 
-**Built for humans and agents.** `--json` detaches to a background
-job writing NDJSON to `~/.local/share/bcmr/jobs/<id>.jsonl`;
-`bcmr status <id>` classifies state as `scanning` / `running` /
-`done` / `failed` / `interrupted`. Progress is structured,
-machine-parseable, and survives terminal close.
+**Built for humans and agents.** `--json` emits foreground NDJSON
+without changing execution semantics. Add `--background` explicitly
+when work must survive terminal close; the job log lives in the platform
+data directory reported by the submission event, and `bcmr status <id>` classifies it as
+`scanning` / `running` / `done` / `failed` / `interrupted`.
 
 ### When to reach for `rsync` instead
 
@@ -76,7 +76,7 @@ see the [Internals](https://app.snaix.homes/bcmr/internals/) index.
 
 ## Highlights
 
-- 📊 **Progress Display** — Fancy TUI box with gradient bar, ETA, speed, per-file tracking. Plain text mode for logs and pipes
+- 📊 **Progress Display** — Capability-aware `auto`, explicit TUI / inline / plain modes, and clean log or pipe fallback
 - 🔄 **Resume & Verify** — Crash-safe resume with session files and contiguous source/destination block proof. BLAKE3 inline hashing for 2-pass verified copy
 - 🌐 **Remote Copy (SSH)** — Upload and download via SSH. Binary `bcmr serve` protocol for fast transfers when both sides have bcmr, automatic fallback to legacy SCP
 - 🗜️ **Wire Compression** — `--compress={auto,zstd,lz4,none}`: per-block Zstd / LZ4 negotiated in the serve handshake, ~5× bandwidth on source-code text, auto-skip on incompressible blocks
@@ -84,7 +84,7 @@ see the [Internals](https://app.snaix.homes/bcmr/internals/) index.
 - ⚡ **Parallel by Default** — `-j/--jobs` for local multi-file concurrency (default `min(CPU, 8)`); `-P/--parallel` for independent SSH connections; reflink (CoW), `copy_file_range`, `clonefile` on the kernel fast paths
 - 🏷️ **Attribute Preservation** — `-p` carries mode, mtime, and extended attributes (Linux + macOS)
 - 🛡️ **Safe Operations** — Dry-run preview, overwrite prompts, regex exclusions, atomic writes with durable fsync (`F_FULLFSYNC` on macOS)
-- 🤖 **AI-Agent Friendly** — `--json` detaches to a background job writing NDJSON to `~/.local/share/bcmr/jobs/<id>.jsonl`; `bcmr status <id>` classifies into `scanning`/`running`/`done`/`failed`/`interrupted`
+- 🤖 **AI-Agent Friendly** — Foreground `--json` NDJSON by default; explicit `--background` jobs survive terminal close and expose `scanning`/`running`/`done`/`failed`/`interrupted` through `bcmr status`
 - 🎨 **Configurable** — Custom color gradients, bar characters, border styles via TOML config
 
 ## Install
@@ -165,6 +165,7 @@ bcmr check -r src/ dst/
 # JSON output for AI agents / scripts
 bcmr copy --json -r src/ dst/         # streaming NDJSON progress
 bcmr check --json -r src/ dst/        # structured diff output
+bcmr copy --background --json -r src/ dst/  # detached job descriptor + log
 ```
 
 ### Shell Integration

@@ -36,7 +36,7 @@
 
 **本地和 SSH，共用同一个 CLI。** `bcmr copy a.txt /b/` 和 `bcmr copy a.txt user@host:/b/` 是完全相同的命令、相同的参数 — 不需要在 `cp` / `scp` / `rsync` 之间切上下文。双端都装了 bcmr 时走自有协议 over SSH（可选 AES-256-GCM direct-TCP 数据面，绕开 SSH 单流加密瓶颈）；否则自动回退到 scp。
 
-**为人和 AI Agent 同时设计。** `--json` 会脱离终端转入后台，NDJSON 进度写入 `~/.local/share/bcmr/jobs/<id>.jsonl`；`bcmr status <id>` 将状态分类为 `scanning` / `running` / `done` / `failed` / `interrupted`。进度输出结构化、可被程序消费，也不会因终端关闭而丢失。
+**为人和 AI Agent 同时设计。** `--json` 默认在前台输出 NDJSON，不会偷偷改变执行方式。需要任务在终端关闭后继续时，再显式添加 `--background`；提交事件会返回平台数据目录中的日志路径，`bcmr status <id>` 会将状态分类为 `scanning` / `running` / `done` / `failed` / `interrupted`。
 
 ### 什么时候应该用 `rsync`
 
@@ -48,7 +48,7 @@ bcmr 不是 delta-sync 引擎。如果你在 100 GB 文件里只改了 3 MB 而�
 
 ## 亮点
 
-- 📊 **进度显示** — 精美 TUI 界面，渐变进度条、ETA、速度、逐文件追踪。也提供纯文本模式
+- 📊 **进度显示** — 按终端能力自动选择，也可明确使用 TUI / inline / plain，管道和日志不会混入光标控制
 - 🔄 **断点续传与校验** — 基于会话文件的崩溃安全续传，对源与目标做连续分块证明。BLAKE3 内联哈希，2-pass 验证复制
 - 🌐 **远程复制 (SSH)** — 通过 SSH 上传下载。双端安装 bcmr 时使用二进制 `bcmr serve` 协议加速传输，自动回退至传统 SCP
 - 🗜️ **线路压缩** — `--compress={auto,zstd,lz4,none}`：每块 Zstd / LZ4 在握手时协商，源码类文本可节约 ~5× 带宽，对不可压缩的块自动跳过
@@ -56,7 +56,7 @@ bcmr 不是 delta-sync 引擎。如果你在 100 GB 文件里只改了 3 MB 而�
 - ⚡ **默认并行** — `-j/--jobs` 本地多文件并发（默认 `min(CPU, 8)`）；`-P/--parallel` 独立 SSH 连接；reflink (CoW)、`copy_file_range`、`clonefile` 等内核快速路径
 - 🏷️ **属性保留** — `-p` 同时保留权限、mtime 和扩展属性 (Linux + macOS)
 - 🛡️ **安全操作** — 干运行预览、覆盖提示、正则排除、原子写入与持久 fsync (macOS 使用 `F_FULLFSYNC`)
-- 🤖 **AI Agent 友好** — `--json` 会脱离终端转入后台，进度写入 `~/.local/share/bcmr/jobs/<id>.jsonl`；`bcmr status <id>` 分类为 `scanning`/`running`/`done`/`failed`/`interrupted`
+- 🤖 **AI Agent 友好** — `--json` 默认前台输出 NDJSON；显式 `--background` 后任务可脱离终端，并通过 `bcmr status` 获取 `scanning`/`running`/`done`/`failed`/`interrupted`
 - 🎨 **可配置** — 通过 TOML 自定义颜色渐变、进度条字符、边框样式
 
 ## 安装
@@ -137,6 +137,7 @@ bcmr check -r src/ dst/
 # JSON 输出（适用于 AI Agent / 脚本）
 bcmr copy --json -r src/ dst/         # NDJSON 流式进度
 bcmr check --json -r src/ dst/        # 结构化差异输出
+bcmr copy --background --json -r src/ dst/  # 后台任务描述与日志
 ```
 
 ### Shell 集成
