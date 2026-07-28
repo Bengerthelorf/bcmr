@@ -125,7 +125,11 @@ fn error_kind_from(err: &anyhow::Error) -> String {
 /// Heuristic categorisation for errors that only exist as formatted text
 /// (remote stderr, NDJSON result events, InvalidInput detail).
 pub fn kind_from_message(msg: &str) -> &'static str {
-    if msg.contains("not found") {
+    if msg.contains("confirmation required")
+        || (msg.contains("non-interactive") && msg.contains("requires"))
+    {
+        "confirmation_required"
+    } else if msg.contains("not found") {
         "source_not_found"
     } else if msg.contains("already exists") {
         "already_exists"

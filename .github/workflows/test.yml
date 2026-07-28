@@ -435,7 +435,7 @@ jobs:
           rm -rf "$root/ok"
           mkdir -p "$root/ok"
           echo ok > "$root/ok/f.txt"
-          desc=$(cargo run --quiet -- remove -rfy --json "$root/ok")
+          desc=$(cargo run --quiet -- remove -rfy --json --background "$root/ok")
           jid=$(echo "$desc" | python3 -c 'import json,sys;print(json.loads(sys.stdin.read())["job_id"])')
           log=$(echo "$desc" | python3 -c 'import json,sys;print(json.loads(sys.stdin.read())["log"])')
           for _ in $(seq 1 60); do
@@ -448,7 +448,7 @@ jobs:
           # --- error path: non-recursive remove of a non-empty dir ---
           # Must terminate the log with a status:"error" result and
           # status must report "failed".
-          desc=$(cargo run --quiet -- remove --json "$root/sub" 2>&1 | head -1)
+          desc=$(cargo run --quiet -- remove --json --background --yes "$root/sub" 2>&1 | head -1)
           jid=$(echo "$desc" | python3 -c 'import json,sys;print(json.loads(sys.stdin.read())["job_id"])')
           log=$(echo "$desc" | python3 -c 'import json,sys;print(json.loads(sys.stdin.read())["log"])')
           for _ in $(seq 1 60); do
@@ -465,11 +465,11 @@ jobs:
 
           echo "Error event + state machine tests passed"
 
-      - name: Test --json background mode (remove)
+      - name: Test explicit --background JSON mode (remove)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          # Regression test for: --json bg mode writing nothing to the log
+          # Regression test for: JSON background mode writing nothing to the log
           # when check_removes took a long time. The child must emit a
           # scanning heartbeat before the scan completes, and the log must
           # contain a terminal "result" line after the job finishes.
@@ -496,7 +496,7 @@ jobs:
           targets=""
           for i in $(seq 1 26); do targets="$targets $root/dir$i"; done
 
-          desc=$(cargo run --quiet -- remove -rfy --json $targets)
+          desc=$(cargo run --quiet -- remove -rfy --json --background $targets)
           echo "descriptor: $desc"
 
           job_id=$(echo "$desc" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["job_id"])')

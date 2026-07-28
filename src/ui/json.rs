@@ -53,6 +53,39 @@ impl JsonWriter {
     }
 }
 
+pub fn emit_terminal_error(
+    operation: &str,
+    error: &str,
+    log_file: Option<&PathBuf>,
+) -> io::Result<()> {
+    let mut writer = match log_file {
+        Some(path) => {
+            let file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
+            JsonWriter::File(BufWriter::new(file))
+        }
+        None => JsonWriter::Stdout,
+    };
+    let line = ResultLine {
+        r#type: "result",
+        status: "error",
+        operation,
+        bytes_total: 0,
+        duration_secs: 0.0,
+        avg_speed_bps: None,
+        bytes_skipped: None,
+        reflink_count: None,
+        verified: false,
+        error: Some(error),
+        error_kind: Some(crate::output::kind_from_message(error)),
+    };
+    writer.write_line_strict(&line)?;
+    crate::config::mark_json_terminal_emitted();
+    Ok(())
+}
+
 #[derive(Serialize)]
 struct ProgressLine<'a> {
     r#type: &'static str,
@@ -240,7 +273,9 @@ impl ProgressRenderer for JsonProgress {
             error_kind: None,
         };
 
-        self.writer.write_line_strict(&line)
+        self.writer.write_line_strict(&line)?;
+        crate::config::mark_json_terminal_emitted();
+        Ok(())
     }
 
     fn finish_err(&mut self, msg: &str) -> io::Result<()> {
@@ -264,7 +299,9 @@ impl ProgressRenderer for JsonProgress {
             error_kind: Some(crate::output::kind_from_message(msg)),
         };
 
-        self.writer.write_line_strict(&line)
+        self.writer.write_line_strict(&line)?;
+        crate::config::mark_json_terminal_emitted();
+        Ok(())
     }
 
     fn set_verify_mode(&mut self, on: bool) {

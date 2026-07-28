@@ -5,13 +5,23 @@ use serde::Deserialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static JSON_MODE: AtomicBool = AtomicBool::new(false);
+static JSON_TERMINAL_EMITTED: AtomicBool = AtomicBool::new(false);
 
 pub fn set_json_mode(enabled: bool) {
     JSON_MODE.store(enabled, Ordering::Relaxed);
+    JSON_TERMINAL_EMITTED.store(false, Ordering::Relaxed);
 }
 
 pub fn is_json_mode() -> bool {
     JSON_MODE.load(Ordering::Relaxed)
+}
+
+pub fn mark_json_terminal_emitted() {
+    JSON_TERMINAL_EMITTED.store(true, Ordering::Relaxed);
+}
+
+pub fn json_terminal_emitted() -> bool {
+    JSON_TERMINAL_EMITTED.load(Ordering::Relaxed)
 }
 
 use parking_lot::Mutex;

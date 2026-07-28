@@ -124,9 +124,13 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    /// Output results as JSON; copy/move/remove detach to background (query with `bcmr status`)
+    /// Emit structured JSON/NDJSON output without changing execution mode
     #[arg(long, global = true)]
     pub json: bool,
+
+    /// Run copy/move/remove as a background job (query with `bcmr status`)
+    #[arg(short = 'b', long, global = true)]
+    pub background: bool,
 
     /// Use this config file instead of ~/.config/bcmr/config.toml (layered on top of defaults)
     #[arg(long, global = true, value_name = "PATH")]
@@ -900,6 +904,16 @@ fn parse_job_id(s: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_execution_is_an_explicit_global_flag() {
+        let parsed = Cli::try_parse_from(["bcmr", "--background", "copy", "--yes", "src", "dst"]);
+        assert!(
+            parsed.is_ok(),
+            "background execution must not be coupled to the output format: {parsed:?}"
+        );
+        assert!(parsed.unwrap().background);
+    }
 
     #[test]
     fn copy_parallel_counts_reject_zero_during_clap_parsing() {

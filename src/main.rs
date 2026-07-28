@@ -26,15 +26,19 @@ fn maybe_detach(cli: &cli::Cli) -> Result<bool> {
         Commands::Copy { .. } | Commands::Move { .. } | Commands::Remove { .. }
     );
 
-    if !cli.json || !is_operation {
-        return Ok(false);
-    }
-
     if let Some(ref job_id) = cli._bg {
         let log_path = commands::jobs::log_path(job_id)?;
         config::set_log_file(log_path);
         return Ok(false);
     }
+
+    if !cli.background {
+        return Ok(false);
+    }
+    if !is_operation {
+        anyhow::bail!("--background is only valid with copy, move, or remove");
+    }
+    validate_noninteractive_confirmation(cli)?;
 
     commands::jobs::ensure_jobs_dir()?;
     let job_id = commands::jobs::new_job_id();
@@ -53,6 +57,7 @@ fn maybe_detach(cli: &cli::Cli) -> Result<bool> {
         .spawn()?;
 
     let job_info = commands::jobs::JobInfo {
+        r#type: "submitted",
         job_id: job_id.clone(),
         pid: child.id(),
         log: log_path.to_string_lossy().to_string(),
@@ -62,11 +67,42 @@ fn maybe_detach(cli: &cli::Cli) -> Result<bool> {
     use std::io::Write;
     f.write_all(b"\n")?;
 
-    println!("{}", serde_json::to_string(&job_info)?);
+    if cli.json {
+        println!("{}", serde_json::to_string(&job_info)?);
+    } else {
+        println!(
+            "Started background job {} (pid {}). Follow with `bcmr status {} --watch`.",
+            job_info.job_id, job_info.pid, job_info.job_id
+        );
+    }
 
     let _ = commands::jobs::cleanup_old_jobs(commands::jobs::DEFAULT_GC_RETENTION_SECS);
 
     Ok(true)
+}
+
+fn validate_noninteractive_confirmation(cli: &cli::Cli) -> Result<()> {
+    match &cli.command {
+        Commands::Copy { args, .. } | Commands::Move { args, .. } if args.force && !args.yes => {
+            anyhow::bail!("non-interactive overwrite requires -y/--yes in addition to -f/--force");
+        }
+        Commands::Remove {
+            force,
+            yes,
+            interactive,
+            dry_run,
+            ..
+        } => {
+            if *interactive {
+                anyhow::bail!("--interactive cannot be used with JSON or background execution");
+            }
+            if !*dry_run && !*force && !*yes {
+                anyhow::bail!("non-interactive removal requires -y/--yes or -f/--force");
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 const NO_ARGS_HINT: &str = "\
@@ -88,7 +124,29 @@ Configuration: ~/.config/bcmr/config.toml
 ";
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
+    match run().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) if is_json_mode() => {
+            if !config::json_terminal_emitted() {
+                if let Err(write_error) = ui::json::emit_terminal_error(
+                    "bcmr",
+                    &format!("{error:#}"),
+                    config::log_file().as_ref(),
+                ) {
+                    eprintln!("bcmr: failed to emit JSON error: {write_error}");
+                }
+            }
+            std::process::ExitCode::from(2)
+        }
+        Err(error) => {
+            eprintln!("Error: {error:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> Result<()> {
     if std::env::args().len() == 1 {
         print!("{}", NO_ARGS_HINT);
         return Ok(());
@@ -100,13 +158,16 @@ async fn main() -> Result<()> {
         std::env::set_var("BCMR_CONFIG", path);
     }
 
-    expand_path_bookmarks(&mut cli.command)?;
+    set_json_mode(cli.json || cli._bg.is_some());
 
     if maybe_detach(&cli)? {
         return Ok(());
     }
 
-    set_json_mode(cli.json || cli._bg.is_some());
+    expand_path_bookmarks(&mut cli.command)?;
+    if is_json_mode() {
+        validate_noninteractive_confirmation(&cli)?;
+    }
 
     let update_rx = background_update_check(&cli.command);
 

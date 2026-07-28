@@ -72,6 +72,7 @@ pub fn ensure_jobs_dir() -> std::io::Result<()> {
 
 #[derive(Serialize)]
 pub struct JobInfo {
+    pub r#type: &'static str,
     pub job_id: String,
     pub pid: u32,
     pub log: String,
