@@ -354,7 +354,7 @@ fn should_map_noclobber_error_to_target_exists(
     raw_error_is_target_exists || destination_was_observed
 }
 
-fn is_target_exists_error(error: &std::io::Error) -> bool {
+pub(super) fn is_target_exists_error(error: &std::io::Error) -> bool {
     if error.kind() == std::io::ErrorKind::AlreadyExists {
         return true;
     }
@@ -373,7 +373,7 @@ fn is_target_exists_error(error: &std::io::Error) -> bool {
 
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WindowsSymlinkCommitDispatch {
+pub(super) enum WindowsSymlinkCommitDispatch {
     HandleNoClobber,
     HandleReplace,
 }
@@ -398,13 +398,15 @@ const WINDOWS_FILE_RENAME_FLAG_POSIX_SEMANTICS: u32 = 2;
 
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct WindowsRenameOperation {
+pub(super) struct WindowsRenameOperation {
     information_class: i32,
     flags: u32,
 }
 
 #[cfg(any(windows, test))]
-fn windows_rename_operation(dispatch: WindowsSymlinkCommitDispatch) -> WindowsRenameOperation {
+pub(super) fn windows_rename_operation(
+    dispatch: WindowsSymlinkCommitDispatch,
+) -> WindowsRenameOperation {
     match dispatch {
         WindowsSymlinkCommitDispatch::HandleNoClobber => WindowsRenameOperation {
             information_class: WINDOWS_FILE_RENAME_INFO_CLASS,
@@ -429,7 +431,7 @@ fn windows_root_relative_retry_error(raw_os_error: Option<i32>) -> bool {
 }
 
 #[cfg(any(windows, test))]
-fn windows_extended_rename_unavailable(raw_os_error: Option<i32>) -> bool {
+pub(super) fn windows_extended_rename_unavailable(raw_os_error: Option<i32>) -> bool {
     const ERROR_INVALID_FUNCTION: i32 = 1;
     const ERROR_NOT_SUPPORTED: i32 = 50;
     const ERROR_INVALID_PARAMETER: i32 = 87;
@@ -649,7 +651,7 @@ fn map_windows_handle_commit_error(
 }
 
 #[cfg(windows)]
-fn persist_windows_symlink_by_handle(
+pub(super) fn persist_windows_symlink_by_handle(
     stage: &Path,
     dst: &Path,
     operation: WindowsRenameOperation,

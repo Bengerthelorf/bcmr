@@ -349,12 +349,11 @@ fn persist_windows_stage(
     dst: &Path,
     replace_existing: bool,
     preserved_readonly: Option<bool>,
-) -> std::io::Result<()> {
+) -> Result<(), BcmrError> {
     use std::iter;
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        GetFileAttributesW, MoveFileExW, SetFileAttributesW, INVALID_FILE_ATTRIBUTES,
-        MOVEFILE_REPLACE_EXISTING,
+        GetFileAttributesW, SetFileAttributesW, INVALID_FILE_ATTRIBUTES,
     };
 
     let stage_w: Vec<u16> = stage
@@ -362,10 +361,9 @@ fn persist_windows_stage(
         .encode_wide()
         .chain(iter::once(0))
         .collect();
-    let dst_w: Vec<u16> = dst.as_os_str().encode_wide().chain(iter::once(0)).collect();
     let original_attributes = unsafe { GetFileAttributesW(stage_w.as_ptr()) };
     if original_attributes == INVALID_FILE_ATTRIBUTES {
-        return Err(std::io::Error::last_os_error());
+        return Err(BcmrError::Io(std::io::Error::last_os_error()));
     }
     let persisted_attributes =
         windows_attributes_after_persist(original_attributes, preserved_readonly);
@@ -373,24 +371,35 @@ fn persist_windows_stage(
         let error = std::io::Error::last_os_error();
         let cleanup_attributes = windows_attributes_for_failed_stage_cleanup(original_attributes);
         let _ = unsafe { SetFileAttributesW(stage_w.as_ptr(), cleanup_attributes) };
-        return Err(error);
+        return Err(BcmrError::Io(error));
     }
 
-    let flags = if replace_existing {
-        MOVEFILE_REPLACE_EXISTING
+    let dispatch = if replace_existing {
+        super::symlinks::WindowsSymlinkCommitDispatch::HandleReplace
     } else {
-        0
+        super::symlinks::WindowsSymlinkCommitDispatch::HandleNoClobber
     };
-    if unsafe { MoveFileExW(stage_w.as_ptr(), dst_w.as_ptr(), flags) } != 0 {
-        return Ok(());
-    }
-
-    let error = std::io::Error::last_os_error();
+    let operation = super::symlinks::windows_rename_operation(dispatch);
+    let error = match super::symlinks::persist_windows_symlink_by_handle(stage, dst, operation) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
     // The stage is private and will be deleted after a failed commit. Make it
     // writable so Windows cleanup cannot leak a preserved read-only stage.
     let cleanup_attributes = windows_attributes_for_failed_stage_cleanup(original_attributes);
     let _ = unsafe { SetFileAttributesW(stage_w.as_ptr(), cleanup_attributes) };
-    Err(error)
+    if replace_existing
+        && super::symlinks::windows_extended_rename_unavailable(error.raw_os_error())
+    {
+        Err(BcmrError::InvalidInput(format!(
+            "cannot atomically replace '{}' on this Windows version, filesystem, or destination: \
+             FileRenameInfoEx with replace-if-exists and POSIX semantics is unavailable; \
+             the existing destination was preserved ({error})",
+            dst.display()
+        )))
+    } else {
+        Err(BcmrError::Io(error))
+    }
 }
 
 struct DestinationWriterLock {
@@ -562,10 +571,16 @@ impl AtomicStaging {
                 }
                 Err(error) => {
                     drop(path);
-                    if !replace_existing && error.kind() == std::io::ErrorKind::AlreadyExists {
+                    if !replace_existing
+                        && matches!(
+                            &error,
+                            BcmrError::Io(error)
+                                if super::symlinks::is_target_exists_error(error)
+                        )
+                    {
                         return Err(BcmrError::TargetExists(dst.to_path_buf()));
                     }
-                    return Err(BcmrError::Io(error));
+                    return Err(error);
                 }
             }
         }
