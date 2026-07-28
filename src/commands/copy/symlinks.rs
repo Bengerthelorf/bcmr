@@ -362,10 +362,10 @@ pub(super) fn is_target_exists_error(error: &std::io::Error) -> bool {
     {
         const ERROR_FILE_EXISTS: i32 = 80;
         const ERROR_ALREADY_EXISTS: i32 = 183;
-        return matches!(
+        matches!(
             error.raw_os_error(),
             Some(ERROR_FILE_EXISTS) | Some(ERROR_ALREADY_EXISTS)
-        );
+        )
     }
     #[cfg(not(windows))]
     false

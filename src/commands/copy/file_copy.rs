@@ -567,7 +567,7 @@ impl AtomicStaging {
                 Ok(()) => {
                     path.disable_cleanup(true);
                     guard.disarm();
-                    return Ok(());
+                    Ok(())
                 }
                 Err(error) => {
                     drop(path);
@@ -580,7 +580,7 @@ impl AtomicStaging {
                     {
                         return Err(BcmrError::TargetExists(dst.to_path_buf()));
                     }
-                    return Err(error);
+                    Err(error)
                 }
             }
         }
