@@ -608,6 +608,11 @@ async fn serve_direct_tcp_striped_get_single_large_file() {
 #[tokio::test]
 async fn serve_direct_tcp_striped_get_failure_preserves_existing_destination() {
     let dir = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let src = dir.path().join("short_remote.bin");
     let dst = dir.path().join("existing_local.bin");
     create_file(&src, 1024 * 1024 + 17);

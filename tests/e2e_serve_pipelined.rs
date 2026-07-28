@@ -195,6 +195,46 @@ async fn serve_pipelined_get_many_files_succeeds() {
     client.close().await.unwrap();
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn serve_pipelined_synced_get_supports_symlinked_destination_prefix() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let remote = dir.path().join("remote.bin");
+    fs::write(&remote, b"synced through canonical destination").unwrap();
+
+    let real_destination = dir.path().join("real-destination");
+    fs::create_dir(&real_destination).unwrap();
+    let destination_link = dir.path().join("destination-link");
+    symlink(&real_destination, &destination_link).unwrap();
+    let local = destination_link.join("nested").join("copied.bin");
+
+    let files = vec![FileTransfer {
+        remote: remote.to_string_lossy().into_owned(),
+        local: local.clone(),
+        size: remote.metadata().unwrap().len(),
+        metadata: None,
+    }];
+
+    let mut client = ServeClient::connect_local().await.unwrap();
+    client
+        .pipelined_get_files(files, true, false, |_idx, _path, _size| {}, |_n| {})
+        .await
+        .unwrap();
+
+    assert_eq!(
+        fs::read(real_destination.join("nested").join("copied.bin")).unwrap(),
+        b"synced through canonical destination"
+    );
+    assert!(destination_link
+        .symlink_metadata()
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    client.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn serve_pipelined_put_writer_error_propagates() {
     let dir = tempfile::tempdir().unwrap();
@@ -241,6 +281,11 @@ async fn serve_pipelined_get_server_error_propagates() {
     let dst_dir = dir.path().join("dst");
     fs::create_dir_all(&src_dir).unwrap();
     fs::create_dir_all(&dst_dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dst_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
 
     let good = src_dir.join("good.bin");
     create_file(&good, 4096);
@@ -340,6 +385,11 @@ async fn serve_pipelined_verify_rejects_tampered_staging_before_publish() {
     let dst_dir = dir.path().join("dst");
     let dst = dst_dir.join("destination.bin");
     fs::create_dir_all(&dst_dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dst_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
     fs::write(&src, b"authentic remote payload").unwrap();
     fs::write(&dst, b"original destination").unwrap();
 

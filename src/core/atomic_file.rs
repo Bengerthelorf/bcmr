@@ -2759,7 +2759,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn ordinary_drop_removes_its_empty_transaction_in_a_private_parent() {
+        use std::os::unix::fs::PermissionsExt;
+
         let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let destination = dir.path().join("destination.bin");
         let stage = AtomicFile::new(&destination).unwrap();
         stage
@@ -3313,7 +3316,12 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn existing_destination_replacement_is_refused_before_exchange() {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+
         let dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let destination = dir.path().join("destination.bin");
         let replacement = dir.path().join("replacement.bin");
         std::fs::write(&destination, b"original").unwrap();

@@ -78,7 +78,43 @@ pub fn durable_sync_dir(_dir: &Path) -> io::Result<()> {
 }
 
 #[cfg(unix)]
+fn resolve_existing_directory_prefix(path: &Path) -> io::Result<PathBuf> {
+    let mut existing = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut missing = Vec::new();
+
+    loop {
+        match std::fs::symlink_metadata(&existing) {
+            Ok(_) => {
+                // Resolve every symlink in the existing prefix before any
+                // mutation. The creation loop below then operates only on
+                // this canonical path and never re-traverses the link.
+                let mut resolved = existing.canonicalize()?;
+                for component in missing.into_iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let Some(component) = existing.file_name() else {
+                    return Err(error);
+                };
+                missing.push(component.to_os_string());
+                if !existing.pop() {
+                    return Err(error);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(unix)]
 pub fn create_dir_all_durable(path: &Path) -> io::Result<()> {
+    let path = resolve_existing_directory_prefix(path)?;
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
@@ -264,7 +300,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn durable_recursive_creation_rejects_symlink_components() {
+    fn durable_recursive_creation_supports_an_existing_symlink_prefix() {
         use std::os::unix::fs::symlink;
 
         let dir = tempfile::tempdir().unwrap();
@@ -273,10 +309,29 @@ mod tests {
         let link = dir.path().join("link");
         symlink(&outside, &link).unwrap();
 
+        create_dir_all_durable(&link.join("child"))
+            .expect("a pre-existing symlinked directory prefix should resolve once");
+        assert!(outside.join("child").is_dir());
+        assert!(
+            link.symlink_metadata().unwrap().file_type().is_symlink(),
+            "resolving the existing prefix must not replace the link itself"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_recursive_creation_rejects_a_broken_symlink_prefix() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        let link = dir.path().join("link");
+        symlink(&missing, &link).unwrap();
+
         let error = create_dir_all_durable(&link.join("child"))
-            .expect_err("durable path creation must never traverse a symlink");
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert!(!outside.join("child").exists());
+            .expect_err("a broken existing prefix cannot be resolved safely");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(!missing.exists());
     }
 
     #[cfg(unix)]
