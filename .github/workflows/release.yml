@@ -122,7 +122,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -200,7 +200,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -332,7 +332,7 @@ jobs:
     needs: release
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -350,7 +350,7 @@ jobs:
     if: needs.release-gate.outputs.prerelease == 'false'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Get Release Info
         id: release
@@ -386,7 +386,7 @@ jobs:
           echo "SHA_ARM_LINUX=$(checksum bcmr-aarch64-linux.tar.gz)" >> "$GITHUB_OUTPUT"
 
       - name: Checkout Tap Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: Bengerthelorf/homebrew-tap
           token: ${{ secrets.TAP_GITHUB_TOKEN }}
