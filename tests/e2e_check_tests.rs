@@ -31,6 +31,27 @@ fn run_bcmr(args: &[&str]) -> (bool, String, String) {
 }
 
 #[test]
+fn e2e_check_redirected_human_output_has_no_ansi_sequences() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.bin");
+    let destination = dir.path().join("destination.bin");
+    fs::write(&source, b"same").unwrap();
+    fs::write(&destination, b"same").unwrap();
+
+    let (ok, stdout, stderr) = run_bcmr(&[
+        "check",
+        source.to_str().unwrap(),
+        destination.to_str().unwrap(),
+    ]);
+    assert!(ok, "stderr: {stderr}");
+    assert!(stdout.contains("In sync."), "{stdout:?}");
+    assert!(
+        !stdout.contains('\u{1b}'),
+        "redirected output leaked ANSI: {stdout:?}"
+    );
+}
+
+#[test]
 fn e2e_check_multi_source_into_dir_does_not_false_missing() {
     let dir = tempfile::tempdir().unwrap();
     let src_a = dir.path().join("a.txt");

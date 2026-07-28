@@ -160,20 +160,21 @@ fn io_error_kind(e: &std::io::Error) -> &'static str {
 
 pub fn print_check_human(r: &CheckResult) {
     use crate::ui::utils::format_bytes;
-    use crossterm::style::{Color, ResetColor, SetForegroundColor};
+    use crossterm::style::Color;
 
     if r.in_sync {
-        println!("{}In sync.{}", SetForegroundColor(Color::Green), ResetColor);
+        print_human_line(Color::Green, "In sync.");
         return;
     }
 
     for d in &r.added {
-        println!(
-            "{}  + {}{}{}",
-            SetForegroundColor(Color::Green),
-            d.path.display(),
-            if d.is_dir { " (dir)" } else { "" },
-            ResetColor
+        print_human_line(
+            Color::Green,
+            &format!(
+                "  + {}{}",
+                d.path.display(),
+                if d.is_dir { " (dir)" } else { "" }
+            ),
         );
     }
     for d in &r.modified {
@@ -187,21 +188,19 @@ pub fn print_check_human(r: &CheckResult) {
             }
             _ => String::new(),
         };
-        println!(
-            "{}  ~ {}{}{}",
-            SetForegroundColor(Color::Yellow),
-            d.path.display(),
-            detail,
-            ResetColor
+        print_human_line(
+            Color::Yellow,
+            &format!("  ~ {}{}", d.path.display(), detail),
         );
     }
     for d in &r.missing {
-        println!(
-            "{}  - {}{}{}",
-            SetForegroundColor(Color::Red),
-            d.path.display(),
-            if d.is_dir { " (dir)" } else { "" },
-            ResetColor
+        print_human_line(
+            Color::Red,
+            &format!(
+                "  - {}{}",
+                d.path.display(),
+                if d.is_dir { " (dir)" } else { "" }
+            ),
         );
     }
 
@@ -209,6 +208,15 @@ pub fn print_check_human(r: &CheckResult) {
         "\nSummary: {} added, {} modified, {} missing",
         r.summary.added, r.summary.modified, r.summary.missing
     );
+}
+
+fn print_human_line(color: crossterm::style::Color, text: &str) {
+    if crate::ui::progress::color_enabled_for_stdout() {
+        use crossterm::style::{ResetColor, SetForegroundColor};
+        println!("{}{text}{}", SetForegroundColor(color), ResetColor);
+    } else {
+        println!("{text}");
+    }
 }
 
 pub fn error_output(command: &str, err: &anyhow::Error) -> CommandOutput {

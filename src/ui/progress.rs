@@ -94,6 +94,12 @@ pub(crate) fn terminal_controls_disabled_by_env() -> bool {
     matches!(std::env::var("TERM").as_deref(), Ok("dumb"))
 }
 
+pub(crate) fn color_enabled_for_stdout() -> bool {
+    std::io::stdout().is_terminal()
+        && !color_disabled_by_env()
+        && !terminal_controls_disabled_by_env()
+}
+
 fn select_renderer(
     mode: ProgressMode,
     silent: bool,
