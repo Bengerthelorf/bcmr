@@ -987,12 +987,15 @@ fn file_name(path: &Path) -> Result<&OsStr, BcmrError> {
 
 #[cfg(unix)]
 fn preserve_existing_security(
-    source: &File,
+    security_source: &File,
     snapshot: &ExistingSecuritySnapshot,
     staging: &File,
 ) -> Result<(), BcmrError> {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = security_source;
 
     let staging_metadata = staging.metadata()?;
     if snapshot.uid != staging_metadata.uid() || snapshot.gid != staging_metadata.gid() {
@@ -1006,7 +1009,7 @@ fn preserve_existing_security(
     {
         let result = unsafe {
             libc::fcopyfile(
-                source.as_raw_fd(),
+                security_source.as_raw_fd(),
                 staging.as_raw_fd(),
                 std::ptr::null_mut(),
                 libc::COPYFILE_ACL,
