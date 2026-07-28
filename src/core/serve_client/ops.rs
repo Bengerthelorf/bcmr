@@ -84,13 +84,8 @@ impl ServeClient {
         .await?;
         loop {
             match self.recv().await? {
-                Message::Data { payload } => on_data(&payload),
-                Message::DataCompressed {
-                    algo,
-                    original_size,
-                    payload,
-                } => {
-                    let decoded = compress::decode_block(algo, original_size, &payload)?;
+                message @ (Message::Data { .. } | Message::DataCompressed { .. }) => {
+                    let decoded = compress::decode_data_block(message)?;
                     on_data(&decoded);
                 }
                 Message::Ok { hash } => {
@@ -110,6 +105,19 @@ impl ServeClient {
     }
 
     pub async fn put(&mut self, path: &str, data: &Path) -> Result<[u8; 32], BcmrError> {
+        self.put_with_overwrite(path, data, false).await
+    }
+
+    pub async fn put_overwrite(&mut self, path: &str, data: &Path) -> Result<[u8; 32], BcmrError> {
+        self.put_with_overwrite(path, data, true).await
+    }
+
+    async fn put_with_overwrite(
+        &mut self,
+        path: &str,
+        data: &Path,
+        overwrite: bool,
+    ) -> Result<[u8; 32], BcmrError> {
         let metadata = tokio::fs::metadata(data).await?;
         let size = metadata.len();
 
@@ -117,6 +125,7 @@ impl ServeClient {
             path: path.to_owned(),
             size,
             offset: 0,
+            overwrite,
         })
         .await?;
 
@@ -149,6 +158,7 @@ impl ServeClient {
             path: path.to_owned(),
             size,
             offset,
+            overwrite: true,
         })
         .await?;
         self.put_streaming_from(data, offset).await?;
@@ -175,6 +185,7 @@ impl ServeClient {
         write_file_data_frames(w, tx, data, algo, &|_| {}).await
     }
 
+    #[allow(dead_code)]
     pub async fn put_chunked(
         &mut self,
         remote: &str,
@@ -207,7 +218,7 @@ impl ServeClient {
                     "local source truncated: expected {length} bytes from offset {local_offset}"
                 )));
             }
-            let frame = compress::encode_block(algo, buf[..n].to_vec());
+            let frame = compress::encode_block(algo, buf[..n].to_vec())?;
             tx.write_message(w, &frame).await?;
             remaining -= n as u64;
         }
@@ -221,6 +232,7 @@ impl ServeClient {
         .await
     }
 
+    #[allow(dead_code)]
     pub async fn get_chunked(
         &mut self,
         remote: &str,
@@ -229,8 +241,32 @@ impl ServeClient {
         local_offset: u64,
         length: u64,
     ) -> Result<(), BcmrError> {
-        use tokio::io::{AsyncSeekExt, AsyncWriteExt as _};
+        let destination = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(local)
+            .await?
+            .into_std()
+            .await;
+        self.get_chunked_to_file(
+            remote,
+            std::sync::Arc::new(destination),
+            remote_offset,
+            local_offset,
+            length,
+        )
+        .await
+    }
 
+    pub(crate) async fn get_chunked_to_file(
+        &mut self,
+        remote: &str,
+        destination: std::sync::Arc<std::fs::File>,
+        remote_offset: u64,
+        local_offset: u64,
+        length: u64,
+    ) -> Result<(), BcmrError> {
         self.send(&Message::GetChunked {
             path: remote.to_owned(),
             offset: remote_offset,
@@ -238,43 +274,31 @@ impl ServeClient {
         })
         .await?;
 
-        let mut dst = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(local)
-            .await?;
-        dst.seek(std::io::SeekFrom::Start(local_offset)).await?;
-
         let mut written = 0u64;
         loop {
             match self.recv().await? {
-                Message::Data { payload } => {
-                    if written + payload.len() as u64 > length {
-                        return Err(BcmrError::InvalidInput(format!(
-                            "get_chunked: server sent {} bytes past the requested {}",
-                            written + payload.len() as u64 - length,
-                            length
-                        )));
-                    }
-                    dst.write_all(&payload).await?;
-                    written += payload.len() as u64;
-                }
-                Message::DataCompressed {
-                    algo,
-                    original_size,
-                    payload,
-                } => {
-                    let decoded = compress::decode_block(algo, original_size, &payload)?;
-                    if written + decoded.len() as u64 > length {
-                        return Err(BcmrError::InvalidInput(format!(
-                            "get_chunked: server sent {} bytes past the requested {}",
-                            written + decoded.len() as u64 - length,
-                            length
-                        )));
-                    }
-                    dst.write_all(&decoded).await?;
-                    written += decoded.len() as u64;
+                message @ (Message::Data { .. } | Message::DataCompressed { .. }) => {
+                    let decoded = compress::decode_data_block(message)?;
+                    let next_written = crate::core::protocol::checked_transfer_total(
+                        written,
+                        decoded.len(),
+                        length,
+                    )?;
+                    let write_offset = local_offset.checked_add(written).ok_or_else(|| {
+                        BcmrError::InvalidInput(
+                            "get_chunked local write offset overflowed u64".into(),
+                        )
+                    })?;
+                    let file = std::sync::Arc::clone(&destination);
+                    tokio::task::spawn_blocking(move || {
+                        crate::core::atomic_file::positional_write_all(
+                            &file,
+                            &decoded,
+                            write_offset,
+                        )
+                    })
+                    .await??;
+                    written = next_written;
                 }
                 Message::Ok { .. } => {
                     if written != length {
@@ -326,7 +350,7 @@ impl ServeClient {
                 break;
             }
             if (bits.get(idx / 8).copied().unwrap_or(0) >> (idx % 8)) & 1 == 1 {
-                let frame = compress::encode_block(self.algo, buf[..filled].to_vec());
+                let frame = compress::encode_block(self.algo, buf[..filled].to_vec())?;
                 self.send(&frame).await?;
             }
         }

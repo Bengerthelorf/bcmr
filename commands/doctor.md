@@ -9,7 +9,7 @@ related: [bcmr deploy]
 flags:
   - { f: "[hosts]...", t: "user@host", d: "—", x: "optional remote hosts to probe" }
 example:
-  - "bcmr 0.6.3 — diagnostic report"
+  - "bcmr 0.7.0-rc.1 — diagnostic report"
   - "Local:"
   - "  ✓ config file: ~/.config/bcmr/config.toml (valid TOML)"
   - "lab:"

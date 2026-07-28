@@ -1,11 +1,15 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::process::Command;
 
+use crate::core::transport::ssh::SSH_LIVENESS_ARGS;
+
 pub(super) static SSH_COMPRESS: AtomicBool = AtomicBool::new(false);
 
-pub(super) fn control_path(target: &str) -> String {
-    let dir = std::env::temp_dir().join("bcmr-ssh");
-    let _ = std::fs::create_dir_all(&dir);
+const MACOS_SUN_PATH_LIMIT: usize = 104;
+const OPENSSH_MUX_SUFFIX: usize = 17;
+
+fn control_path_for(temp_dir: &std::path::Path, target: &str) -> String {
+    let dir = temp_dir.join("bcmr-ssh");
     // 16 hex (64 bits) — enough to keep `a@b` vs `a:b` distinct, short
     // enough that $TMPDIR + `bcmr-ssh/` + name + `.sock` + OpenSSH's
     // `.XXXXXXXXXXXXXXXX` MUX suffix fits macOS's 104-byte sun_path.
@@ -16,14 +20,42 @@ pub(super) fn control_path(target: &str) -> String {
         .to_string()
 }
 
+#[cfg(test)]
+fn control_path(target: &str) -> String {
+    let temp_dir = std::env::temp_dir();
+    let path = control_path_for(&temp_dir, target);
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    path
+}
+
+fn multiplex_path_fits(path: &str) -> bool {
+    path.len().saturating_add(OPENSSH_MUX_SUFFIX) <= MACOS_SUN_PATH_LIMIT
+}
+
 pub(super) fn is_interactive() -> bool {
     use std::io::IsTerminal;
     std::io::stdin().is_terminal()
 }
 
-pub(super) fn ssh_base_args(target: &str) -> Vec<String> {
-    // Win32-OpenSSH has no mux support — ControlMaster errors out on Windows.
-    let no_multiplex = cfg!(windows) || std::env::var_os("BCMR_SSH_NO_MULTIPLEX").is_some();
+fn ssh_base_args_for(
+    target: &str,
+    temp_dir: &std::path::Path,
+    explicit_no_multiplex: bool,
+) -> Vec<String> {
+    let control_path = control_path_for(temp_dir, target);
+    // Win32-OpenSSH has no mux support. On Unix, OpenSSH appends a random
+    // suffix while creating a master socket; an external TMPDIR can be long
+    // enough that this exceeds sun_path. Fall back to a normal connection
+    // rather than failing before SSH reaches the host.
+    let no_multiplex =
+        cfg!(windows) || explicit_no_multiplex || !multiplex_path_fits(&control_path);
+    if !no_multiplex {
+        if let Some(parent) = std::path::Path::new(&control_path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
     let mut args = if no_multiplex {
         vec![
             "-o".into(),
@@ -34,10 +66,9 @@ pub(super) fn ssh_base_args(target: &str) -> Vec<String> {
             "ConnectTimeout=10".into(),
         ]
     } else {
-        let cp = control_path(target);
         vec![
             "-o".into(),
-            format!("ControlPath={}", cp),
+            format!("ControlPath={control_path}"),
             "-o".into(),
             "ControlMaster=auto".into(),
             "-o".into(),
@@ -49,10 +80,19 @@ pub(super) fn ssh_base_args(target: &str) -> Vec<String> {
     if !is_interactive() {
         args.extend(["-o".into(), "BatchMode=yes".into()]);
     }
+    args.extend(SSH_LIVENESS_ARGS.map(str::to_owned));
     if SSH_COMPRESS.load(Ordering::Relaxed) {
         args.extend(["-o".into(), "Compression=yes".into()]);
     }
     args
+}
+
+pub(super) fn ssh_base_args(target: &str) -> Vec<String> {
+    ssh_base_args_for(
+        target,
+        &std::env::temp_dir(),
+        std::env::var_os("BCMR_SSH_NO_MULTIPLEX").is_some(),
+    )
 }
 
 pub(super) fn ssh_command(target: &str) -> Command {
@@ -124,8 +164,6 @@ mod tests {
     fn control_path_fits_unix_sun_path_with_mux_suffix() {
         // macOS is the tightest at 104 bytes (Linux is 108) — assert against
         // the macOS budget so this fires on every supported platform.
-        const SUN_PATH_LIMIT: usize = 104;
-        const OPENSSH_MUX_SUFFIX: usize = 17;
         for target in [
             "host",
             "user@host",
@@ -135,9 +173,42 @@ mod tests {
             let path = control_path(target);
             let total = path.len() + OPENSSH_MUX_SUFFIX;
             assert!(
-                total <= SUN_PATH_LIMIT,
+                total <= MACOS_SUN_PATH_LIMIT,
                 "control_path({target:?}) + mux suffix = {total} bytes, \
-                 exceeds sun_path budget {SUN_PATH_LIMIT}: {path}"
+                 exceeds sun_path budget {MACOS_SUN_PATH_LIMIT}: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn overlong_external_temp_path_disables_multiplexing() {
+        let long_external_temp = std::path::Path::new(
+            "/Volumes/External Drive/Developments/bcmr/remote-live-tests/very-long-run-name/tmp",
+        );
+
+        let args = ssh_base_args_for("host", long_external_temp, false);
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-o", "ControlMaster=no"]),
+            "an overlong external TMPDIR must fall back to non-multiplexed SSH"
+        );
+    }
+
+    #[test]
+    fn legacy_ssh_has_bounded_liveness_detection_with_and_without_mux() {
+        let temp = std::path::Path::new("/short");
+        for explicit_no_multiplex in [false, true] {
+            let args = ssh_base_args_for("host", temp, explicit_no_multiplex);
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["-o", "ServerAliveInterval=15"]),
+                "legacy transport must probe a silent SSH connection"
+            );
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["-o", "ServerAliveCountMax=20"]),
+                "legacy transport must eventually close an unresponsive SSH connection"
             );
         }
     }

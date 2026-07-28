@@ -1,9 +1,10 @@
 use super::{
-    ListEntry, Message, TYPE_AUTH_CHALLENGE, TYPE_AUTH_HELLO, TYPE_DATA, TYPE_DATA_COMPRESSED,
-    TYPE_DIRECT_READY, TYPE_DONE, TYPE_ERROR, TYPE_GET, TYPE_GET_CHUNKED, TYPE_HASH,
-    TYPE_HASH_RESPONSE, TYPE_HAVE_BLOCKS, TYPE_HELLO, TYPE_LIST, TYPE_LIST_RESPONSE,
-    TYPE_MISSING_BLOCKS, TYPE_MKDIR, TYPE_OK, TYPE_OPEN_DIRECT, TYPE_PUT, TYPE_PUT_CHUNKED,
-    TYPE_RESUME, TYPE_RESUME_RESPONSE, TYPE_STAT, TYPE_STAT_RESPONSE, TYPE_TRUNCATE, TYPE_WELCOME,
+    compressed_block_size, validate_content_block_size, ListEntry, Message, TYPE_AUTH_CHALLENGE,
+    TYPE_AUTH_HELLO, TYPE_DATA, TYPE_DATA_COMPRESSED, TYPE_DIRECT_READY, TYPE_DONE, TYPE_ERROR,
+    TYPE_GET, TYPE_GET_CHUNKED, TYPE_HASH, TYPE_HASH_RESPONSE, TYPE_HAVE_BLOCKS, TYPE_HELLO,
+    TYPE_LIST, TYPE_LIST_RESPONSE, TYPE_MISSING_BLOCKS, TYPE_MKDIR, TYPE_OK, TYPE_OPEN_DIRECT,
+    TYPE_PUT, TYPE_PUT_CHUNKED, TYPE_RESUME, TYPE_RESUME_RESPONSE, TYPE_STAT, TYPE_STAT_RESPONSE,
+    TYPE_TRUNCATE, TYPE_WELCOME,
 };
 
 // Caps Vec preallocation on peer-supplied u32 counts; prevents OOM DoS.
@@ -95,11 +96,17 @@ pub fn encode_message(msg: &Message) -> Vec<u8> {
             write_string(&mut payload, path);
             write_u64_le(&mut payload, *offset);
         }
-        Message::Put { path, size, offset } => {
+        Message::Put {
+            path,
+            size,
+            offset,
+            overwrite,
+        } => {
             write_u8(&mut payload, TYPE_PUT);
             write_string(&mut payload, path);
             write_u64_le(&mut payload, *size);
             write_u64_le(&mut payload, *offset);
+            write_u8(&mut payload, *overwrite as u8);
         }
         Message::Mkdir { path } => {
             write_u8(&mut payload, TYPE_MKDIR);
@@ -277,6 +284,14 @@ impl<'a> Cursor<'a> {
         Some(bytes.to_vec())
     }
 
+    fn read_content_block(&mut self) -> Option<Vec<u8>> {
+        let len = self.read_u32_le()? as usize;
+        validate_content_block_size(len).ok()?;
+        let bytes = self.data.get(self.pos..self.pos + len)?;
+        self.pos += len;
+        Some(bytes.to_vec())
+    }
+
     fn read_fixed<const N: usize>(&mut self) -> Option<[u8; N]> {
         let slice = self.data.get(self.pos..self.pos + N)?;
         self.pos += N;
@@ -324,7 +339,11 @@ pub fn decode_message(data: &[u8]) -> Option<Message> {
 
     let mut c = Cursor::new(data);
     let payload_len = c.read_u32_le()? as usize;
-    let payload = data.get(c.pos..c.pos + payload_len)?;
+    let payload_end = c.pos.checked_add(payload_len)?;
+    if payload_end != data.len() {
+        return None;
+    }
+    let payload = data.get(c.pos..payload_end)?;
 
     let mut p = Cursor::new(payload);
     let msg_type = p.read_u8()?;
@@ -353,6 +372,7 @@ pub fn decode_message(data: &[u8]) -> Option<Message> {
             path: p.read_string()?,
             size: p.read_u64_le()?,
             offset: p.read_u64_le()?,
+            overwrite: p.read_u8()? != 0,
         },
         TYPE_MKDIR => Message::Mkdir {
             path: p.read_string()?,
@@ -372,13 +392,18 @@ pub fn decode_message(data: &[u8]) -> Option<Message> {
             message: p.read_string()?,
         },
         TYPE_DATA => Message::Data {
-            payload: p.read_bytes()?,
+            payload: p.read_content_block()?,
         },
-        TYPE_DATA_COMPRESSED => Message::DataCompressed {
-            algo: p.read_u8()?,
-            original_size: p.read_u32_le()?,
-            payload: p.read_bytes()?,
-        },
+        TYPE_DATA_COMPRESSED => {
+            let algo = p.read_u8()?;
+            let original_size = p.read_u32_le()?;
+            compressed_block_size(algo, original_size).ok()?;
+            Message::DataCompressed {
+                algo,
+                original_size,
+                payload: p.read_bytes()?,
+            }
+        }
         TYPE_HAVE_BLOCKS => {
             let block_size = p.read_u32_le()?;
             let count = p.read_u32_le()? as usize;
@@ -449,6 +474,9 @@ pub fn decode_message(data: &[u8]) -> Option<Message> {
         _ => return None,
     };
 
+    if p.pos != payload.len() {
+        return None;
+    }
     Some(msg)
 }
 

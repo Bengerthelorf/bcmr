@@ -54,6 +54,7 @@ pub struct FileTransfer {
     pub remote: String,
     pub local: std::path::PathBuf,
     pub size: u64,
+    pub metadata: Option<crate::core::file_metadata::PortableFileMetadata>,
 }
 
 impl ServeClient {
@@ -233,7 +234,7 @@ where
         if n == 0 {
             break;
         }
-        let frame = compress::encode_block(algo, buf[..n].to_vec());
+        let frame = compress::encode_block(algo, buf[..n].to_vec())?;
         tx.write_message(writer, &frame).await?;
         on_chunk(n as u64);
     }

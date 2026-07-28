@@ -5,13 +5,23 @@ use serde::Deserialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static JSON_MODE: AtomicBool = AtomicBool::new(false);
+static JSON_TERMINAL_EMITTED: AtomicBool = AtomicBool::new(false);
 
 pub fn set_json_mode(enabled: bool) {
     JSON_MODE.store(enabled, Ordering::Relaxed);
+    JSON_TERMINAL_EMITTED.store(false, Ordering::Relaxed);
 }
 
 pub fn is_json_mode() -> bool {
     JSON_MODE.load(Ordering::Relaxed)
+}
+
+pub fn mark_json_terminal_emitted() {
+    JSON_TERMINAL_EMITTED.store(true, Ordering::Relaxed);
+}
+
+pub fn json_terminal_emitted() -> bool {
+    JSON_TERMINAL_EMITTED.load(Ordering::Relaxed)
 }
 
 use parking_lot::Mutex;
@@ -161,7 +171,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             progress: ProgressConfig {
-                style: "fancy".to_string(),
+                style: "auto".to_string(),
                 theme: ThemeConfig {
                     bar_complete_char: "█".to_string(),
                     bar_incomplete_char: "░".to_string(),
@@ -334,7 +344,27 @@ impl Config {
             }
         }
 
-        s.build()?.try_deserialize()
+        let config: Self = s.build()?.try_deserialize()?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> Result<(), ConfigError> {
+        if !matches!(
+            self.progress.style.to_ascii_lowercase().as_str(),
+            "auto" | "tui" | "inline" | "plain" | "off" | "fancy"
+        ) {
+            return Err(ConfigError::Message(format!(
+                "progress.style must be one of auto, tui, inline, plain, or off (got {:?})",
+                self.progress.style
+            )));
+        }
+        if self.scp.parallel_transfers == 0 {
+            return Err(ConfigError::Message(
+                "scp.parallel_transfers must be greater than zero".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -345,8 +375,16 @@ mod tests {
     #[test]
     fn test_default_config() {
         let cfg = Config::default();
-        assert_eq!(cfg.progress.style, "fancy");
+        assert_eq!(cfg.progress.style, "auto");
         assert_eq!(cfg.update_check, UpdateCheck::Off);
+    }
+
+    #[test]
+    fn progress_style_rejects_unknown_values() {
+        let mut cfg = Config::default();
+        cfg.progress.style = "fancyy".to_string();
+        let error = cfg.validate().unwrap_err().to_string();
+        assert!(error.contains("progress.style must be one of"), "{error}");
     }
 
     #[test]
@@ -360,6 +398,17 @@ mod tests {
     fn test_config_new_loads_defaults() {
         let cfg = Config::new().unwrap();
         assert!(!cfg.progress.style.is_empty());
+    }
+
+    #[test]
+    fn test_config_validation_rejects_zero_parallel_transfers() {
+        let mut config = Config::default();
+        config.scp.parallel_transfers = 0;
+
+        assert!(
+            config.validate().is_err(),
+            "zero configured parallel transfers must fail validation"
+        );
     }
 
     #[test]

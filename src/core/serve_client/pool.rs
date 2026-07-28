@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::core::atomic_file::AtomicFile;
 use crate::core::error::BcmrError;
 use crate::core::protocol::Message;
 
@@ -74,6 +75,7 @@ impl ServeClientPool {
     pub async fn pipelined_put_files_striped<FChunk, FComplete>(
         &mut self,
         files: Vec<FileTransfer>,
+        overwrite: bool,
         on_chunk: FChunk,
         on_complete: FComplete,
     ) -> Result<Vec<[u8; 32]>, BcmrError>
@@ -87,13 +89,7 @@ impl ServeClientPool {
         }
         let n_clients = self.clients.len().min(n_files);
 
-        let mut buckets: Vec<(Vec<usize>, Vec<FileTransfer>)> =
-            (0..n_clients).map(|_| (Vec::new(), Vec::new())).collect();
-        for (i, ft) in files.into_iter().enumerate() {
-            let b = &mut buckets[i % n_clients];
-            b.0.push(i);
-            b.1.push(ft);
-        }
+        let buckets = balanced_transfer_buckets(files, n_clients);
 
         let futs = self.clients.iter_mut().take(n_clients).zip(buckets).map(
             |(client, (indices, bucket_files))| {
@@ -104,6 +100,7 @@ impl ServeClientPool {
                     let hashes = client
                         .pipelined_put_files(
                             bucket_files,
+                            overwrite,
                             on_chunk_c,
                             move |local_idx, path, size| {
                                 let orig_idx = indices_for_cb[local_idx];
@@ -134,6 +131,7 @@ impl ServeClientPool {
         &mut self,
         files: Vec<FileTransfer>,
         sync_after_each: bool,
+        verify_before_publish: bool,
         on_file_start: FStart,
         on_chunk: FChunk,
     ) -> Result<(), BcmrError>
@@ -147,13 +145,7 @@ impl ServeClientPool {
         }
         let n_clients = self.clients.len().min(n_files);
 
-        let mut buckets: Vec<(Vec<usize>, Vec<FileTransfer>)> =
-            (0..n_clients).map(|_| (Vec::new(), Vec::new())).collect();
-        for (i, ft) in files.into_iter().enumerate() {
-            let b = &mut buckets[i % n_clients];
-            b.0.push(i);
-            b.1.push(ft);
-        }
+        let buckets = balanced_transfer_buckets(files, n_clients);
 
         let futs = self.clients.iter_mut().take(n_clients).zip(buckets).map(
             |(client, (indices, bucket_files))| {
@@ -164,6 +156,7 @@ impl ServeClientPool {
                         .pipelined_get_files(
                             bucket_files,
                             sync_after_each,
+                            verify_before_publish,
                             move |local_idx, path, size| {
                                 let orig_idx = indices[local_idx];
                                 on_start_c(orig_idx, path, size);
@@ -179,6 +172,7 @@ impl ServeClientPool {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn striped_put_file(
         &mut self,
         local: &Path,
@@ -214,49 +208,126 @@ impl ServeClientPool {
         hash_task.await.map_err(BcmrError::hash_task_join_failed)?
     }
 
+    #[allow(dead_code)]
     pub async fn striped_get_file(
         &mut self,
         remote: &str,
         local: &Path,
         remote_size: u64,
     ) -> Result<[u8; 32], BcmrError> {
+        self.striped_get_file_synced(remote, local, remote_size, false)
+            .await
+    }
+
+    pub async fn striped_get_file_synced(
+        &mut self,
+        remote: &str,
+        local: &Path,
+        remote_size: u64,
+        sync_before_publish: bool,
+    ) -> Result<[u8; 32], BcmrError> {
+        self.striped_get_file_synced_with_metadata(
+            remote,
+            local,
+            remote_size,
+            sync_before_publish,
+            None,
+        )
+        .await
+    }
+
+    pub async fn striped_get_file_synced_with_metadata(
+        &mut self,
+        remote: &str,
+        local: &Path,
+        remote_size: u64,
+        sync_before_publish: bool,
+        metadata: Option<crate::core::file_metadata::PortableFileMetadata>,
+    ) -> Result<[u8; 32], BcmrError> {
+        self.striped_get_file_impl(
+            remote,
+            local,
+            remote_size,
+            sync_before_publish,
+            metadata,
+            |_staging_path| {},
+        )
+        .await
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
+    pub async fn striped_get_file_with_stage_hook<F>(
+        &mut self,
+        remote: &str,
+        local: &Path,
+        remote_size: u64,
+        before_transfer: F,
+    ) -> Result<[u8; 32], BcmrError>
+    where
+        F: FnOnce(&Path),
+    {
+        self.striped_get_file_impl(remote, local, remote_size, false, None, before_transfer)
+            .await
+    }
+
+    async fn striped_get_file_impl<F>(
+        &mut self,
+        remote: &str,
+        local: &Path,
+        remote_size: u64,
+        sync_before_publish: bool,
+        metadata: Option<crate::core::file_metadata::PortableFileMetadata>,
+        before_transfer: F,
+    ) -> Result<[u8; 32], BcmrError>
+    where
+        F: FnOnce(&Path),
+    {
         if self.clients.is_empty() {
             return Err(BcmrError::pool_empty());
         }
-        let f = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(local)
-            .await?;
-        f.set_len(remote_size).await?;
+        let staging = AtomicFile::new(local)?;
+        let f = staging.try_clone_file()?;
+        f.set_len(remote_size)?;
         drop(f);
 
-        let local_owned = local.to_path_buf();
+        let staging_path = staging.staging_path();
+        before_transfer(&staging_path);
+
+        let destination = std::sync::Arc::new(staging.try_clone_file()?);
         let remote_owned = remote.to_owned();
         let ranges = divide_ranges(remote_size, self.clients.len());
         let futs: Vec<_> = self
             .clients
             .iter_mut()
             .zip(ranges)
-            .filter(|(_, (_, length))| *length > 0)
-            .map(|(client, (offset, length))| {
-                let local = local_owned.clone();
+            .enumerate()
+            .filter(|(index, (_, (_, length)))| *length > 0 || (remote_size == 0 && *index == 0))
+            .map(|(_, (client, (offset, length)))| {
+                let destination = std::sync::Arc::clone(&destination);
                 let remote = remote_owned.clone();
                 async move {
                     client
-                        .get_chunked(&remote, &local, offset, offset, length)
+                        .get_chunked_to_file(&remote, destination, offset, offset, length)
                         .await
                 }
             })
             .collect();
         futures::future::try_join_all(futs).await?;
+        drop(destination);
 
-        spawn_blake3_file(local.to_path_buf())
+        let hash = spawn_blake3_file_handle(staging.try_clone_file()?)
             .await
-            .map_err(BcmrError::hash_task_join_failed)?
+            .map_err(BcmrError::hash_task_join_failed)??;
+        if let Some(metadata) = metadata {
+            staging.commit_with_metadata(sync_before_publish, metadata)?;
+        } else {
+            staging.commit(sync_before_publish)?;
+        }
+        Ok(hash)
     }
 
+    #[allow(dead_code)]
     async fn request_truncate(&mut self, remote: &str, size: u64) -> Result<(), BcmrError> {
         self.clients[0]
             .request_one(
@@ -293,22 +364,136 @@ fn divide_ranges(total: u64, n: usize) -> Vec<(u64, u64)> {
     ranges
 }
 
+/// Assign jobs with Longest Processing Time first (LPT), using bytes as
+/// the processing-time estimate. The returned vector is indexed by the
+/// caller's original job order so callbacks and results remain stable.
+fn balanced_worker_assignments(sizes: &[u64], workers: usize) -> Vec<usize> {
+    if sizes.is_empty() {
+        return Vec::new();
+    }
+    assert!(workers > 0, "non-empty work requires at least one worker");
+
+    let worker_count = workers.min(sizes.len());
+    let mut jobs: Vec<(usize, u64)> = sizes.iter().copied().enumerate().collect();
+    jobs.sort_unstable_by(|(left_idx, left_size), (right_idx, right_size)| {
+        right_size
+            .cmp(left_size)
+            .then_with(|| left_idx.cmp(right_idx))
+    });
+
+    let mut worker_loads = vec![0u64; worker_count];
+    let mut assignments = vec![0usize; sizes.len()];
+    for (job_idx, size) in jobs {
+        let worker = worker_loads
+            .iter()
+            .enumerate()
+            .min_by_key(|(worker_idx, load)| (**load, *worker_idx))
+            .map(|(worker_idx, _)| worker_idx)
+            .expect("worker_count is non-zero");
+        assignments[job_idx] = worker;
+        // Even an empty file has a request/response cost. Giving every job
+        // at least one scheduling unit also prevents zero-byte batches from
+        // collapsing onto worker 0 while the rest of the pool sits idle.
+        worker_loads[worker] = worker_loads[worker].saturating_add(size.max(1));
+    }
+    assignments
+}
+
+fn balanced_transfer_buckets(
+    files: Vec<FileTransfer>,
+    workers: usize,
+) -> Vec<(Vec<usize>, Vec<FileTransfer>)> {
+    let sizes: Vec<u64> = files.iter().map(|file| file.size).collect();
+    let assignments = balanced_worker_assignments(&sizes, workers);
+    let mut buckets: Vec<(Vec<usize>, Vec<FileTransfer>)> =
+        (0..workers).map(|_| (Vec::new(), Vec::new())).collect();
+
+    for (index, file) in files.into_iter().enumerate() {
+        let bucket = &mut buckets[assignments[index]];
+        bucket.0.push(index);
+        bucket.1.push(file);
+    }
+    buckets
+}
+
+#[allow(dead_code)]
 fn spawn_blake3_file(
     path: std::path::PathBuf,
 ) -> tokio::task::JoinHandle<Result<[u8; 32], BcmrError>> {
-    const READ_CHUNK: usize = 4 * 1024 * 1024;
     tokio::task::spawn_blocking(move || {
-        use std::io::Read;
-        let mut f = std::fs::File::open(&path)?;
-        let mut hasher = blake3::Hasher::new();
-        let mut buf = vec![0u8; READ_CHUNK];
-        loop {
-            let n = f.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-        }
-        Ok(*hasher.finalize().as_bytes())
+        let file = std::fs::File::open(&path)?;
+        calculate_blake3_file(file)
     })
+}
+
+fn spawn_blake3_file_handle(
+    file: std::fs::File,
+) -> tokio::task::JoinHandle<Result<[u8; 32], BcmrError>> {
+    tokio::task::spawn_blocking(move || calculate_blake3_file(file))
+}
+
+fn calculate_blake3_file(mut file: std::fs::File) -> Result<[u8; 32], BcmrError> {
+    const READ_CHUNK: usize = 4 * 1024 * 1024;
+    use std::io::{Read, Seek};
+    file.rewind()?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; READ_CHUNK];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(*hasher.finalize().as_bytes())
+}
+
+#[cfg(test)]
+mod scheduler_tests {
+    use super::balanced_worker_assignments;
+
+    fn loads(sizes: &[u64], assignments: &[usize], workers: usize) -> Vec<u64> {
+        let mut loads = vec![0u64; workers];
+        for (&size, &worker) in sizes.iter().zip(assignments) {
+            loads[worker] = loads[worker].saturating_add(size);
+        }
+        loads
+    }
+
+    #[test]
+    fn size_aware_assignment_reduces_round_robin_tail_load() {
+        let sizes = [10, 1, 9, 1, 8, 1];
+        let assigned = balanced_worker_assignments(&sizes, 2);
+        let balanced_loads = loads(&sizes, &assigned, 2);
+        let round_robin_loads = loads(&sizes, &[0, 1, 0, 1, 0, 1], 2);
+
+        assert_eq!(balanced_loads, [13, 17]);
+        assert_eq!(round_robin_loads, [27, 3]);
+        assert_eq!(balanced_loads.iter().max(), Some(&17));
+    }
+
+    #[test]
+    fn assignment_is_deterministic_and_handles_saturating_sizes() {
+        let sizes = [u64::MAX, u64::MAX, 1, 1];
+        let first = balanced_worker_assignments(&sizes, 2);
+        let second = balanced_worker_assignments(&sizes, 2);
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), sizes.len());
+        assert!(first.iter().all(|&worker| worker < 2));
+    }
+
+    #[test]
+    fn empty_work_has_no_assignments() {
+        assert!(balanced_worker_assignments(&[], 4).is_empty());
+    }
+
+    #[test]
+    fn zero_length_files_still_use_all_available_workers() {
+        let assigned = balanced_worker_assignments(&[0, 0, 0, 0], 4);
+        let mut used = assigned;
+        used.sort_unstable();
+        used.dedup();
+        assert_eq!(used, [0, 1, 2, 3]);
+    }
 }

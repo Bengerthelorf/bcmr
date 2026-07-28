@@ -5,9 +5,18 @@ order: 4
 locale: zh-Hant
 ---
 
-BCMR 為所有檔案操作提供兩種進度顯示模式。
+BCMR 為所有檔案操作提供五種明確的進度顯示模式。可使用
+`--progress=auto|tui|inline|plain|off`，或在設定中使用同名的 `progress.style`。
 
-## Fancy 模式（預設）
+## Auto 模式（預設）
+
+Auto 會依輸出環境選擇最豐富且安全的顯示方式：
+
+- 有足夠空間且支援顏色的 TTY 使用 TUI
+- 設定 `NO_COLOR` 或終端較小時使用無色 inline
+- 管道、重新導向和 `TERM=dumb` 使用穩定的 plain 最終摘要
+
+## TUI 模式
 
 TUI 介面包含：
 
@@ -19,17 +28,20 @@ TUI 介面包含：
 
 支援 Ctrl+C（清理暫存檔案後結束）和 Ctrl+Z（Unix 上暫停/恢復）。
 
-## Plain 模式
+## Inline 模式
 
-3 行文字顯示，適合日誌、管道和不支援邊框繪製的終端。
-
-透過 `--tui` / `-t` 參數啟用，或在設定中設定 `progress.style = "plain"`。
+無顏色的 3 行即時顯示，適合不希望使用完整 TUI 的終端：
 
 ```
 Copying: [=========-----------] 45%
 12.34 MiB / 27.00 MiB | 5.67 MiB/s | ETA: 00:03
 File: largefile.zip [====----] 50%
 ```
+
+## Plain 與 Off 模式
+
+`plain` 只輸出穩定的最終摘要，不使用游標控制，適合日誌和管道。`off`
+完全關閉進度；`-q` / `--quiet` 是方便的快捷方式。
 
 ## 流水線掃描
 

@@ -1,4 +1,4 @@
-use crate::cli::Commands;
+use crate::cli::{Commands, ProgressMode};
 use crate::config::CONFIG;
 use crate::core::error::BcmrError;
 use crate::core::remote::{self, parse_remote_path, RemotePath};
@@ -26,8 +26,18 @@ pub(super) fn transfer_options_from_cli(cli: &Commands) -> remote::TransferOptio
     }
 }
 
-pub fn is_plain_mode(args: &Commands) -> bool {
-    args.is_plain_progress() || CONFIG.progress.style.eq_ignore_ascii_case("plain")
+pub fn progress_mode(args: &Commands) -> ProgressMode {
+    let requested = args.progress_mode();
+    if requested != ProgressMode::Auto {
+        return requested;
+    }
+    match CONFIG.progress.style.to_ascii_lowercase().as_str() {
+        "tui" | "fancy" => ProgressMode::Tui,
+        "inline" => ProgressMode::Inline,
+        "plain" => ProgressMode::Plain,
+        "off" => ProgressMode::Off,
+        _ => ProgressMode::Auto,
+    }
 }
 
 pub(super) struct TransferItem {
@@ -376,6 +386,9 @@ pub async fn handle_remote_copy(
         Ok(()) => return Ok(()),
         Err(e) => {
             let msg = e.to_string();
+            if !serve::allows_legacy_fallback(&e) {
+                return Err(e);
+            }
             if msg.contains("--append refused:") || msg.contains("Use -r flag for recursive copy") {
                 return Err(e);
             }

@@ -2,6 +2,7 @@ use super::ops::remote_file_hash;
 use super::ssh_cmd::{shell_escape, ssh_command, ssh_error_message};
 use super::RemotePath;
 use crate::core::error::BcmrError;
+use crate::core::file_metadata::PortableFileMetadata;
 use std::path::Path;
 
 pub async fn preserve_remote_attrs(local_src: &Path, remote: &RemotePath) -> Result<(), BcmrError> {
@@ -60,7 +61,9 @@ pub async fn preserve_remote_attrs(local_src: &Path, remote: &RemotePath) -> Res
     Ok(())
 }
 
-async fn get_remote_attrs(remote: &RemotePath) -> Result<(i64, i64, u32), BcmrError> {
+pub(crate) async fn get_remote_attrs(
+    remote: &RemotePath,
+) -> Result<PortableFileMetadata, BcmrError> {
     let output = ssh_command(&remote.ssh_target())
         .arg(format!(
             "stat -c '%X %Y %a' '{}' 2>/dev/null || stat -f '%a %m %Lp' '{}'",
@@ -77,16 +80,38 @@ async fn get_remote_attrs(remote: &RemotePath) -> Result<(i64, i64, u32), BcmrEr
         )));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parts: Vec<&str> = stdout.split_whitespace().collect();
-    let atime_secs: i64 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let mtime_secs: i64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let mode: u32 = parts
-        .get(2)
-        .and_then(|s| u32::from_str_radix(s, 8).ok())
-        .unwrap_or(0o644);
+    let stdout = std::str::from_utf8(&output.stdout).map_err(|_| {
+        BcmrError::InvalidInput(format!(
+            "Remote stat returned non-UTF-8 metadata for '{}'",
+            remote
+        ))
+    })?;
+    parse_remote_attrs(stdout).map_err(|detail| {
+        BcmrError::InvalidInput(format!(
+            "Invalid remote stat metadata for '{}': {detail}",
+            remote
+        ))
+    })
+}
 
-    Ok((atime_secs, mtime_secs, mode))
+fn parse_remote_attrs(stdout: &str) -> Result<PortableFileMetadata, &'static str> {
+    let parts: Vec<&str> = stdout.split_whitespace().collect();
+    if parts.len() != 3 {
+        return Err("expected exactly atime, mtime, and mode");
+    }
+    let atime_seconds = parts[0].parse().map_err(|_| "invalid access time")?;
+    let mtime_seconds = parts[1].parse().map_err(|_| "invalid modification time")?;
+    let mode = u32::from_str_radix(parts[2], 8).map_err(|_| "invalid octal mode")?;
+    if mode > 0o7777 {
+        return Err("mode exceeds Unix permission bits");
+    }
+    Ok(PortableFileMetadata {
+        atime_seconds,
+        atime_nanoseconds: 0,
+        mtime_seconds,
+        mtime_nanoseconds: 0,
+        mode,
+    })
 }
 
 fn apply_local_attrs(
@@ -112,8 +137,13 @@ pub async fn apply_remote_attrs_locally(
     remote: &RemotePath,
     local_path: &Path,
 ) -> Result<(), BcmrError> {
-    let (atime_secs, mtime_secs, mode) = get_remote_attrs(remote).await?;
-    apply_local_attrs(local_path, atime_secs, mtime_secs, mode)?;
+    let metadata = get_remote_attrs(remote).await?;
+    apply_local_attrs(
+        local_path,
+        metadata.atime_seconds,
+        metadata.mtime_seconds,
+        metadata.mode,
+    )?;
     Ok(())
 }
 
@@ -173,5 +203,23 @@ mod tests {
     fn test_unix_to_touch_ts_with_seconds() {
         let ts = unix_to_touch_ts(1592210445);
         assert!(ts.ends_with(".45"));
+    }
+
+    #[test]
+    fn remote_attributes_are_parsed_without_silent_defaults() {
+        assert_eq!(
+            parse_remote_attrs("-1 1700000000 6751").unwrap(),
+            PortableFileMetadata {
+                atime_seconds: -1,
+                atime_nanoseconds: 0,
+                mtime_seconds: 1_700_000_000,
+                mtime_nanoseconds: 0,
+                mode: 0o6751,
+            }
+        );
+        assert!(parse_remote_attrs("").is_err());
+        assert!(parse_remote_attrs("1 nope 644").is_err());
+        assert!(parse_remote_attrs("1 2 10000").is_err());
+        assert!(parse_remote_attrs("1 2 644 extra").is_err());
     }
 }

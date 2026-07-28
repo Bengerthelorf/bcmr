@@ -3,7 +3,7 @@ use crate::app::prompts::{confirm_overwrite, confirm_removal, first_display_name
 use crate::app::runners::{resume_or_new_runner, start_scanning_runner};
 use crate::cli::Commands;
 use crate::commands;
-use crate::commands::remote_copy::{handle_remote_copy, is_plain_mode};
+use crate::commands::remote_copy::{handle_remote_copy, progress_mode};
 use crate::config::is_json_mode;
 use crate::core::error::BcmrError;
 use crate::output;
@@ -12,18 +12,25 @@ use crate::ui::utils::format_bytes;
 use anyhow::{bail, Result};
 
 #[cfg(unix)]
-fn validate_source_kind(src: &std::path::Path) -> Result<()> {
+fn validate_source_kind(src: &std::path::Path, no_deref: bool) -> Result<()> {
     use crate::core::remote::parse_remote_path;
     use std::os::unix::fs::FileTypeExt;
 
     if parse_remote_path(&src.to_string_lossy()).is_some() {
         return Ok(());
     }
-    let md = match src.metadata() {
+    let md = match if no_deref {
+        src.symlink_metadata()
+    } else {
+        src.metadata()
+    } {
         Ok(m) => m,
         Err(_) => return Ok(()),
     };
     let ft = md.file_type();
+    if no_deref && ft.is_symlink() {
+        return Ok(());
+    }
     if ft.is_file() || ft.is_dir() {
         return Ok(());
     }
@@ -52,7 +59,7 @@ fn validate_source_kind(src: &std::path::Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn validate_source_kind(_src: &std::path::Path) -> Result<()> {
+fn validate_source_kind(_src: &std::path::Path, _no_deref: bool) -> Result<()> {
     Ok(())
 }
 
@@ -174,7 +181,7 @@ async fn handle_copy_one(args: &Commands, dest_override: Option<&std::path::Path
     }
 
     for src in sources {
-        validate_source_kind(src)?;
+        validate_source_kind(src, args.is_no_deref())?;
     }
 
     check_basename_collisions(sources, args.is_force())?;
@@ -293,7 +300,7 @@ async fn handle_copy_one(args: &Commands, dest_override: Option<&std::path::Path
     } else {
         let runner = ProgressRunner::new(
             0,
-            is_plain_mode(args),
+            progress_mode(args),
             args.is_quiet(),
             is_json_mode(),
             crate::core::cleanup::cleanup_partial_files,
@@ -416,7 +423,7 @@ async fn handle_move_one(args: &Commands) -> Result<()> {
     }
 
     for src in sources {
-        validate_source_kind(src)?;
+        validate_source_kind(src, false)?;
     }
 
     let dest_str = dest.to_string_lossy();

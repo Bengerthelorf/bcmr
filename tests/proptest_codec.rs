@@ -1,4 +1,6 @@
-use bcmr::core::protocol::{decode_message, encode_message, ListEntry, Message, PROTOCOL_VERSION};
+use bcmr::core::protocol::{
+    decode_message, encode_message, ListEntry, Message, MAX_CONTENT_BLOCK_SIZE, PROTOCOL_VERSION,
+};
 use proptest::prelude::*;
 
 fn arb_string() -> impl Strategy<Value = String> {
@@ -33,11 +35,14 @@ fn arb_message() -> impl Strategy<Value = Message> {
             }
         ),
         (arb_string(), any::<u64>()).prop_map(|(path, offset)| Message::Get { path, offset }),
-        (arb_string(), any::<u64>(), any::<u64>()).prop_map(|(path, size, offset)| Message::Put {
-            path,
-            size,
-            offset
-        }),
+        (arb_string(), any::<u64>(), any::<u64>(), any::<bool>()).prop_map(
+            |(path, size, offset, overwrite)| Message::Put {
+                path,
+                size,
+                offset,
+                overwrite,
+            },
+        ),
         arb_string().prop_map(|path| Message::Mkdir { path }),
         arb_string().prop_map(|path| Message::Resume { path }),
         Just(Message::Done),
@@ -67,8 +72,8 @@ fn arb_message() -> impl Strategy<Value = Message> {
         arb_string().prop_map(|message| Message::Error { message }),
         prop::collection::vec(any::<u8>(), 0..256).prop_map(|payload| Message::Data { payload }),
         (
-            any::<u8>(),
-            any::<u32>(),
+            prop_oneof![Just(1u8), Just(2u8)],
+            1u32..=MAX_CONTENT_BLOCK_SIZE as u32,
             prop::collection::vec(any::<u8>(), 0..256)
         )
             .prop_map(|(algo, original_size, payload)| Message::DataCompressed {
@@ -123,6 +128,6 @@ proptest! {
 
     #[test]
     fn protocol_version_fixed(_ in Just(())) {
-        prop_assert_eq!(PROTOCOL_VERSION, 1);
+        prop_assert_eq!(PROTOCOL_VERSION, 2);
     }
 }

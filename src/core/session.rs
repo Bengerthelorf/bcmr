@@ -27,6 +27,10 @@ pub struct Session {
 }
 
 impl Session {
+    // The library exposes this constructor for resume/session tooling and the
+    // integration suite. The binary crate shares this module but deliberately
+    // no longer constructs final-key sessions while writing private stages.
+    #[allow(dead_code)]
     pub fn new(src: &Path, dst: &Path, src_size: u64, src_mtime: u64, src_inode: u64) -> Self {
         let now = now_secs();
         Self {
@@ -66,26 +70,62 @@ impl Session {
         session_dir().join(format!("{}.session", hex))
     }
 
-    pub fn load(src: &Path, dst: &Path) -> Option<Self> {
+    pub fn load(src: &Path, dst: &Path) -> io::Result<Option<Self>> {
+        Self::load_impl(src, dst, true)
+    }
+
+    pub fn try_load_read_only(src: &Path, dst: &Path) -> io::Result<Option<Self>> {
+        Self::load_impl(src, dst, false)
+    }
+
+    fn load_impl(src: &Path, dst: &Path, remove_expired: bool) -> io::Result<Option<Self>> {
         let path = Self::session_path(src, dst);
-        let data = fs::read(&path).ok()?;
-        let session = Self::deserialize(&data)?;
+        let data = match fs::read(&path) {
+            Ok(data) => data,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let Some(session) = Self::deserialize(&data) else {
+            return Ok(None);
+        };
 
         let age = now_secs().saturating_sub(session.updated_at);
         if age > SESSION_MAX_AGE_SECS {
-            let _ = fs::remove_file(&path);
-            return None;
+            if remove_expired {
+                match fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            return Ok(None);
         }
 
         if session.src_path != src || session.dst_path != dst {
-            return None;
+            return Ok(None);
         }
 
-        Some(session)
+        Ok(Some(session))
     }
 
     pub fn source_matches(&self, src_size: u64, src_mtime: u64, src_inode: u64) -> bool {
         self.src_size == src_size && self.src_mtime == src_mtime && self.src_inode == src_inode
+    }
+
+    pub fn has_valid_resume_structure(&self) -> bool {
+        if self.bytes_written > self.src_size {
+            return false;
+        }
+
+        let partial_bytes = self.bytes_written % BLOCK_SIZE;
+        if partial_bytes != 0 && self.bytes_written != self.src_size {
+            return false;
+        }
+
+        let expected_hashes = self.bytes_written / BLOCK_SIZE + u64::from(partial_bytes != 0);
+        usize::try_from(expected_hashes)
+            .map(|expected| expected == self.block_hashes.len())
+            .unwrap_or(false)
     }
 
     pub fn save(&self) -> io::Result<()> {
@@ -107,7 +147,7 @@ impl Session {
         drop(f);
 
         fs::rename(&tmp_path, &path)?;
-        durable_io::fsync_dir(&dir);
+        durable_io::durable_sync_dir(&dir)?;
 
         Ok(())
     }
@@ -131,51 +171,64 @@ impl Session {
         }
     }
 
-    pub fn find_resume_offset(&self, dst: &Path) -> u64 {
-        use std::io::Read;
+    pub fn find_verified_resume_offset(&self, src: &Path, dst: &Path) -> io::Result<u64> {
+        self.find_verified_resume_offset_file(src, fs::File::open(dst)?)
+    }
 
-        let mut file = match fs::File::open(dst) {
-            Ok(f) => f,
-            Err(_) => return 0,
-        };
+    pub fn find_verified_resume_offset_file(
+        &self,
+        src: &Path,
+        mut dst_file: fs::File,
+    ) -> io::Result<u64> {
+        use std::io::{Read, Seek, SeekFrom};
 
-        let dst_len = match file.metadata() {
-            Ok(m) => m.len(),
-            Err(_) => return 0,
-        };
-
+        let mut src_file = fs::File::open(src)?;
+        dst_file.seek(SeekFrom::Start(0))?;
+        let src_len = src_file.metadata()?.len();
+        let dst_len = dst_file.metadata()?.len();
+        if !self.has_valid_resume_structure() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid resume session structure",
+            ));
+        }
+        let proof_limit = self.src_size.min(src_len).min(dst_len);
         let mut buf = vec![0u8; BLOCK_SIZE as usize];
-        for i in (0..self.block_hashes.len()).rev() {
-            let block_offset = i as u64 * BLOCK_SIZE;
+        let mut verified = 0;
 
-            let block_end = block_offset + BLOCK_SIZE;
-            if block_end > dst_len {
-                continue;
+        for (i, expected_hash) in self.block_hashes.iter().enumerate() {
+            let block_start = (i as u64)
+                .checked_mul(BLOCK_SIZE)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "session overflow"))?;
+            let block_len = self
+                .bytes_written
+                .saturating_sub(block_start)
+                .min(BLOCK_SIZE);
+            if block_len == 0 {
+                break;
+            }
+            let block_end = block_start
+                .checked_add(block_len)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "session overflow"))?;
+            if block_end > proof_limit {
+                break;
+            }
+            let block_len = block_len as usize;
+
+            src_file.read_exact(&mut buf[..block_len])?;
+            if blake3::hash(&buf[..block_len]).as_bytes() != expected_hash {
+                break;
             }
 
-            use std::io::Seek;
-            if file.seek(std::io::SeekFrom::Start(block_offset)).is_err() {
-                return 0;
-            }
-            let mut read = 0;
-            while read < BLOCK_SIZE as usize {
-                match file.read(&mut buf[read..BLOCK_SIZE as usize]) {
-                    Ok(0) => break,
-                    Ok(n) => read += n,
-                    Err(_) => return 0,
-                }
-            }
-            if read != BLOCK_SIZE as usize {
-                continue;
+            dst_file.read_exact(&mut buf[..block_len])?;
+            if blake3::hash(&buf[..block_len]).as_bytes() != expected_hash {
+                break;
             }
 
-            let hash = blake3::hash(&buf[..read]);
-            if hash.as_bytes() == &self.block_hashes[i] {
-                return block_end;
-            }
+            verified = block_end;
         }
 
-        0
+        Ok(verified)
     }
 
     fn serialize(&self) -> Vec<u8> {
@@ -263,6 +316,15 @@ impl Session {
         let bytes_written = r.read_u64()?;
 
         let block_count = r.read_u32()? as usize;
+        let max_blocks = src_size / BLOCK_SIZE + u64::from(src_size % BLOCK_SIZE != 0);
+        if u64::try_from(block_count).ok()? > max_blocks {
+            return None;
+        }
+        let serialized_hash_bytes = block_count.checked_mul(HASH_LEN)?;
+        const MIN_TRAILING_FIELDS: usize = 1 + 8 + 8;
+        if serialized_hash_bytes > r.remaining().saturating_sub(MIN_TRAILING_FIELDS) {
+            return None;
+        }
         let mut block_hashes = Vec::with_capacity(block_count);
         for _ in 0..block_count {
             let hash_bytes = r.read_bytes(32)?;
@@ -272,17 +334,22 @@ impl Session {
         }
 
         let has_src_hash = r.read_u8()?;
-        let src_hash = if has_src_hash == 1 {
-            let h = r.read_bytes(32)?;
-            let mut hash = [0u8; 32];
-            hash.copy_from_slice(h);
-            Some(hash)
-        } else {
-            None
+        let src_hash = match has_src_hash {
+            1 => {
+                let h = r.read_bytes(32)?;
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(h);
+                Some(hash)
+            }
+            0 => None,
+            _ => return None,
         };
 
         let created_at = r.read_u64()?;
         let updated_at = r.read_u64()?;
+        if r.remaining() != 0 {
+            return None;
+        }
 
         Some(Self {
             src_path,
@@ -351,12 +418,17 @@ impl<'a> Reader<'a> {
     }
 
     fn read_bytes(&mut self, n: usize) -> Option<&'a [u8]> {
-        if self.pos + n > self.data.len() {
+        let end = self.pos.checked_add(n)?;
+        if end > self.data.len() {
             return None;
         }
-        let slice = &self.data[self.pos..self.pos + n];
-        self.pos += n;
+        let slice = &self.data[self.pos..end];
+        self.pos = end;
         Some(slice)
+    }
+
+    fn remaining(&self) -> usize {
+        self.data.len() - self.pos
     }
 
     fn read_u8(&mut self) -> Option<u8> {
@@ -390,7 +462,7 @@ mod tests {
         let src = Path::new("/tmp/test_src.bin");
         let dst = Path::new("/tmp/test_dst.bin");
 
-        let mut session = Session::new(src, dst, 1024 * 1024, 1700000000, 12345);
+        let mut session = Session::new(src, dst, 2 * BLOCK_SIZE, 1700000000, 12345);
         session.add_block([0xAA; 32], BLOCK_SIZE);
         session.add_block([0xBB; 32], BLOCK_SIZE);
         session.set_src_hash([0xCC; 32]);
@@ -400,7 +472,7 @@ mod tests {
 
         assert_eq!(restored.src_path, src);
         assert_eq!(restored.dst_path, dst);
-        assert_eq!(restored.src_size, 1024 * 1024);
+        assert_eq!(restored.src_size, 2 * BLOCK_SIZE);
         assert_eq!(restored.src_mtime, 1700000000);
         assert_eq!(restored.src_inode, 12345);
         assert_eq!(restored.bytes_written, BLOCK_SIZE * 2);
@@ -419,6 +491,21 @@ mod tests {
     #[test]
     fn test_session_empty_data() {
         assert!(Session::deserialize(&[]).is_none());
+    }
+
+    #[test]
+    fn test_session_trailing_payload_rejected() {
+        let session = Session::new(Path::new("/a"), Path::new("/b"), 0, 0, 0);
+        let encoded = session.serialize();
+        let mut payload = encoded[..encoded.len() - 8].to_vec();
+        payload.push(0xAA);
+        let checksum = blake3::hash(&payload);
+        payload.extend_from_slice(&checksum.as_bytes()[..8]);
+
+        assert!(
+            Session::deserialize(&payload).is_none(),
+            "a checksummed session must still consume its payload exactly"
+        );
     }
 
     #[test]
@@ -516,7 +603,7 @@ mod tests {
         fn session_serde_roundtrip_preserves_fields(
             src_raw in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..64),
             dst_raw in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..64),
-            size: u64,
+            size_seed: u64,
             mtime: u64,
             inode: u64,
             written: u64,
@@ -525,7 +612,9 @@ mod tests {
         ) {
             let src = raw_bytes_to_path(&src_raw);
             let dst = raw_bytes_to_path(&dst_raw);
-            let mut s = Session::new(&src, &dst, size, mtime, inode);
+            let minimum_size = block_hashes.len() as u64 * BLOCK_SIZE;
+            let src_size = size_seed.max(minimum_size);
+            let mut s = Session::new(&src, &dst, src_size, mtime, inode);
             s.bytes_written = written;
             for h in &block_hashes { s.block_hashes.push(*h); }
             if let Some(h) = src_hash_opt { s.set_src_hash(h); }
@@ -534,7 +623,7 @@ mod tests {
             let back = Session::deserialize(&bytes).expect("self-produced payload must decode");
             proptest::prop_assert_eq!(path_to_raw_bytes(&back.src_path), src_raw);
             proptest::prop_assert_eq!(path_to_raw_bytes(&back.dst_path), dst_raw);
-            proptest::prop_assert_eq!(back.src_size, size);
+            proptest::prop_assert_eq!(back.src_size, src_size);
             proptest::prop_assert_eq!(back.src_mtime, mtime);
             proptest::prop_assert_eq!(back.src_inode, inode);
             proptest::prop_assert_eq!(back.bytes_written, written);
@@ -564,11 +653,36 @@ mod tests {
         session.add_block([0xDD; 32], BLOCK_SIZE);
         session.save().unwrap();
 
-        let loaded = Session::load(&src, &dst).unwrap();
+        let loaded = Session::load(&src, &dst).unwrap().unwrap();
         assert_eq!(loaded.src_size, 5);
         assert_eq!(loaded.src_inode, 99);
         assert_eq!(loaded.block_hashes.len(), 1);
 
         Session::remove(&src, &dst);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_session_read_error_is_not_treated_as_missing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.bin");
+        let dst = dir.path().join("dst.bin");
+        std::fs::write(&src, b"hello").unwrap();
+        std::fs::write(&dst, b"world").unwrap();
+        let session = Session::new(&src, &dst, 5, 0, 0);
+        session.save().unwrap();
+
+        let session_path = Session::session_path(&src, &dst);
+        std::fs::set_permissions(&session_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let result = Session::load(&src, &dst);
+        std::fs::set_permissions(&session_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        Session::remove(&src, &dst);
+
+        assert!(
+            result.is_err(),
+            "session read failures must not become a destructive no-session fallback"
+        );
     }
 }

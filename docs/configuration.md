@@ -10,7 +10,7 @@ BCMR reads configuration from `~/.config/bcmr/config.toml` (or `config.yaml`). A
 
 ```toml
 [progress]
-style = "fancy"          # "fancy" (default) or "plain" (same as --tui flag)
+style = "auto"           # "auto" (default), "tui", "inline", "plain", or "off"
 
 [progress.theme]
 bar_gradient = ["#CABBE9", "#7E6EAC"]   # Hex color stops for the progress bar
@@ -44,8 +44,13 @@ fallback_warning = true  # warn on stderr when serve fast path fails
 
 | Value | Description |
 |-------|-------------|
-| `"fancy"` | TUI box with gradient bar, ETA, speed, per-file bar (default) |
-| `"plain"` | 3-line text output, no box drawing |
+| `"auto"` | TUI on a capable terminal; inline with `NO_COLOR` or limited space; plain in pipes (default) |
+| `"tui"` | TUI box with gradient bar, ETA, speed, and per-file status |
+| `"inline"` | Uncolored, live 3-line display |
+| `"plain"` | Log-safe final summary without cursor control |
+| `"off"` | No progress output |
+
+The command-line override is `--progress=MODE`; `-q` / `--quiet` remains a shortcut for suppressing progress.
 
 ### `progress.theme`
 

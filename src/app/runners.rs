@@ -1,5 +1,5 @@
 use crate::cli::Commands;
-use crate::commands::remote_copy::is_plain_mode;
+use crate::commands::remote_copy::progress_mode;
 use crate::config::is_json_mode;
 use crate::ui::runner::ProgressRunner;
 use anyhow::Result;
@@ -14,7 +14,7 @@ pub(crate) fn start_scanning_runner(
     }
     let runner = ProgressRunner::new(
         0,
-        is_plain_mode(args),
+        progress_mode(args),
         args.is_quiet(),
         true,
         crate::core::cleanup::cleanup_partial_files,
@@ -46,7 +46,7 @@ pub(crate) fn resume_or_new_runner(
     }
     let r = ProgressRunner::new(
         total_size,
-        is_plain_mode(args),
+        progress_mode(args),
         silent,
         is_json_mode(),
         crate::core::cleanup::cleanup_partial_files,

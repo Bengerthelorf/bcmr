@@ -6,7 +6,7 @@ use std::io::{self, IsTerminal, Write};
 
 pub(crate) fn prompt_yes_no(message: &str) -> Result<bool> {
     if is_json_mode() {
-        return Ok(true);
+        anyhow::bail!("confirmation required in JSON mode — pass -y/--yes explicitly");
     }
     if !std::io::stdin().is_terminal() {
         anyhow::bail!(
@@ -22,7 +22,7 @@ pub(crate) fn prompt_yes_no(message: &str) -> Result<bool> {
 
 pub(crate) fn confirm_overwrite(files: &[commands::copy::FileToOverwrite]) -> Result<bool> {
     if is_json_mode() {
-        return Ok(true);
+        anyhow::bail!("overwrite confirmation required in JSON mode — pass -y/--yes explicitly");
     }
     println!("\nThe following items will be overwritten:");
     for file in files {
@@ -37,7 +37,7 @@ pub(crate) fn confirm_overwrite(files: &[commands::copy::FileToOverwrite]) -> Re
 
 pub(crate) fn confirm_removal(files: &[commands::remove::FileToRemove]) -> Result<bool> {
     if is_json_mode() {
-        return Ok(true);
+        anyhow::bail!("removal confirmation required in JSON mode — pass -y/--yes explicitly");
     }
     let mut total_size = 0u64;
     let mut file_count = 0;
@@ -77,7 +77,7 @@ pub(crate) fn confirm_removal(files: &[commands::remove::FileToRemove]) -> Resul
 
 pub(crate) fn confirm_remote_removal(paths: &[crate::core::remote::RemotePath]) -> Result<bool> {
     if is_json_mode() {
-        return Ok(true);
+        anyhow::bail!("removal confirmation required in JSON mode — pass -y/--yes explicitly");
     }
     println!("\nThe following remote paths will be removed:");
     for r in paths {
@@ -93,4 +93,21 @@ pub(crate) fn first_display_name(paths: &[std::path::PathBuf]) -> Option<String>
             .to_string_lossy()
             .into_owned()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prompt_yes_no;
+
+    #[test]
+    fn json_output_never_implies_destructive_confirmation() {
+        crate::config::set_json_mode(true);
+        let result = prompt_yes_no("delete?");
+        crate::config::set_json_mode(false);
+
+        assert!(
+            result.is_err(),
+            "JSON is an output format and must never behave like --yes"
+        );
+    }
 }

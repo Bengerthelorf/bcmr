@@ -49,6 +49,21 @@ fn create_random_file(path: &Path, size: usize) {
     f.sync_all().unwrap();
 }
 
+#[cfg(unix)]
+fn create_file_symlink(target: &Path, link: &Path) -> bool {
+    std::os::unix::fs::symlink(target, link).is_ok()
+}
+
+#[cfg(windows)]
+fn create_file_symlink(target: &Path, link: &Path) -> bool {
+    std::os::windows::fs::symlink_file(target, link).is_ok()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_file_symlink(_target: &Path, _link: &Path) -> bool {
+    false
+}
+
 #[test]
 fn e2e_move_single_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -56,7 +71,12 @@ fn e2e_move_single_file() {
     let dst = dir.path().join("dst.txt");
     fs::write(&src, b"move me").unwrap();
 
-    let (ok, _, stderr) = run_bcmr(&["move", "-t", src.to_str().unwrap(), dst.to_str().unwrap()]);
+    let (ok, _, stderr) = run_bcmr(&[
+        "move",
+        "--progress=plain",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
     assert!(ok, "move should succeed: {}", stderr);
     assert!(dst.exists(), "destination should exist: {}", stderr);
     assert!(
@@ -82,7 +102,7 @@ fn e2e_move_directory_recursive() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "move",
-        "-t",
+        "--progress=plain",
         "-r",
         src_dir.to_str().unwrap(),
         dst_dir.to_str().unwrap(),
@@ -115,7 +135,7 @@ fn e2e_move_directory_without_recursive_fails() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "move",
-        "-t",
+        "--progress=plain",
         src_dir.to_str().unwrap(),
         dst_dir.to_str().unwrap(),
     ]);
@@ -142,7 +162,7 @@ fn e2e_move_file_into_existing_dir() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "move",
-        "-t",
+        "--progress=plain",
         src.to_str().unwrap(),
         dst_dir.to_str().unwrap(),
     ]);
@@ -166,7 +186,7 @@ fn e2e_move_dir_into_existing_dir_joins_source_name() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "move",
-        "-t",
+        "--progress=plain",
         "-r",
         src_dir.to_str().unwrap(),
         dst_dir.to_str().unwrap(),
@@ -188,7 +208,12 @@ fn e2e_move_refuses_overwrite_without_force_succeeds_with_force_yes() {
     fs::write(&src, b"new content").unwrap();
     fs::write(&dst, b"old content").unwrap();
 
-    let (ok, _, stderr) = run_bcmr(&["move", "-t", src.to_str().unwrap(), dst.to_str().unwrap()]);
+    let (ok, _, stderr) = run_bcmr(&[
+        "move",
+        "--progress=plain",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
     assert!(
         !ok,
         "move without -f should fail when target exists: {}",
@@ -207,7 +232,7 @@ fn e2e_move_refuses_overwrite_without_force_succeeds_with_force_yes() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "move",
-        "-t",
+        "--progress=plain",
         "-f",
         "-y",
         src.to_str().unwrap(),
@@ -227,6 +252,201 @@ fn e2e_move_refuses_overwrite_without_force_succeeds_with_force_yes() {
 }
 
 #[test]
+fn e2e_move_force_refuses_same_file_without_data_loss() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("file.txt");
+    fs::write(&file, b"same file payload").unwrap();
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "move",
+        "--progress=plain",
+        "-f",
+        "-y",
+        file.to_str().unwrap(),
+        file.to_str().unwrap(),
+    ]);
+
+    assert!(!ok, "move onto itself must fail: {stderr}");
+    assert_eq!(
+        fs::read(&file).unwrap(),
+        b"same file payload",
+        "same-path refusal must preserve the file"
+    );
+}
+
+#[test]
+fn e2e_move_force_refuses_file_into_its_own_parent_without_data_loss() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("file.txt");
+    fs::write(&file, b"parent payload").unwrap();
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "move",
+        "--progress=plain",
+        "-f",
+        "-y",
+        file.to_str().unwrap(),
+        dir.path().to_str().unwrap(),
+    ]);
+
+    assert!(
+        !ok,
+        "move into its own parent must fail before overwrite: {stderr}"
+    );
+    assert_eq!(
+        fs::read(&file).unwrap(),
+        b"parent payload",
+        "parent-directory refusal must preserve the file"
+    );
+}
+
+#[test]
+fn e2e_move_force_refuses_hard_link_alias_without_data_loss() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("file.txt");
+    let alias = dir.path().join("alias.txt");
+    fs::write(&file, b"hard-link payload").unwrap();
+    if fs::hard_link(&file, &alias).is_err() {
+        return;
+    }
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "move",
+        "--progress=plain",
+        "-f",
+        "-y",
+        file.to_str().unwrap(),
+        alias.to_str().unwrap(),
+    ]);
+
+    assert!(!ok, "move onto a hard-link alias must fail: {stderr}");
+    for path in [&file, &alias] {
+        assert_eq!(
+            fs::read(path).unwrap(),
+            b"hard-link payload",
+            "hard-link refusal must preserve {}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn e2e_move_force_refuses_file_onto_symlink_alias_without_data_loss() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("file.txt");
+    let alias = dir.path().join("alias.txt");
+    fs::write(&file, b"symlink payload").unwrap();
+    if !create_file_symlink(&file, &alias) {
+        return;
+    }
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "move",
+        "--progress=plain",
+        "-f",
+        "-y",
+        file.to_str().unwrap(),
+        alias.to_str().unwrap(),
+    ]);
+
+    assert!(!ok, "move onto a symlink alias must fail: {stderr}");
+    for path in [&file, &alias] {
+        assert_eq!(
+            fs::read(path).unwrap(),
+            b"symlink payload",
+            "symlink refusal must preserve {}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn e2e_move_force_refuses_symlink_onto_its_underlying_file_without_data_loss() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("file.txt");
+    let alias = dir.path().join("alias.txt");
+    fs::write(&file, b"symlink source payload").unwrap();
+    if !create_file_symlink(&file, &alias) {
+        return;
+    }
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "move",
+        "--progress=plain",
+        "-f",
+        "-y",
+        alias.to_str().unwrap(),
+        file.to_str().unwrap(),
+    ]);
+
+    assert!(
+        !ok,
+        "moving a symlink onto its underlying file must fail: {stderr}"
+    );
+    for path in [&file, &alias] {
+        assert_eq!(
+            fs::read(path).unwrap(),
+            b"symlink source payload",
+            "symlink-source refusal must preserve {}",
+            path.display()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_move_force_rename_failure_preserves_existing_destination() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    let dst_dir = dir.path().join("dst");
+    fs::create_dir(&src_dir).unwrap();
+    fs::create_dir(&dst_dir).unwrap();
+    let src = src_dir.join("file.txt");
+    let dst = dst_dir.join("file.txt");
+    fs::write(&src, b"new payload").unwrap();
+    fs::write(&dst, b"old payload").unwrap();
+
+    let original_permissions = fs::metadata(&src_dir).unwrap().permissions();
+    let mut readonly = original_permissions.clone();
+    readonly.set_mode(0o555);
+    fs::set_permissions(&src_dir, readonly).unwrap();
+
+    if fs::File::create(src_dir.join("permission-probe")).is_ok() {
+        let _ = fs::remove_file(src_dir.join("permission-probe"));
+        fs::set_permissions(&src_dir, original_permissions).unwrap();
+        return;
+    }
+
+    let (ok, _, stderr) = run_bcmr(&[
+        "move",
+        "--progress=plain",
+        "-f",
+        "-y",
+        "-q",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
+    fs::set_permissions(&src_dir, original_permissions).unwrap();
+
+    assert!(
+        !ok,
+        "rename must fail without source-dir write permission: {stderr}"
+    );
+    assert_eq!(
+        fs::read(&dst).unwrap(),
+        b"old payload",
+        "failed forced move must preserve the existing destination"
+    );
+    assert_eq!(
+        fs::read(&src).unwrap(),
+        b"new payload",
+        "failed forced move must preserve the source"
+    );
+}
+
+#[test]
 fn e2e_move_dry_run_leaves_everything_untouched() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.txt");
@@ -239,7 +459,7 @@ fn e2e_move_dry_run_leaves_everything_untouched() {
 
     let (ok, stdout, stderr) = run_bcmr(&[
         "move",
-        "-t",
+        "--progress=plain",
         "-n",
         src.to_str().unwrap(),
         file_dst.to_str().unwrap(),
@@ -263,7 +483,7 @@ fn e2e_move_dry_run_leaves_everything_untouched() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "move",
-        "-t",
+        "--progress=plain",
         "-n",
         "-r",
         src_dir.to_str().unwrap(),
@@ -290,7 +510,12 @@ fn e2e_move_preserves_content_byte_for_byte() {
     create_random_file(&src, 8 * 1024 * 1024);
     let src_hash = checksum::calculate_hash(&src).unwrap();
 
-    let (ok, _, stderr) = run_bcmr(&["move", "-t", src.to_str().unwrap(), dst.to_str().unwrap()]);
+    let (ok, _, stderr) = run_bcmr(&[
+        "move",
+        "--progress=plain",
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    ]);
     assert!(ok, "move should succeed: {}", stderr);
     assert!(
         !src.exists(),

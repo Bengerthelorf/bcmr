@@ -1,4 +1,11 @@
-use bcmr::core::protocol::{decode_message, encode_message, ListEntry, Message, PROTOCOL_VERSION};
+use bcmr::core::{
+    compress::decode_data_block,
+    protocol::{
+        checked_transfer_total, decode_message, encode_message, read_message, ListEntry, Message,
+        MAX_CONTENT_BLOCK_SIZE, PROTOCOL_VERSION,
+    },
+};
+use tokio::io::AsyncWriteExt;
 
 fn roundtrip(msg: Message) -> Message {
     let encoded = encode_message(&msg);
@@ -7,7 +14,7 @@ fn roundtrip(msg: Message) -> Message {
 
 #[test]
 fn test_protocol_version_constant() {
-    assert_eq!(PROTOCOL_VERSION, 1);
+    assert_eq!(PROTOCOL_VERSION, 2);
 }
 
 #[test]
@@ -52,6 +59,96 @@ fn test_data_compressed_roundtrip() {
         payload: vec![0xAA; 1024],
     };
     assert_eq!(roundtrip(msg.clone()), msg);
+}
+
+#[test]
+fn data_block_rejects_hostile_declared_original_size_before_decompression() {
+    let frame = encode_message(&Message::DataCompressed {
+        algo: 1,
+        original_size: u32::MAX,
+        payload: vec![0],
+    });
+    assert!(frame.len() < 64, "the hostile frame must stay tiny");
+
+    assert!(decode_message(&frame).is_none());
+}
+
+#[test]
+fn data_block_rejects_raw_payload_larger_than_the_content_block_limit() {
+    let message = Message::Data {
+        payload: vec![0; MAX_CONTENT_BLOCK_SIZE + 1],
+    };
+
+    assert!(decode_data_block(message).is_err());
+}
+
+#[test]
+fn data_block_rejects_data_compressed_with_algo_none() {
+    let message = Message::DataCompressed {
+        algo: 0,
+        original_size: 1,
+        payload: vec![0],
+    };
+
+    assert!(decode_data_block(message).is_err());
+}
+
+#[test]
+fn codec_rejects_trailing_bytes_inside_a_data_frame() {
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&7u32.to_le_bytes());
+    frame.push(0x84);
+    frame.extend_from_slice(&1u32.to_le_bytes());
+    frame.extend_from_slice(&[0xAA, 0xBB]);
+
+    assert!(decode_message(&frame).is_none());
+}
+
+#[test]
+fn codec_rejects_bytes_after_the_declared_outer_frame() {
+    let mut frame = encode_message(&Message::Data {
+        payload: vec![0xAA],
+    });
+    frame.extend_from_slice(&[0xBB, 0xCC]);
+
+    assert!(decode_message(&frame).is_none());
+}
+
+#[tokio::test]
+async fn plain_wire_rejects_oversized_raw_data_before_reading_its_payload() {
+    let (mut writer, mut reader) = tokio::io::duplex(64);
+    let raw_len = (MAX_CONTENT_BLOCK_SIZE + 1) as u32;
+    let frame_len = 1 + 4 + raw_len;
+    writer.write_all(&frame_len.to_le_bytes()).await.unwrap();
+    writer.write_all(&[0x84]).await.unwrap();
+    writer.write_all(&raw_len.to_le_bytes()).await.unwrap();
+    writer.shutdown().await.unwrap();
+
+    let err = read_message(&mut reader).await.unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[tokio::test]
+async fn plain_wire_rejects_an_empty_declared_frame_before_reading_a_type_byte() {
+    let (mut writer, mut reader) = tokio::io::duplex(64);
+    writer.write_all(&0u32.to_le_bytes()).await.unwrap();
+    writer.shutdown().await.unwrap();
+
+    let err = read_message(&mut reader).await.unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn transfer_accounting_accepts_the_exact_declared_boundary() {
+    assert_eq!(
+        checked_transfer_total(u64::MAX - 1, 1, u64::MAX).unwrap(),
+        u64::MAX
+    );
+}
+
+#[test]
+fn transfer_accounting_rejects_overflow_without_wrapping() {
+    assert!(checked_transfer_total(u64::MAX, 1, u64::MAX).is_err());
 }
 
 #[test]
@@ -223,6 +320,7 @@ fn test_put_roundtrip() {
         path: "/remote/dest.bin".to_string(),
         size: 4_294_967_295,
         offset: 123_456,
+        overwrite: false,
     };
     assert_eq!(roundtrip(msg.clone()), msg);
 }

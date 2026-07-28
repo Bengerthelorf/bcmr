@@ -1,5 +1,5 @@
+use crate::core::atomic_file::AtomicFile;
 use crate::core::cas;
-use crate::core::cleanup::{unique_id, TempFileGuard};
 use crate::core::compress;
 use crate::core::framing::Framing;
 use crate::core::protocol::{CompressionAlgo, ListEntry, Message};
@@ -136,7 +136,7 @@ where
         if let Some(h) = hasher.as_mut() {
             h.update(&buf[..n]);
         }
-        let frame = compress::encode_block(algo, buf[..n].to_vec());
+        let frame = compress::encode_block(algo, buf[..n].to_vec())?;
         framing.write_message(out, &frame).await?;
     }
 
@@ -295,11 +295,16 @@ fn write_all_fd(fd: i32, mut buf: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+pub(super) struct PutOptions {
+    pub declared_size: u64,
+    pub offset: u64,
+    pub overwrite: bool,
+    pub sync: bool,
+}
+
 pub(super) async fn handle_put<W, R>(
     path: &str,
-    declared_size: u64,
-    offset: u64,
-    sync: bool,
+    options: PutOptions,
     out: &mut W,
     reader: &mut R,
     framing: &mut Framing,
@@ -310,6 +315,12 @@ where
 {
     use tokio::io::AsyncSeekExt;
 
+    let PutOptions {
+        declared_size,
+        offset,
+        overwrite,
+        sync,
+    } = options;
     if offset > declared_size {
         bail!(
             "put: offset {} past declared size {}",
@@ -319,15 +330,19 @@ where
     }
     ensure_parent_dir(path).await?;
 
-    // offset==0 stages to a sibling temp + rename so a mid-PUT crash can't
-    // leave a half-written file at `path`; offset>0 is a resume.
-    let (mut file, mut temp_guard) = if offset == 0 {
-        let temp_path = format!("{path}.bcmr.put.{}.tmp", unique_id());
-        let f = write_open(&temp_path, true).await?;
-        (
-            f,
-            Some(TempFileGuard::new(std::path::PathBuf::from(temp_path))),
-        )
+    // A fresh PUT is written through a handle-bound transaction. The
+    // overwrite policy is enforced both at staging time and again by the
+    // atomic commit, so a concurrent creator cannot slip between a preflight
+    // check and publication. offset>0 is a content-proved resume.
+    let (mut file, transaction) = if offset == 0 {
+        let destination = Path::new(path);
+        let transaction = if overwrite {
+            AtomicFile::new(destination)?
+        } else {
+            AtomicFile::new_no_replace(destination)?
+        };
+        let file = fs::File::from_std(transaction.try_clone_file()?);
+        (file, Some(transaction))
     } else {
         let mut f = write_open(path, false).await?;
         f.seek(std::io::SeekFrom::Start(offset)).await?;
@@ -387,23 +402,8 @@ where
             },
         };
         match m {
-            Message::Data { payload } => {
-                consume_block(
-                    &payload,
-                    &mut file,
-                    hasher.as_mut(),
-                    dedup_state.as_mut(),
-                    &mut written,
-                    declared_size,
-                )
-                .await?;
-            }
-            Message::DataCompressed {
-                algo,
-                original_size,
-                payload,
-            } => {
-                let decoded = compress::decode_block(algo, original_size, &payload)?;
+            message @ (Message::Data { .. } | Message::DataCompressed { .. }) => {
+                let decoded = compress::decode_data_block(message)?;
                 consume_block(
                     &decoded,
                     &mut file,
@@ -438,14 +438,13 @@ where
     }
 
     file.flush().await?;
-    if sync {
+    if sync && transaction.is_none() {
         file.sync_all().await?;
     }
     drop(file);
 
-    if let Some(mut g) = temp_guard.take() {
-        tokio::fs::rename(g.path(), path).await?;
-        g.disarm();
+    if let Some(transaction) = transaction {
+        transaction.commit(sync)?;
     }
 
     let hash = hasher.map(|h| h.finalize().to_hex().to_string());
@@ -480,7 +479,11 @@ async fn consume_block(
                 h.update(&cached);
             }
             file.write_all(&cached).await?;
-            *written += cached.len() as u64;
+            *written = crate::core::protocol::checked_transfer_total(
+                *written,
+                cached.len(),
+                declared_size,
+            )?;
             state.cursor += 1;
         }
         if state.cursor < state.hashes.len() && state.is_missing(state.cursor) {
@@ -495,7 +498,7 @@ async fn consume_block(
         h.update(block);
     }
     file.write_all(block).await?;
-    *written += block.len() as u64;
+    *written = crate::core::protocol::checked_transfer_total(*written, block.len(), declared_size)?;
     Ok(())
 }
 
@@ -519,22 +522,15 @@ async fn flush_remaining_cas_blocks(
             h.update(&cached);
         }
         file.write_all(&cached).await?;
-        *written += cached.len() as u64;
+        *written =
+            crate::core::protocol::checked_transfer_total(*written, cached.len(), declared_size)?;
         state.cursor += 1;
     }
     Ok(())
 }
 
 fn enforce_write_bound(written: u64, incoming: usize, declared: u64) -> Result<()> {
-    if written + incoming as u64 > declared {
-        bail!(
-            "put: client would write {} bytes past the declared size of {} \
-             (already wrote {})",
-            written + incoming as u64 - declared,
-            declared,
-            written
-        );
-    }
+    crate::core::protocol::checked_transfer_total(written, incoming, declared).map(|_| ())?;
     Ok(())
 }
 
@@ -561,32 +557,12 @@ where
             break;
         }
         match framing.read_message(reader).await? {
-            Some(Message::Data { payload }) => {
-                if written + payload.len() as u64 > length {
-                    bail!(
-                        "put_chunked: client sent {} bytes past the declared {}",
-                        written + payload.len() as u64 - length,
-                        length
-                    );
-                }
-                file.write_all(&payload).await?;
-                written += payload.len() as u64;
-            }
-            Some(Message::DataCompressed {
-                algo,
-                original_size,
-                payload,
-            }) => {
-                let decoded = compress::decode_block(algo, original_size, &payload)?;
-                if written + decoded.len() as u64 > length {
-                    bail!(
-                        "put_chunked: client sent {} bytes past the declared {}",
-                        written + decoded.len() as u64 - length,
-                        length
-                    );
-                }
+            Some(message @ (Message::Data { .. } | Message::DataCompressed { .. })) => {
+                let decoded = compress::decode_data_block(message)?;
+                let next_written =
+                    crate::core::protocol::checked_transfer_total(written, decoded.len(), length)?;
                 file.write_all(&decoded).await?;
-                written += decoded.len() as u64;
+                written = next_written;
             }
             Some(Message::Done) => break,
             Some(other) => bail!("put_chunked: unexpected message {other:?}"),
@@ -620,6 +596,19 @@ where
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
     let mut file = fs::File::open(path).await?;
+    let metadata = file.metadata().await?;
+    if !metadata.is_file() {
+        bail!("get_chunked: source is not a regular file");
+    }
+    let requested_end = offset
+        .checked_add(length)
+        .ok_or_else(|| anyhow::anyhow!("get_chunked: requested range overflows u64"))?;
+    if requested_end > metadata.len() || (length == 0 && metadata.len() != 0) {
+        bail!(
+            "get_chunked: requested range {offset}..{requested_end} does not match source size {}",
+            metadata.len()
+        );
+    }
     file.seek(std::io::SeekFrom::Start(offset)).await?;
 
     let mut remaining = length;
@@ -634,7 +623,7 @@ where
                 remaining
             );
         }
-        let frame = compress::encode_block(algo, buf[..n].to_vec());
+        let frame = compress::encode_block(algo, buf[..n].to_vec())?;
         framing.write_message(out, &frame).await?;
         remaining -= n as u64;
     }

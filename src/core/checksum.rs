@@ -1,6 +1,6 @@
 use blake3::Hasher;
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
 const BUFFER_SIZE: usize = 4 * 1024 * 1024;
@@ -10,7 +10,11 @@ pub fn bytes_to_hex(bytes: &[u8; 32]) -> String {
 }
 
 pub fn calculate_hash(path: &Path) -> io::Result<String> {
-    let mut file = File::open(path)?;
+    calculate_hash_file(File::open(path)?)
+}
+
+pub fn calculate_hash_file(mut file: File) -> io::Result<String> {
+    file.seek(SeekFrom::Start(0))?;
     let mut hasher = Hasher::new();
     let mut buffer = vec![0; BUFFER_SIZE];
 
@@ -26,7 +30,11 @@ pub fn calculate_hash(path: &Path) -> io::Result<String> {
 }
 
 pub fn calculate_partial_hash(path: &Path, limit: u64) -> io::Result<String> {
-    let file = File::open(path)?;
+    calculate_partial_hash_file(File::open(path)?, limit)
+}
+
+pub fn calculate_partial_hash_file(mut file: File, limit: u64) -> io::Result<String> {
+    file.seek(SeekFrom::Start(0))?;
     let mut reader = file.take(limit);
     let mut hasher = Hasher::new();
     let mut buffer = vec![0; BUFFER_SIZE];

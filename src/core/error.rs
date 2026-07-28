@@ -27,6 +27,9 @@ pub enum BcmrError {
     #[error("Destination '{0}' already exists. Use -f to force overwrite.")]
     TargetExists(PathBuf),
 
+    #[error("Destination '{0}' changed while the copy was in progress")]
+    DestinationChanged(PathBuf),
+
     #[error("Source '{0}' not found")]
     SourceNotFound(PathBuf),
 

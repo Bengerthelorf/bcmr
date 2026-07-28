@@ -2,6 +2,13 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 use crate::core::error::BcmrError;
 
+pub(crate) const SSH_LIVENESS_ARGS: [&str; 4] = [
+    "-o",
+    "ServerAliveInterval=15",
+    "-o",
+    "ServerAliveCountMax=20",
+];
+
 pub struct SshSpawn {
     pub child: Child,
     pub stdin: ChildStdin,
@@ -9,16 +16,23 @@ pub struct SshSpawn {
 }
 
 pub async fn spawn_remote(ssh_target: &str) -> Result<SshSpawn, BcmrError> {
-    spawn(&[
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=10",
-        ssh_target,
-        "bcmr",
-        "serve",
-    ])
-    .await
+    spawn(&remote_args(ssh_target)).await
+}
+
+fn remote_args(ssh_target: &str) -> Vec<String> {
+    let mut args = vec![
+        "-o".into(),
+        "BatchMode=yes".into(),
+        "-o".into(),
+        "ConnectTimeout=10".into(),
+        "-o".into(),
+        "ControlMaster=no".into(),
+        "-o".into(),
+        "ControlPath=none".into(),
+    ];
+    args.extend(SSH_LIVENESS_ARGS.map(str::to_owned));
+    args.extend([ssh_target.into(), "bcmr".into(), "serve".into()]);
+    args
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -34,7 +48,7 @@ pub async fn spawn_local(bcmr_path: &std::path::Path) -> Result<SshSpawn, BcmrEr
     take_pipes(child)
 }
 
-async fn spawn(args: &[&str]) -> Result<SshSpawn, BcmrError> {
+async fn spawn(args: &[String]) -> Result<SshSpawn, BcmrError> {
     let stderr_dest = if std::env::var("BCMR_DEBUG_SSH_STDERR").is_ok_and(|v| v == "1") {
         std::process::Stdio::inherit()
     } else {
@@ -64,4 +78,35 @@ fn take_pipes(mut child: Child) -> Result<SshSpawn, BcmrError> {
         stdin,
         stdout,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_serve_ssh_has_bounded_liveness_detection() {
+        let args = remote_args("host");
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-o", "ControlMaster=no"]),
+            "serve pool members must use independent TCP connections"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-o", "ControlPath=none"]),
+            "serve pool members must not join a configured multiplex socket"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-o", "ServerAliveInterval=15"]),
+            "serve transport must probe a silent SSH connection"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-o", "ServerAliveCountMax=20"]),
+            "serve transport must eventually close an unresponsive SSH connection"
+        );
+    }
 }

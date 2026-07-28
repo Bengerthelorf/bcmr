@@ -43,6 +43,7 @@ where
     F: Fn(u64) + Send + Sync + Clone + 'static,
 {
     let test_mode = cli.get_test_mode();
+    CopyFileOptions::from_cli(cli, test_mode.clone()).validate_reflink_compatibility()?;
     let callback = ProgressCallback {
         callback: progress_callback,
         on_new_file: Arc::new(on_new_file),
@@ -63,9 +64,12 @@ where
     let verbose = cli.is_verbose();
 
     for entry in &plan.entries {
-        if let PlanEntry::Symlink { dst, target, .. } = entry {
-            check_symlink_overwrite(dst, cli)?;
-            create_symlink_replacing(dst, target).await?;
+        if let PlanEntry::Symlink {
+            dst, target, kind, ..
+        } = entry
+        {
+            check_symlink_overwrite(dst, *kind, cli)?;
+            create_symlink_replacing(dst, target, *kind, cli.is_force(), &test_mode).await?;
             if verbose {
                 eprintln!("'{}' -> '{}' (symlink)", target.display(), dst.display());
             }
@@ -123,6 +127,7 @@ where
     F: Fn(u64) + Send + Sync + Clone + 'static,
 {
     let test_mode = cli.get_test_mode();
+    CopyFileOptions::from_cli(cli, test_mode.clone()).validate_reflink_compatibility()?;
     let callback = ProgressCallback {
         callback: progress_callback,
         on_new_file: Arc::new(on_new_file),
@@ -155,10 +160,6 @@ where
                 Some(&dst_path.to_string_lossy()),
             );
             return Ok(());
-        }
-
-        if dst_path.exists() && cli.is_force() && !is_normal_write(cli) {
-            fs::remove_file(&dst_path).await?;
         }
 
         copy_file(
@@ -240,10 +241,6 @@ where
                     Some(&dst_path.to_string_lossy()),
                 );
             } else {
-                if dst_path.exists() && cli.is_force() && !is_normal_write(cli) {
-                    fs::remove_file(&dst_path).await?;
-                }
-
                 copy_file(
                     &src_path,
                     &dst_path,
@@ -303,6 +300,30 @@ pub(crate) async fn preserve_attributes(
     super::file_copy::copy_xattrs(src, dst)?;
 
     Ok(())
+}
+
+pub(crate) async fn preserve_staging_attributes(
+    src: &Path,
+    dst: &Path,
+) -> std::result::Result<Option<bool>, BcmrError> {
+    #[cfg(not(windows))]
+    {
+        preserve_attributes(src, dst).await?;
+        Ok(None)
+    }
+
+    #[cfg(windows)]
+    {
+        // A preserved READONLY bit makes a private stage undeletable on
+        // Windows. Preserve fallible timestamps while it is still writable;
+        // AtomicStaging applies READONLY only after precommit validation and
+        // immediately before MoveFileExW.
+        let src_metadata = src.metadata()?;
+        let atime = filetime::FileTime::from_last_access_time(&src_metadata);
+        let mtime = filetime::FileTime::from_last_modification_time(&src_metadata);
+        filetime::set_file_times(dst, atime, mtime)?;
+        Ok(Some(src_metadata.permissions().readonly()))
+    }
 }
 
 pub(crate) async fn verify_copy(

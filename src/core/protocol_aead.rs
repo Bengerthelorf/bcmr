@@ -10,7 +10,7 @@ use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::core::error::BcmrError;
-use crate::core::protocol::{decode_message, encode_message, Message};
+use crate::core::protocol::{decode_message, encode_message, validate_data_message, Message};
 
 const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 const TAG_LEN: usize = 16;
@@ -41,6 +41,7 @@ pub fn encrypt_message(
     dir: Direction,
     counter: &mut u64,
 ) -> Result<Vec<u8>, BcmrError> {
+    validate_data_message(msg).map_err(|e| BcmrError::InvalidInput(e.to_string()))?;
     let plaintext = encode_message(msg);
     if plaintext.len() > MAX_FRAME_LEN {
         return Err(BcmrError::InvalidInput(format!(
@@ -242,6 +243,45 @@ mod tests {
         let err =
             decrypt_message(&mut in_out, &key, Direction::ClientToServer, &mut recv).unwrap_err();
         assert!(matches!(err, BcmrError::CryptoFailure(_)));
+    }
+
+    #[test]
+    fn encrypt_rejects_raw_content_larger_than_the_protocol_block_limit() {
+        let key = test_key();
+        let mut send = 0;
+        let err = encrypt_message(
+            &Message::Data {
+                payload: vec![0; 4 * 1024 * 1024 + 1],
+            },
+            &key,
+            Direction::ClientToServer,
+            &mut send,
+        )
+        .unwrap_err();
+        assert!(matches!(err, BcmrError::InvalidInput(_)));
+        assert_eq!(send, 0);
+    }
+
+    #[test]
+    fn authenticated_data_frame_with_trailing_bytes_is_rejected() {
+        let key = test_key();
+        let mut plaintext = Vec::new();
+        plaintext.extend_from_slice(&7u32.to_le_bytes());
+        plaintext.push(0x84);
+        plaintext.extend_from_slice(&1u32.to_le_bytes());
+        plaintext.extend_from_slice(&[0xAA, 0xBB]);
+        key.seal_in_place_append_tag(
+            make_nonce(Direction::ClientToServer, 0),
+            Aad::empty(),
+            &mut plaintext,
+        )
+        .unwrap();
+
+        let mut recv = 0;
+        let err = decrypt_message(&mut plaintext, &key, Direction::ClientToServer, &mut recv)
+            .unwrap_err();
+        assert!(matches!(err, BcmrError::InvalidInput(_)));
+        assert_eq!(recv, 1);
     }
 
     #[test]

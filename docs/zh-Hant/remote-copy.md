@@ -38,7 +38,10 @@ bcmr copy -r -P 8 ./large_dataset/ user@host:/data/
 bcmr copy -P 3 user@host:/data/a.bin user@host:/data/b.bin ./local/
 ```
 
-預設並行數透過 `[scp] parallel_transfers` 設定（預設：4）。使用 `-P 1` 或小量傳輸時按順序執行。
+預設並行數透過 `[scp] parallel_transfers` 設定（預設：4）。
+Serve 模式的目錄批次最多使用這麼多條互相獨立的 SSH 工作階段。
+即使 `-P` 更大，單檔上傳也只建立一條工作階段，因為正式路徑不會
+為了分片而犧牲可見目標檔案的當機安全性。
 
 TUI 和純文字模式均會顯示每個 worker 的狀態：
 
@@ -79,9 +82,12 @@ BCMR 有**兩套獨立**的壓縮層，請區分：
 
 ## Serve 協定（加速傳輸）
 
-當遠端也安裝了 bcmr 時，傳輸自動使用 **bcmr serve 協定** — 透過單一 SSH 連線的二進位幀協定。消除逐檔 SSH 程序開銷，並支援伺服端雜湊計算。
+當遠端也安裝了匹配版本的 bcmr 時，傳輸自動使用
+**bcmr serve 協定** — 由持久 SSH 工作階段或有界工作階段池承載的
+二進位幀協定。它消除逐檔 SSH 程序開銷，並支援伺服端雜湊計算。
 
-遠端沒有 bcmr 時自動回退到傳統 SCP。
+目前線路協定版本為 v2，並刻意不接受 v1 的 PUT 語意。遠端沒有
+bcmr 或協定版本不匹配時，bcmr 會顯示回退警告並使用傳統 SCP。
 
 ### 在遠端安裝 bcmr
 
@@ -111,6 +117,26 @@ bcmr deploy user@host --path /usr/local/bin/bcmr
 # 上傳並校驗完整性
 bcmr copy -V local_file.txt user@host:/backup/
 ```
+
+### 原子上傳與覆蓋策略
+
+Serve PUT 預設不覆蓋已存在的目標。只有明確使用
+`--force --yes`，用戶端才會在 v2 協定中攜帶覆蓋決定：
+
+```bash
+# 遠端已有 report.pdf 時失敗，並保留舊檔案
+bcmr copy report.pdf user@host:/backup/
+
+# 校驗並同步落盤後，原子取代舊檔案
+bcmr copy --force --yes --verify --sync report.pdf user@host:/backup/
+```
+
+伺服端先寫入私有、與控制代碼綁定的交易，校驗長度與雜湊後才發布。
+中斷的強制覆蓋會保留舊的最終路徑；流水線目錄上傳對每個檔案都
+維持同樣的屬性。
+
+正式版暫時停用單檔跨連線分片 PUT，因為獨立連線還無法安全加入
+同一個伺服端交易。`-P N` 仍會並行處理遞迴批次中的不同檔案。
 
 ### 內容定址去重（`CAP_DEDUP`）
 
@@ -149,13 +175,17 @@ bcmr copy --fast -V user@host:/big.bin ./local.bin
 - 使用現有的 SSH 設定（`~/.ssh/config`、金鑰等）
 - 在開始傳輸前驗證 SSH 連線
 - **Serve 模式**：透過 SSH 啟動遠端 `bcmr serve`，透過 stdin/stdout 的二進位協定通訊
-- **傳統模式**：透過 ControlMaster 複用 SSH 連線，並行 worker 使用獨立 TCP 連線
+- **傳統模式**：預設透過 ControlMaster 複用 SSH 連線；設定 `BCMR_SSH_NO_MULTIPLEX=1` 可停用
+- **Serve 工作階段池**：明確停用 ControlMaster，使並行成員使用互相獨立的 TCP/加密串流
+- 每 15 秒探測無流量的 SSH 工作階段，連續 20 次無回應後關閉；持續有流量的慢速連線不會被誤判
+- 同步下載會先一次解析最深的既存目錄前綴；指向有效目錄的 symlink home/儲存前綴可用，斷裂 symlink 會在建立任何含糊目標前報錯
 - 透過 SSH 串流傳輸資料並追蹤進度
 - 支援上傳和下載兩個方向
 
 :::callout[限制]{kind="warn"}
 - 無法直接在兩個遠端主機之間複製 — 請使用本機作為中轉
 - Serve 快路徑的斷點續傳（`-C`）：單檔案上傳已原生支援；遞迴目錄上傳和所有下載在指定 `--resume/--strict/--append` 時自動回退到傳統模式
+- 在共享可寫目標目錄中，中斷的上傳可能留下空的私有 `.bcmr.receive.*` 復原目錄；BCMR 不會在可競爭的命名空間中執行不安全的按名稱清理
 :::
 
 ## 路徑偵測

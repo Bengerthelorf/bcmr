@@ -1,11 +1,13 @@
 use crate::cli::Commands;
+use crate::core::checksum;
 use crate::core::error::BcmrError;
+use crate::core::io as durable_io;
+use crate::core::session::Session;
 use crate::core::traversal;
 use crate::ui::display::ActionType;
 
+use super::validate_direct_destination;
 use std::path::{Path, PathBuf};
-use tokio::fs;
-
 pub struct FileToOverwrite {
     pub path: PathBuf,
     pub is_dir: bool,
@@ -138,9 +140,6 @@ pub(super) async fn check_overwrite(
     if !cli.is_force() && is_normal_write(cli) {
         return Err(BcmrError::TargetExists(dst.to_path_buf()));
     }
-    if cli.is_force() && !is_normal_write(cli) {
-        fs::remove_file(dst).await?;
-    }
     Ok(())
 }
 
@@ -149,36 +148,91 @@ pub(super) fn determine_dry_run_action(
     dst: &Path,
     cli: &Commands,
 ) -> std::result::Result<ActionType, BcmrError> {
-    if !dst.exists() {
-        return Ok(ActionType::Add);
+    let entry_metadata = match dst.symlink_metadata() {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ActionType::Add);
+        }
+        Err(error) => return Err(BcmrError::Io(error)),
+    };
+    if !is_normal_write(cli) {
+        let force_fresh = validate_direct_destination(dst, Some(&entry_metadata), cli.is_force())?;
+        if force_fresh {
+            return Ok(ActionType::Overwrite);
+        }
+    } else if !entry_metadata.file_type().is_file() {
+        return Ok(ActionType::Overwrite);
     }
     let src_meta = src.metadata()?;
     let dst_meta = dst.metadata()?;
     let src_len = src_meta.len();
     let dst_len = dst_meta.len();
 
-    if cli.is_strict() || cli.is_append() {
+    if cli.is_strict() {
         if dst_len == src_len {
-            return Ok(ActionType::Skip);
+            return Ok(if files_have_same_hash(src, dst)? {
+                ActionType::Skip
+            } else {
+                ActionType::Overwrite
+            });
         } else if dst_len < src_len {
-            return Ok(ActionType::Append);
+            let dst_hash = checksum::calculate_hash(dst)?;
+            let src_prefix_hash = checksum::calculate_partial_hash(src, dst_len)?;
+            return Ok(if dst_hash == src_prefix_hash {
+                ActionType::Append
+            } else {
+                ActionType::Overwrite
+            });
         }
         return Ok(ActionType::Overwrite);
     }
 
-    if cli.is_resume() {
-        let src_mtime = src_meta.modified()?;
-        let dst_mtime = dst_meta.modified()?;
-        if src_mtime != dst_mtime {
-            return Ok(ActionType::Overwrite);
-        }
+    if cli.is_append() {
         if dst_len == src_len {
             return Ok(ActionType::Skip);
         } else if dst_len < src_len {
             return Ok(ActionType::Append);
+        }
+        return Err(BcmrError::InvalidInput(format!(
+            "append destination is {dst_len} bytes, larger than the {src_len}-byte source"
+        )));
+    }
+
+    if cli.is_resume() {
+        let src_mtime = src_meta
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let src_inode = durable_io::get_inode(src).unwrap_or(0);
+        if let Some(session) = Session::try_load_read_only(src, dst)?.filter(|session| {
+            session.source_matches(src_len, src_mtime, src_inode)
+                && session.has_valid_resume_structure()
+        }) {
+            let verified = session.find_verified_resume_offset(src, dst)?;
+            if verified == src_len && dst_len == src_len {
+                return Ok(ActionType::Skip);
+            }
+            return Ok(if verified > 0 {
+                if dst_len > verified {
+                    ActionType::Overwrite
+                } else {
+                    ActionType::Append
+                }
+            } else {
+                ActionType::Overwrite
+            });
+        }
+
+        if dst_len == src_len && files_have_same_hash(src, dst)? {
+            return Ok(ActionType::Skip);
         }
         return Ok(ActionType::Overwrite);
     }
 
     Ok(ActionType::Overwrite)
+}
+
+fn files_have_same_hash(src: &Path, dst: &Path) -> Result<bool, BcmrError> {
+    Ok(checksum::calculate_hash(src)? == checksum::calculate_hash(dst)?)
 }

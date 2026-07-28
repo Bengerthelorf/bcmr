@@ -1,19 +1,35 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 
-pub fn cleanup_partial_files() {
-    global().drain_and_remove();
+fn remove_temp_file(path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        if !metadata.file_type().is_symlink() {
+            let mut permissions = metadata.permissions();
+            if permissions.readonly() {
+                permissions.set_readonly(false);
+                let _ = std::fs::set_permissions(path, permissions);
+            }
+        }
+
+        // DeleteFileW refuses directory symlinks. The raw directory attribute
+        // describes the link entry itself and lets cleanup choose RemoveDirectoryW
+        // without following the link target.
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+        if metadata.file_type().is_symlink()
+            && metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0
+        {
+            return std::fs::remove_dir(path);
+        }
+    }
+    std::fs::remove_file(path)
 }
 
-// pid + atomic counter so concurrent writers (CAS, serve PUT staging)
-// can't collide on the same temp path.
-pub fn unique_id() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{}.{}", std::process::id(), n)
+pub fn cleanup_partial_files() {
+    global().drain_and_remove();
 }
 
 pub struct TempFileGuard {
@@ -33,10 +49,6 @@ impl TempFileGuard {
         }
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     pub fn disarm(&mut self) {
         self.active = false;
         self.registry.unregister(&self.path);
@@ -46,7 +58,7 @@ impl TempFileGuard {
 impl Drop for TempFileGuard {
     fn drop(&mut self) {
         if self.active {
-            let _ = std::fs::remove_file(&self.path);
+            let _ = remove_temp_file(&self.path);
             self.registry.unregister(&self.path);
         }
     }
@@ -74,7 +86,7 @@ impl CleanupRegistry {
     pub fn drain_and_remove(&self) {
         let drained: Vec<PathBuf> = self.paths.lock().drain(..).collect();
         for path in drained {
-            let _ = std::fs::remove_file(&path);
+            let _ = remove_temp_file(&path);
         }
     }
 
@@ -137,5 +149,23 @@ mod tests {
         let r = CleanupRegistry::new();
         r.register(Path::new("/tmp/this-does-not-exist-xyz"));
         r.drain_and_remove();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn drain_removes_readonly_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("readonly-stage");
+        std::fs::write(&path, b"private stage").unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let registry = CleanupRegistry::new();
+        registry.register(&path);
+        registry.drain_and_remove();
+
+        assert!(!path.exists());
+        assert!(registry.is_empty());
     }
 }

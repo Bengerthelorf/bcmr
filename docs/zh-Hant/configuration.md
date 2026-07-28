@@ -11,7 +11,7 @@ BCMR 從 `~/.config/bcmr/config.toml`（或 `config.yaml`）讀取設定。所�
 
 ```toml
 [progress]
-style = "fancy"          # "fancy"（預設）或 "plain"（與 --tui 參數相同）
+style = "auto"           # "auto"（預設）、"tui"、"inline"、"plain" 或 "off"
 
 [progress.theme]
 bar_gradient = ["#CABBE9", "#7E6EAC"]   # 進度條的十六進位漸變色
@@ -45,8 +45,13 @@ compression = "auto"     # "auto"（預設）、"force" 或 "off"
 
 | 值 | 說明 |
 |----|------|
-| `"fancy"` | 帶漸變進度條、ETA、速度和逐檔案進度條的 TUI 介面（預設） |
-| `"plain"` | 3 行文字輸出，無邊框繪製 |
+| `"auto"` | 依終端能力選擇 TUI、無色 inline 或管道安全的 plain（預設） |
+| `"tui"` | 帶漸變進度條、ETA、速度和逐檔案狀態的 TUI |
+| `"inline"` | 無顏色、即時更新的 3 行顯示 |
+| `"plain"` | 不使用游標控制、適合日誌的最終摘要 |
+| `"off"` | 不顯示進度 |
+
+命令列可用 `--progress=模式` 覆寫；`-q` / `--quiet` 仍是關閉進度的快捷方式。
 
 ### `progress.theme`
 

@@ -36,9 +36,13 @@ pub fn print_dry_run(action: ActionType, path: &str, details: Option<&str>) {
         ActionType::Skip => Color::DarkGrey,
     };
 
-    print!("{}", SetForegroundColor(color));
-    print!("{:<10} ", action);
-    print!("{}", ResetColor);
+    if crate::ui::progress::color_enabled_for_stdout() {
+        print!("{}", SetForegroundColor(color));
+        print!("{:<10} ", action);
+        print!("{}", ResetColor);
+    } else {
+        print!("{:<10} ", action);
+    }
 
     print!("{}", path);
 

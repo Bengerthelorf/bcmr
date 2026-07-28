@@ -24,6 +24,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Test installer integrity and atomic install
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash tests/install_script_test.sh
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -185,7 +190,7 @@ jobs:
           rm -f /tmp/bcmr-fanout/a.txt /tmp/bcmr-fanout/b.txt /tmp/bcmr-fanout/c.txt
 
           # All three dests get the file.
-          cargo run --quiet -- copy --plain /tmp/bcmr-fanout/src.txt \
+          cargo run --quiet -- copy --progress=plain /tmp/bcmr-fanout/src.txt \
             --to /tmp/bcmr-fanout/a.txt \
             --to /tmp/bcmr-fanout/b.txt \
             --to /tmp/bcmr-fanout/c.txt
@@ -196,7 +201,7 @@ jobs:
 
           # One dest fails, others succeed; exit code reflects failures.
           rm -f /tmp/bcmr-fanout/{a,b}.txt
-          if cargo run --quiet -- copy --plain /tmp/bcmr-fanout/src.txt \
+          if cargo run --quiet -- copy --progress=plain /tmp/bcmr-fanout/src.txt \
               --to /tmp/bcmr-fanout/a.txt \
               --to /nonexistent/dir/x.txt \
               --to /tmp/bcmr-fanout/b.txt 2>/dev/null; then
@@ -207,7 +212,7 @@ jobs:
           test -s /tmp/bcmr-fanout/b.txt || { echo "FAIL: b.txt should still copy"; exit 1; }
 
           # Single positional with no --to and no dest must error, not silently no-op.
-          if cargo run --quiet -- copy --plain /tmp/bcmr-fanout/src.txt 2>/dev/null; then
+          if cargo run --quiet -- copy --progress=plain /tmp/bcmr-fanout/src.txt 2>/dev/null; then
             echo "FAIL: copy with single positional and no --to should error"; exit 1;
           fi
 
@@ -222,7 +227,7 @@ jobs:
           # move --to fans out and removes sources only when all targets succeed.
           echo "move-content" > /tmp/bcmr-fanout/mv-src.txt
           rm -f /tmp/bcmr-fanout/m{1,2}.txt
-          cargo run --quiet -- move --plain /tmp/bcmr-fanout/mv-src.txt \
+          cargo run --quiet -- move --progress=plain /tmp/bcmr-fanout/mv-src.txt \
             --to /tmp/bcmr-fanout/m1.txt --to /tmp/bcmr-fanout/m2.txt
           test -s /tmp/bcmr-fanout/m1.txt && test -s /tmp/bcmr-fanout/m2.txt \
             || { echo "FAIL: move fan-out targets missing"; exit 1; }
@@ -231,7 +236,7 @@ jobs:
 
           # move --to with one failing target preserves the source.
           echo "preserve-content" > /tmp/bcmr-fanout/mv2-src.txt
-          if cargo run --quiet -- move --plain /tmp/bcmr-fanout/mv2-src.txt \
+          if cargo run --quiet -- move --progress=plain /tmp/bcmr-fanout/mv2-src.txt \
               --to /tmp/bcmr-fanout/keep1.txt \
               --to /nonexistent/dir/x.txt 2>/dev/null; then
             echo "FAIL: move fan-out should fail when a target fails"; exit 1;
@@ -247,14 +252,14 @@ jobs:
         run: |
           echo "verify-test-content" > /tmp/bcmr-test-src/verify.txt
           # The Done line should advertise the verify pass.
-          out=$(cargo run --quiet -- copy --plain --verify /tmp/bcmr-test-src/verify.txt /tmp/bcmr-test-dst/ 2>&1)
+          out=$(cargo run --quiet -- copy --progress=plain --verify /tmp/bcmr-test-src/verify.txt /tmp/bcmr-test-dst/ 2>&1)
           echo "$out"
           echo "$out" | grep -q "verified" || { echo "FAIL: expected 'verified' in Done line under -V"; exit 1; }
           diff /tmp/bcmr-test-src/verify.txt /tmp/bcmr-test-dst/verify.txt
 
           # And without -V, no 'verified' suffix.
           rm /tmp/bcmr-test-dst/verify.txt
-          out2=$(cargo run --quiet -- copy --plain /tmp/bcmr-test-src/verify.txt /tmp/bcmr-test-dst/ 2>&1)
+          out2=$(cargo run --quiet -- copy --progress=plain /tmp/bcmr-test-src/verify.txt /tmp/bcmr-test-dst/ 2>&1)
           if echo "$out2" | grep -q "verified"; then
             echo "FAIL: 'verified' should not appear without -V"
             exit 1
@@ -294,11 +299,11 @@ jobs:
           echo "bookmark-test" > "$tmp/src.txt"
 
           # Bare alias resolves to the dest dir.
-          cargo run --quiet -- --config "$tmp/cfg.toml" copy --plain "$tmp/src.txt" @local
+          cargo run --quiet -- --config "$tmp/cfg.toml" copy --progress=plain "$tmp/src.txt" @local
           test -f "$tmp/dst/src.txt" || { echo "FAIL: @local should resolve to dst dir"; exit 1; }
 
           # Alias with a relative suffix.
-          cargo run --quiet -- --config "$tmp/cfg.toml" copy --plain "$tmp/src.txt" @local/named.txt
+          cargo run --quiet -- --config "$tmp/cfg.toml" copy --progress=plain "$tmp/src.txt" @local/named.txt
           test -f "$tmp/dst/named.txt" || { echo "FAIL: @local/named.txt should resolve"; exit 1; }
           diff "$tmp/src.txt" "$tmp/dst/named.txt"
 
@@ -306,12 +311,12 @@ jobs:
           # try to copy a file literally named '@locl'. Levenshtein distance
           # between the typo and 'local' is 1, well within the suggestion
           # threshold.
-          err=$(cargo run --quiet -- --config "$tmp/cfg.toml" copy --plain "$tmp/src.txt" @locl 2>&1 || true)
+          err=$(cargo run --quiet -- --config "$tmp/cfg.toml" copy --progress=plain "$tmp/src.txt" @locl 2>&1 || true)
           echo "$err" | grep -q "unknown path alias '@locl'" || { echo "FAIL: missing unknown-alias error"; exit 1; }
           echo "$err" | grep -q "did you mean '@local'" || { echo "FAIL: missing did-you-mean"; exit 1; }
 
           # Invalid alias name errors with the regex hint.
-          err2=$(cargo run --quiet -- --config "$tmp/cfg.toml" copy --plain "$tmp/src.txt" '@bad!' 2>&1 || true)
+          err2=$(cargo run --quiet -- --config "$tmp/cfg.toml" copy --progress=plain "$tmp/src.txt" '@bad!' 2>&1 || true)
           echo "$err2" | grep -q "invalid alias name '@bad!'" || { echo "FAIL: missing invalid-name error"; exit 1; }
 
           rm -rf "$tmp"
@@ -329,21 +334,21 @@ jobs:
           echo "profile-test" > "$tmp/src.txt"
 
           # Without profile: no 'verified' suffix.
-          out_no=$(cargo run --quiet -- --config "$tmp/cfg.toml" copy --plain "$tmp/src.txt" "$tmp/no.txt" 2>&1)
+          out_no=$(cargo run --quiet -- --config "$tmp/cfg.toml" copy --progress=plain "$tmp/src.txt" "$tmp/no.txt" 2>&1)
           if echo "$out_no" | grep -q "verified"; then
             echo "FAIL: 'verified' should not appear without profile"; exit 1;
           fi
 
           # --profile: 'verified' appears (profile injects -V).
-          out_p=$(cargo run --quiet -- --config "$tmp/cfg.toml" --profile verify copy --plain "$tmp/src.txt" "$tmp/p.txt" 2>&1)
+          out_p=$(cargo run --quiet -- --config "$tmp/cfg.toml" --profile verify copy --progress=plain "$tmp/src.txt" "$tmp/p.txt" 2>&1)
           echo "$out_p" | grep -q "verified" || { echo "FAIL: --profile verify should inject -V"; exit 1; }
 
           # BCMR_PROFILE env: same.
-          out_e=$(BCMR_PROFILE=verify cargo run --quiet -- --config "$tmp/cfg.toml" copy --plain "$tmp/src.txt" "$tmp/e.txt" 2>&1)
+          out_e=$(BCMR_PROFILE=verify cargo run --quiet -- --config "$tmp/cfg.toml" copy --progress=plain "$tmp/src.txt" "$tmp/e.txt" 2>&1)
           echo "$out_e" | grep -q "verified" || { echo "FAIL: BCMR_PROFILE should inject -V"; exit 1; }
 
           # Unknown profile: errors loud (exit non-zero) with a "known: ..." hint.
-          if cargo run --quiet -- --config "$tmp/cfg.toml" --profile missing copy --plain "$tmp/src.txt" "$tmp/u.txt" 2>"$tmp/u.err"; then
+          if cargo run --quiet -- --config "$tmp/cfg.toml" --profile missing copy --progress=plain "$tmp/src.txt" "$tmp/u.txt" 2>"$tmp/u.err"; then
             echo "FAIL: unknown profile must error, not silently no-op"; exit 1;
           fi
           grep -q "unknown profile 'missing'" "$tmp/u.err" || { echo "FAIL: stderr missing unknown-profile diagnostic"; cat "$tmp/u.err"; exit 1; }
@@ -435,7 +440,7 @@ jobs:
           rm -rf "$root/ok"
           mkdir -p "$root/ok"
           echo ok > "$root/ok/f.txt"
-          desc=$(cargo run --quiet -- remove -rfy --json "$root/ok")
+          desc=$(cargo run --quiet -- remove -rfy --json --background "$root/ok")
           jid=$(echo "$desc" | python3 -c 'import json,sys;print(json.loads(sys.stdin.read())["job_id"])')
           log=$(echo "$desc" | python3 -c 'import json,sys;print(json.loads(sys.stdin.read())["log"])')
           for _ in $(seq 1 60); do
@@ -448,7 +453,7 @@ jobs:
           # --- error path: non-recursive remove of a non-empty dir ---
           # Must terminate the log with a status:"error" result and
           # status must report "failed".
-          desc=$(cargo run --quiet -- remove --json "$root/sub" 2>&1 | head -1)
+          desc=$(cargo run --quiet -- remove --json --background --yes "$root/sub" 2>&1 | head -1)
           jid=$(echo "$desc" | python3 -c 'import json,sys;print(json.loads(sys.stdin.read())["job_id"])')
           log=$(echo "$desc" | python3 -c 'import json,sys;print(json.loads(sys.stdin.read())["log"])')
           for _ in $(seq 1 60); do
@@ -465,11 +470,11 @@ jobs:
 
           echo "Error event + state machine tests passed"
 
-      - name: Test --json background mode (remove)
+      - name: Test explicit --background JSON mode (remove)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          # Regression test for: --json bg mode writing nothing to the log
+          # Regression test for: JSON background mode writing nothing to the log
           # when check_removes took a long time. The child must emit a
           # scanning heartbeat before the scan completes, and the log must
           # contain a terminal "result" line after the job finishes.
@@ -496,7 +501,7 @@ jobs:
           targets=""
           for i in $(seq 1 26); do targets="$targets $root/dir$i"; done
 
-          desc=$(cargo run --quiet -- remove -rfy --json $targets)
+          desc=$(cargo run --quiet -- remove -rfy --json --background $targets)
           echo "descriptor: $desc"
 
           job_id=$(echo "$desc" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["job_id"])')

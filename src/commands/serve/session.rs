@@ -9,7 +9,7 @@ use tokio::io::AsyncWriteExt;
 
 use super::handlers::{
     handle_get, handle_get_chunked, handle_hash, handle_list, handle_mkdir, handle_put,
-    handle_put_chunked, handle_resume, handle_stat, handle_truncate,
+    handle_put_chunked, handle_resume, handle_stat, handle_truncate, PutOptions,
 };
 use super::rendezvous::{handle_open_direct_channel, RendezvousTasks, MAX_RENDEZVOUS_PER_SESSION};
 use super::{validate_path, SERVER_CAPS};
@@ -172,13 +172,21 @@ where
                 Ok(p) => handle_hash(p.to_str().unwrap_or(&path), offset, limit).await,
                 Err(e) => Err(e),
             },
-            Message::Put { path, size, offset } => match validate_path(&path, root) {
+            Message::Put {
+                path,
+                size,
+                offset,
+                overwrite,
+            } => match validate_path(&path, root) {
                 Ok(p) => {
                     handle_put(
                         p.to_str().unwrap_or(&path),
-                        size,
-                        offset,
-                        sync,
+                        PutOptions {
+                            declared_size: size,
+                            offset,
+                            overwrite,
+                            sync,
+                        },
                         writer,
                         reader,
                         &mut framing,

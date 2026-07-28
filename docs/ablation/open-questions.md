@@ -4,10 +4,10 @@ section: internals
 order: 7
 ---
 
-These are investigations that surfaced during the v0.5.7 / v0.5.8
-work but were intentionally deferred. Each needs design before
-shipping; the notes here record the shape we have in mind so the
-follow-up doesn't start from scratch.
+These are open investigations plus resolved historical notes that
+surfaced during and after the v0.5.7 / v0.5.8 work. Open entries
+need design before shipping; the notes record the shape we have in
+mind so follow-up work does not start from scratch.
 
 ## Zero-Copy Serve GET via `splice(2)`
 
@@ -53,22 +53,13 @@ in v0.5.7's open list (10x slower than cp) was actually the
 spawn_blocking-per-chunk overhead, which Experiment 13 closed
 without io_uring.
 
-## CAS LRU / Cap
+## Resolved: CAS LRU / Cap
 
-The dedup CAS at `~/.local/share/bcmr/cas` grows monotonically.
-Cleanest design is an LRU with a configurable byte cap (default
-~1 GiB), garbage-collected on the next dedup-enabled PUT.
-
-**Layout sketch**:
-- Sidecar `index` file mapping `hash -> (size, last_access_unix)`.
-- Before each PUT that uses dedup, sum the index sizes. If over
-  cap, drop oldest entries until under.
-- `last_access_unix` updated whenever a block is read for a CAS hit.
-
-**Edge case**: concurrent PUTs on the same machine. Could share an
-advisory lock on the index, or just accept eventual consistency
-(the worst that happens is a recently-evicted block gets re-fetched
-from the wire on the next request).
+The CAS now has a configurable byte cap and LRU-by-mtime eviction.
+Reads and writes touch the block, eviction is concurrency-tolerant,
+and integration tests prove the store stays at or below the cap
+under repeated PUT load. See
+[Wire Experiment 15](/ablation/wire-protocol#experiment-15-cas-lru-eviction-under-load).
 
 ## Pipelined Hashing for the Streaming-Copy Hot Path
 
@@ -89,6 +80,21 @@ the hash entirely when it's not needed" was the better lever
 The leftover gap to `cp` on the streaming path comes from per-block
 hash, per-checkpoint `posix_fadvise`, and tokio I/O scheduling
 overhead --- those are separate experiments.
+
+## Adaptive Compression and Encode/Network Overlap
+
+`--compress auto` still negotiates Zstd-3 whenever both peers have
+it. [Wire Experiment 23](/ablation/wire-protocol#experiment-23-high-bandwidth-compression-crossovers)
+shows why that remains a good slow-WAN default and why it can become
+a CPU bottleneck on multi-gigabit paths.
+
+Do not replace it with a static bandwidth guess. The implementation
+needs a bounded multi-position sample, sender/receiver codec
+calibration, EWMA link goodput and hysteresis. The current send loop
+also serializes encoding and network writes; a two-stage bounded
+pipeline should be ablated with the adaptive chooser because overlap
+changes every crossover. The memory budget must be negotiated before
+double-buffering across many parallel sessions.
 
 ## Recursive Tree Dedup
 
@@ -190,77 +196,46 @@ Single-file isn't the most common workload for bcmr serve
 so this is parked behind any user complaint that actually
 identifies single-file as their bottleneck.
 
-## Silent Fallback When Path Escapes Server Root
+## Resolved: Visible Fallback When Path Escapes Server Root
 
-The `--root` jail (default `$HOME`) is correct security
-behavior, but when the server rejects a path the client falls
-back silently to a slower transport (legacy per-file SSH).
-Symptom from a user's perspective: "bcmr copy of /tmp/foo
-takes 30 s where scp takes 2 s". Root cause is invisible
-unless you `strace` the server or know to look for the
-`path /... escapes server root` line on stderr. Found while
-benchmarking [Experiment 17](/ablation/wire-protocol#experiment-17-per-file-fsync-as-the-many-files-tax).
+Fallback is now typed and allowed only before transfer mutation.
+The client prints the serve failure reason plus a visible
+legacy-SCP warning. Once serve-side processing may have mutated
+state, errors are returned instead of trying a second transport.
 
-Fix shape: when the server returns `Error` for a path-escape
-reason during the initial Stat/List, the client should print a
-clear stderr warning ("falling back to legacy SSH transport
-because $remote rejected $path") and either continue with the
-fallback (current behavior) or exit non-zero (opinionated;
-breaks scripts that didn't realize they were inside a jail).
+## Resolved: Path B Direct TCP After SSH Rendezvous
 
-## Path B: Direct TCP After SSH Rendezvous
+The direct data plane shipped with SSH-authenticated rendezvous,
+challenge-response possession proof, mandatory AES-256-GCM framing,
+bounded squatter handling, and SSH fallback for unreachable direct
+addresses. See [Wire Experiment 20](/ablation/wire-protocol).
 
-[Experiment 19](/ablation/wire-protocol#experiment-19-parallel-ssh-connections-break-the-single-stream-ceiling)
-shipped the "mscp-style" fix: open N independent SSH
-sessions, stripe files across them, get N× the crypto ceiling.
-That took us past `scp -r` on a contended box. The remaining
-single-stream ceiling that Path A **can't** remove is the
-~500 MB/s-per-core cap that each SSH session's cipher imposes:
-the only way past that per-connection is to not encrypt at the
-SSH layer at all.
+## Transactional Single-File Striped PUT
 
-Shape of the fix:
+The historical striped upload first truncated the visible remote
+destination, then let independent sessions write chunks into it.
+Any disconnect exposed a partial file and destroyed an existing
+good version. Production v2 therefore routes single-file uploads
+through one handle-bound atomic transaction; `-P N` remains active
+for multi-file batches.
 
-- Client opens **one** SSH connection to the remote and
-  invokes `bcmr serve --listen <port>` (or a dedicated rendezvous
-  subcommand). SSH is the authenticated channel — key exchange
-  happens here, a shared session key gets derived.
-- Server binds a TCP listener on `<port>`, replies with the
-  port + key over the SSH control channel.
-- Client opens a **direct TCP connection** to the listener,
-  authenticates with the key, and talks the same bcmr serve
-  wire protocol over that socket. SSH connection stays open
-  as the control/watchdog channel.
-- On LAN, the direct TCP path can skip encryption entirely
-  (user opts in via flag — the threat model is "we trust the
-  link"), or use a fast AEAD (AES-GCM with a session key)
-  that isn't constrained to OpenSSH's cipher negotiation.
+Re-enabling single-file striping safely requires:
 
-Risks / design questions that need actual work:
+1. `BeginPut` creates one server-owned transaction and returns an
+   unguessable transfer token;
+2. every worker authenticates into that transaction and writes a
+   bounded, non-overlapping range;
+3. the coordinator verifies complete interval coverage, length,
+   hash, metadata and durability;
+4. exactly one commit atomically publishes or no-replaces;
+5. worker loss cancels the transaction without touching the final
+   path.
 
-- **Trust model**: now there's a second auth surface. Need to
-  bind the derived key to the SSH session tightly so an
-  attacker can't race to the listener. Review carefully.
-- **Firewall friendliness**: an extra port may not be reachable
-  through an institutional firewall that only allowed SSH. Flag
-  turns this on; otherwise fall back to Path A.
-- **Listener lifecycle**: port allocation, port collision, what
-  happens if the client dies mid-batch. Watchdog via SSH control
-  channel handles the last one; the first two are engineering.
-- **Code organization**: introduce `trait Transport` in
-  `src/core/transport/` with `SshTransport` (current) and
-  `DirectTcpTransport` (feature-gated `--features
-  direct-transport`). Same repo, not extracted to a new crate
-  until a second consumer shows up.
-
-Goal: single-stream saturate a 10 GbE NIC (~1.25 GB/s practical)
-or better on LAN. On WAN this helps less because the wire is
-already the bottleneck — Path A-style parallelism matters more
-there too, and the two are composable (N parallel direct-TCP
-streams).
-
-Tracked on its own branch per decision; won't merge until it's
-demonstrably safe and has a clear user story.
+This stays off until fault-injection covers missing, duplicate,
+overlapping and reordered chunks plus coordinator death. The
+performance ablation must then show a material win over direct TCP
+or a single compressed stream; otherwise the extra protocol state
+is not justified.
 
 ## xattr Cross-FS Edge Cases
 

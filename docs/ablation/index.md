@@ -75,7 +75,7 @@ marked *non-goal* are design decisions without a measurement
 | Decision | Lives on | Measured benefit (workload) |
 |----------|----------|------------------|
 | Always-on BLAKE3 (single hash) | [SCC](/ablation/scc#experiment-1-inline-blake3-hash-overhead) | Free on Linux AVX-512 (~5 GB/s > NVMe); 8--56 % overhead on macOS NEON warm cache |
-| Tail-block resume verify | [SCC](/ablation/scc#experiment-3-tail-block-vs-full-prefix-rehash) | 50--145× vs full prefix rehash, 48--768 MiB written, mac/Linux |
+| Historical tail-block resume prototype (superseded by contiguous proof) | [SCC](/ablation/scc#experiment-3-tail-block-vs-full-prefix-rehash) | 50--145× vs full prefix rehash, 48--768 MiB written, mac/Linux; not the current safety mode |
 | 64 MiB checkpoint interval | [SCC](/ablation/scc#experiment-4-sync-interval-overhead) | ≤ 16 % overhead and ≤ 64 MiB rework on both platforms (single-file, warm cache) |
 | `copy_file_range` with offset | [SCC](/ablation/scc#experiment-6-copy-file-range-with-offset-linux) | 8--24 % faster resume on Linux NVMe (64--512 MiB) |
 | Opt-in per-file fsync | [Local Perf](/ablation/local-perf#experiment-7-per-file-durability-cost) | 13× faster (9.9 s → 0.72 s) on 2100 × 4 KiB repo, mac APFS warm cache |
@@ -83,9 +83,12 @@ marked *non-goal* are design decisions without a measurement
 | Skip src hash when unused | [Local Perf](/ablation/local-perf#experiment-10-whole-source-blake3-on-the-i-o-thread) | 28 % off (285 → 205 ms) on 32 MiB streaming no-verify copy, mac APFS |
 | Single spawn_blocking copy loop | [Local Perf](/ablation/local-perf#experiment-13-one-spawn-blocking-for-the-whole-loop) | 2.3× (12.3 → 5.4 s) on 2 GiB streaming copy, Linux NVMe ext4 warm cache |
 | Session + checkpoint gated on intent | [Local Perf](/ablation/local-perf#experiment-16-gate-session-block-hash-checkpoint-fsync-on-intent-v0-5-10) | ~2× (3.9 → 1.89 s) on 1 GiB streaming copy, mac APFS; lands within 1.65× of cp |
-| Per-worker SSH connections | [Wire](/ablation/wire-protocol#parallel-ssh-with-independent-connections) | Up to ~6× parallel throughput (not re-measured on this tree; mscp's 8-conn 100 Gbps figure) |
+| Independent serve SSH connections | [Wire Exp 19](/ablation/wire-protocol#experiment-19-parallel-ssh-connections-break-the-single-stream-ceiling) | 4.58× from N=1→N=8 on 10000 × 64 KiB under heavy host load; command-line options now force independent TCP streams |
 | Wire compression (Zstd-3) | [Wire](/ablation/wire-protocol#experiment-12-wire-compression-across-real-hosts) | 2.48--5.59× vs uncompressed on 64 MiB source-text, ~10 MB/s WAN; essentially no cost on incompressible blocks (auto-skip) |
 | `CAP_DEDUP` repeat PUT | [Wire](/ablation/wire-protocol#experiment-11-content-addressed-dedup-for-repeat-put) | 32 % faster (18.9 → 12.9 s) on 64 MiB re-upload, ~10 MB/s WAN; savings match the bytes not sent |
 | `CAP_FAST` GET | [Wire](/ablation/wire-protocol#experiment-14-cap-fast-real-numbers) | **Mixed.** 1.07× on WAN (network-bound); **0.78× (i.e. slower) on Linux loopback** due to pipe-size + spawn_blocking issues documented in the experiment |
 | CAS LRU cap | [Wire](/ablation/wire-protocol#experiment-15-cas-lru-eviction-under-load) | Holds CAS ≤ cap under 3× 24 MiB repeat uploads (unit-test-sized; intended to prove bound, not speedup) |
+| Protocol v2 atomic PUT | [Wire Exp 21](/ablation/wire-protocol#experiment-21-protocol-v2-atomic-put-and-failure-semantics) | Real SSH no-clobber, explicit overwrite, recursive `-P4`, round-trip and killed-transfer controls preserve the final path; old devices retain legacy-SCP fallback |
+| Size-aware LPT scheduling | [Wire Exp 22](/ablation/wire-protocol#experiment-22-size-aware-multi-file-scheduling) | 46.3% lower modeled tail bytes on a skewed batch; 2.39% lower median wall time across 8+8 interleaved real-SSH runs |
+| High-bandwidth compression crossover | [Wire Exp 23](/ablation/wire-protocol#experiment-23-high-bandwidth-compression-crossovers) | Ten paired codec runs: fixed Zstd remains right for WAN, while modeled LZ4/raw crossovers fall in the multi-Gbit range; adaptive default needs live calibration |
 | No rolling-checksum delta-sync | [Non-Goal](/ablation/no-rolling-checksum) | *non-goal* — reach for rsync / restic / borg / OCI when byte-precise delta is genuinely required |

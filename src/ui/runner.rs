@@ -103,13 +103,13 @@ pub struct ProgressRunner {
 impl ProgressRunner {
     pub fn new(
         total_size: u64,
-        plain: bool,
+        mode: crate::cli::ProgressMode,
         silent: bool,
         json: bool,
         on_interrupt: fn(),
     ) -> std::io::Result<Self> {
         let log = crate::config::log_file();
-        let renderer = progress::create_renderer(total_size, plain, silent, json, log.as_ref())?;
+        let renderer = progress::create_renderer(total_size, mode, silent, json, log.as_ref())?;
         let handle = ProgressHandle::new(renderer);
 
         let ticker = handle.clone();

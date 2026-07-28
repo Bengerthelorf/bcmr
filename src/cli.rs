@@ -13,7 +13,7 @@ EXAMPLES:
       bcmr copy -C ./large.iso host:backup/
 
   Background with JSON for scripts:
-      bcmr copy --json -V ./big.tar.gz host:dst/
+      bcmr copy --background --json -V ./big.tar.gz host:dst/
 
   Compare source and destination without copying:
       bcmr check ./project/ host:archives/
@@ -61,7 +61,7 @@ EXAMPLES:
       bcmr copy -C ./large.tar.gz host:dst/
 
   Background job with JSON status events:
-      bcmr copy --json -V ./big.bin host:dst/   # query: bcmr status
+      bcmr copy --background --json -V ./big.bin host:dst/   # query: bcmr status
 
   Sparse-aware copy:
       bcmr copy --sparse=auto disk.img dst.img
@@ -124,9 +124,13 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    /// Output results as JSON; copy/move/remove detach to background (query with `bcmr status`)
+    /// Emit structured JSON/NDJSON output without changing execution mode
     #[arg(long, global = true)]
     pub json: bool,
+
+    /// Run copy/move/remove as a background job (query with `bcmr status`)
+    #[arg(short = 'b', long, global = true)]
+    pub background: bool,
 
     /// Use this config file instead of ~/.config/bcmr/config.toml (layered on top of defaults)
     #[arg(long, global = true, value_name = "PATH")]
@@ -137,7 +141,7 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "NAME")]
     pub profile: Option<String>,
 
-    #[arg(long = "_bg", hide = true)]
+    #[arg(long = "_bg", hide = true, value_parser = parse_job_id)]
     pub _bg: Option<String>,
 }
 
@@ -154,6 +158,24 @@ pub enum SparseMode {
     Always,
     Auto,
     Never,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum CompressionMode {
+    Auto,
+    Zstd,
+    Lz4,
+    None,
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum ProgressMode {
+    #[default]
+    Auto,
+    Tui,
+    Inline,
+    Plain,
+    Off,
 }
 
 impl std::fmt::Display for Shell {
@@ -204,9 +226,9 @@ pub struct CopyMoveArgs {
     #[arg(short = 'e', long)]
     pub exclude: Option<Vec<String>>,
 
-    /// Use plain inline progress (3-line) instead of the fancy TUI box
-    #[arg(long, alias = "tui", short_alias = 't')]
-    pub plain: bool,
+    /// Progress display: auto, tui, inline, plain, or off
+    #[arg(long, value_enum, default_value = "auto")]
+    pub progress: ProgressMode,
 
     /// Suppress progress UI; only errors print to stderr
     #[arg(short = 'q', long)]
@@ -244,12 +266,12 @@ pub struct CopyMoveArgs {
     pub sync: bool,
 
     /// Parallel local file copies (default: CPU count, capped at 8)
-    #[arg(short = 'j', long = "jobs")]
+    #[arg(short = 'j', long = "jobs", value_parser = parse_positive_usize)]
     pub jobs: Option<usize>,
 
     /// Wire compression: auto, zstd, lz4, none
-    #[arg(long, default_value = "auto")]
-    pub compress: String,
+    #[arg(long, value_enum, default_value = "auto")]
+    pub compress: CompressionMode,
 
     /// Skip server-side BLAKE3 on GET (caller verifies another way, e.g. -V)
     #[arg(long, default_value_t = false)]
@@ -309,7 +331,7 @@ pub enum Commands {
         sparse: Option<String>,
 
         /// Number of parallel connections (default from scp.parallel_transfers)
-        #[arg(short = 'P', long)]
+        #[arg(short = 'P', long, value_parser = parse_positive_usize)]
         parallel: Option<usize>,
     },
 
@@ -323,6 +345,7 @@ pub enum Commands {
     /// Show status of background jobs
     Status {
         /// Job ID to query (omit to list all jobs)
+        #[arg(value_parser = parse_job_id)]
         job_id: Option<String>,
 
         /// Remove the named job's log file (use --all to drop every job)
@@ -480,9 +503,9 @@ pub enum Commands {
         #[arg(short = 'e', long, value_name = "PATTERN", value_delimiter = ',')]
         exclude: Option<Vec<String>>,
 
-        /// Use plain inline progress (3-line) instead of the fancy TUI box
-        #[arg(long, alias = "tui", short_alias = 't')]
-        plain: bool,
+        /// Progress display: auto, tui, inline, plain, or off
+        #[arg(long, value_enum, default_value = "auto")]
+        progress: ProgressMode,
 
         /// Suppress progress UI; only errors print to stderr
         #[arg(short = 'q', long)]
@@ -501,6 +524,31 @@ pub enum Commands {
 pub enum TestMode {
     Delay(u64),
     SpeedLimit(u64),
+    CorruptBeforeFinalize,
+    #[cfg(feature = "test-support")]
+    TruncateSourceAfterSnapshot,
+    #[cfg(feature = "test-support")]
+    TruncateSourceAfterSnapshotDelay,
+    #[cfg(feature = "test-support")]
+    TruncateSourceAfterSnapshotSpeedLimit,
+    #[cfg(feature = "test-support")]
+    TruncateSourceAfterStageWrite,
+    #[cfg(feature = "test-support")]
+    CreateDestinationBeforeFinalize,
+    #[cfg(feature = "test-support")]
+    ReplaceDestinationBeforeFinalize,
+    #[cfg(feature = "test-support")]
+    ReplaceDestinationAfterResumeResolution,
+    #[cfg(feature = "test-support")]
+    ReplaceDestinationWithFifoAfterObservation,
+    #[cfg(feature = "test-support")]
+    CreateDestinationHardlinkBeforeFinalize,
+    #[cfg(feature = "test-support")]
+    FailSymlinkCreate,
+    #[cfg(feature = "test-support")]
+    FailSymlinkCommit,
+    #[cfg(feature = "test-support")]
+    CreateDestinationBeforeSymlinkCommit,
     None,
 }
 
@@ -550,9 +598,14 @@ impl Commands {
         }
     }
 
-    pub fn is_plain_progress(&self) -> bool {
-        self.copy_move_args().is_some_and(|a| a.plain)
-            || matches!(self, Commands::Remove { plain: true, .. })
+    pub fn progress_mode(&self) -> ProgressMode {
+        self.copy_move_args()
+            .map(|args| args.progress)
+            .or(match self {
+                Commands::Remove { progress, .. } => Some(*progress),
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 
     pub fn is_quiet(&self) -> bool {
@@ -616,22 +669,20 @@ impl Commands {
         use crate::core::protocol::{CAP_LZ4, CAP_ZSTD};
         match self
             .copy_move_args()
-            .map(|a| a.compress.as_str())
-            .unwrap_or("auto")
-            .to_lowercase()
-            .as_str()
+            .map(|args| args.compress)
+            .unwrap_or(CompressionMode::Auto)
         {
-            "none" | "off" | "disable" => 0,
-            "lz4" => CAP_LZ4,
-            "zstd" => CAP_ZSTD,
-            _ => CAP_LZ4 | CAP_ZSTD,
+            CompressionMode::None => 0,
+            CompressionMode::Lz4 => CAP_LZ4,
+            CompressionMode::Zstd => CAP_ZSTD,
+            CompressionMode::Auto => CAP_LZ4 | CAP_ZSTD,
         }
     }
 
     pub fn protocol_caps(&self) -> u8 {
         use crate::core::protocol::{CAP_DEDUP, CAP_FAST, CAP_PUT_OFFSET, CAP_SYNC};
         let mut caps = self.compression_caps() | CAP_DEDUP | CAP_PUT_OFFSET;
-        if self.copy_move_args().is_some_and(|a| a.fast) {
+        if self.copy_move_args().is_some_and(|a| a.fast) && !self.is_verify() {
             caps |= CAP_FAST;
         }
         if self.is_sync() {
@@ -798,6 +849,49 @@ fn parse_test_mode(s: &str) -> Result<TestMode, String> {
     if s == "none" {
         return Ok(TestMode::None);
     }
+    if s == "corrupt_before_finalize" {
+        return Ok(TestMode::CorruptBeforeFinalize);
+    }
+    #[cfg(feature = "test-support")]
+    match s {
+        "truncate_source_after_snapshot" => {
+            return Ok(TestMode::TruncateSourceAfterSnapshot);
+        }
+        "truncate_source_after_snapshot_delay" => {
+            return Ok(TestMode::TruncateSourceAfterSnapshotDelay);
+        }
+        "truncate_source_after_snapshot_speed_limit" => {
+            return Ok(TestMode::TruncateSourceAfterSnapshotSpeedLimit);
+        }
+        "truncate_source_after_stage_write" => {
+            return Ok(TestMode::TruncateSourceAfterStageWrite);
+        }
+        "create_destination_before_finalize" => {
+            return Ok(TestMode::CreateDestinationBeforeFinalize);
+        }
+        "replace_destination_before_finalize" => {
+            return Ok(TestMode::ReplaceDestinationBeforeFinalize);
+        }
+        "replace_destination_after_resume_resolution" => {
+            return Ok(TestMode::ReplaceDestinationAfterResumeResolution);
+        }
+        "replace_destination_with_fifo_after_observation" => {
+            return Ok(TestMode::ReplaceDestinationWithFifoAfterObservation);
+        }
+        "create_destination_hardlink_before_finalize" => {
+            return Ok(TestMode::CreateDestinationHardlinkBeforeFinalize);
+        }
+        "fail_symlink_create" => {
+            return Ok(TestMode::FailSymlinkCreate);
+        }
+        "fail_symlink_commit" => {
+            return Ok(TestMode::FailSymlinkCommit);
+        }
+        "create_destination_before_symlink_commit" => {
+            return Ok(TestMode::CreateDestinationBeforeSymlinkCommit);
+        }
+        _ => {}
+    }
     let parts: Vec<&str> = s.split(':').collect();
     if parts.len() == 2 {
         match (parts[0], parts[1].parse::<u64>()) {
@@ -807,15 +901,103 @@ fn parse_test_mode(s: &str) -> Result<TestMode, String> {
         }
     } else {
         Err(format!(
-            "Invalid test mode '{}'. Expected: none, delay:<ms>, or speed_limit:<bps>",
+            "Invalid test mode '{}'. Expected: none, corrupt_before_finalize, delay:<ms>, or speed_limit:<bps>",
             s
         ))
     }
 }
 
+fn parse_positive_usize(s: &str) -> Result<usize, String> {
+    let value = s
+        .parse::<usize>()
+        .map_err(|_| format!("expected a positive integer, got '{s}'"))?;
+    if value == 0 {
+        return Err("must be greater than zero".to_string());
+    }
+    Ok(value)
+}
+
+fn parse_job_id(s: &str) -> Result<String, String> {
+    crate::commands::jobs::validate_job_id(s)?;
+    Ok(s.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_execution_is_an_explicit_global_flag() {
+        let parsed = Cli::try_parse_from(["bcmr", "--background", "copy", "--yes", "src", "dst"]);
+        assert!(
+            parsed.is_ok(),
+            "background execution must not be coupled to the output format: {parsed:?}"
+        );
+        assert!(parsed.unwrap().background);
+    }
+
+    #[test]
+    fn compression_mode_rejects_unknown_values() {
+        assert!(
+            Cli::try_parse_from(["bcmr", "copy", "--compress=bogus", "src", "dst"]).is_err(),
+            "a mistyped compression mode must not silently become auto"
+        );
+    }
+
+    #[test]
+    fn copy_parallel_counts_reject_zero_during_clap_parsing() {
+        for args in [
+            ["bcmr", "copy", "-j0", "src", "dst"].as_slice(),
+            ["bcmr", "copy", "--jobs=0", "src", "dst"].as_slice(),
+            ["bcmr", "copy", "-P0", "src", "host:dst"].as_slice(),
+            ["bcmr", "copy", "--parallel=0", "src", "host:dst"].as_slice(),
+        ] {
+            assert!(
+                Cli::try_parse_from(args).is_err(),
+                "zero concurrency must be rejected by Clap: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn copy_parallel_counts_accept_positive_values() {
+        for args in [
+            ["bcmr", "copy", "-j1", "src", "dst"].as_slice(),
+            ["bcmr", "copy", "--jobs=2", "src", "dst"].as_slice(),
+            ["bcmr", "copy", "-P1", "src", "host:dst"].as_slice(),
+            ["bcmr", "copy", "--parallel=2", "src", "host:dst"].as_slice(),
+        ] {
+            assert!(
+                Cli::try_parse_from(args).is_ok(),
+                "positive concurrency must parse: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn status_and_background_job_ids_reject_unsafe_values_during_clap_parsing() {
+        for id in [
+            "",
+            "/absolute",
+            "has/slash",
+            "has\\backslash",
+            ".",
+            "..",
+            "\0",
+        ] {
+            assert!(
+                Cli::try_parse_from(["bcmr", "status", id]).is_err(),
+                "status must reject unsafe job ID: {id:?}"
+            );
+            assert!(
+                Cli::try_parse_from(["bcmr", "--_bg", id, "--json", "copy", "src", "dst"]).is_err(),
+                "background worker must reject unsafe job ID: {id:?}"
+            );
+        }
+
+        let generated = crate::commands::jobs::new_job_id();
+        assert!(Cli::try_parse_from(["bcmr", "status", &generated]).is_ok());
+    }
 
     fn argv(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -901,6 +1083,14 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_test_mode_corrupt_before_finalize() {
+        match parse_test_mode("corrupt_before_finalize").unwrap() {
+            TestMode::CorruptBeforeFinalize => {}
+            _ => panic!("Expected CorruptBeforeFinalize"),
+        }
+    }
+
+    #[test]
     fn test_parse_test_mode_invalid() {
         assert!(parse_test_mode("invalid:abc").is_err());
     }
@@ -915,7 +1105,7 @@ mod tests {
             yes: false,
             verbose: false,
             exclude: None,
-            plain: false,
+            progress: ProgressMode::Auto,
             quiet: false,
             dry_run: false,
             test_mode: None,
@@ -926,7 +1116,7 @@ mod tests {
             no_deref: false,
             sync: false,
             jobs: None,
-            compress: "auto".to_string(),
+            compress: CompressionMode::Auto,
             fast: false,
             direct: DirectMode::Ssh,
         }
@@ -958,7 +1148,7 @@ mod tests {
         assert!(!cmd.is_yes());
         assert!(cmd.is_verbose());
         assert!(cmd.is_dry_run());
-        assert!(!cmd.is_plain_progress());
+        assert_eq!(cmd.progress_mode(), ProgressMode::Auto);
         assert!(cmd.is_verify());
         assert!(cmd.is_resume());
         assert!(cmd.is_strict());
@@ -999,7 +1189,7 @@ mod tests {
             verbose: false,
             dir: true,
             exclude: None,
-            plain: false,
+            progress: ProgressMode::Auto,
             quiet: false,
             dry_run: false,
             test_mode: None,
@@ -1053,6 +1243,21 @@ mod tests {
         let caps = cmd_sync_fast.protocol_caps();
         assert_eq!(caps & CAP_SYNC, CAP_SYNC, "--sync sets CAP_SYNC");
         assert_eq!(caps & CAP_FAST, CAP_FAST, "--fast still sets CAP_FAST");
+
+        let mut verify_args = test_args(vec![PathBuf::from("dst")]);
+        verify_args.fast = true;
+        verify_args.verify = true;
+        let cmd_verify_fast = Commands::Copy {
+            args: verify_args,
+            reflink: None,
+            sparse: None,
+            parallel: None,
+        };
+        assert_eq!(
+            cmd_verify_fast.protocol_caps() & CAP_FAST,
+            0,
+            "--verify must retain the streaming server hash needed before atomic publish"
+        );
     }
 
     #[test]

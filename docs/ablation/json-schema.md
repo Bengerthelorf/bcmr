@@ -4,32 +4,35 @@ section: internals
 order: 8
 ---
 
-`bcmr --json` and the background-job log files (`~/.local/share/bcmr/jobs/<job_id>.jsonl`) emit newline-delimited JSON. This page is the contract for consumers — CI scripts, agent tools, dashboards reading `bcmr status`. Everything here is observed-stable; fields not listed are not yet stable and may change without notice.
+`bcmr --json` emits newline-delimited JSON in the foreground without changing execution mode. Explicit `--background --json` jobs write the same event stream to a platform data directory; use the submitted event's `log` field rather than constructing the path. This page is the contract for consumers — CI scripts, agent tools, and dashboards reading `bcmr status`.
 
 ## Event types
 
-Every line carries a `type` field discriminating the event, *except* the very first line of a background-job log, which is the **header** (`{job_id, pid, log}`). Streaming parsers should special-case line 1 for now; a future schema bump will add `"type":"submitted"` to the header so dispatch can be uniform.
+Every operation-stream line carries a `type` field. Background submission and the
+first log line use `type="submitted"`, so consumers can dispatch uniformly.
 
 The current taxonomy:
 
 | `type`     | Where             | When emitted                                       |
 | ---------- | ----------------- | -------------------------------------------------- |
-| (header)   | log file, line 1  | Once, at job spawn                                 |
-| `progress` | stdout / log file | At least every 200 ms during transfer / scan      |
+| `submitted`| parent stdout and log line 1 | Once, at explicit background job spawn   |
+| `progress` | stdout / log file | Rate-limited during transfer / scan; may be absent |
 | `result`   | stdout / log file | Once, at the end of a copy / move / remove run    |
 
 Foreground non-operation commands (`bcmr check --json`) emit a single result-shaped object on stdout instead — see the **`bcmr check`** section below.
 
-## Header line
+## `submitted` event
 
-Emitted only for `--json` operations that detach to a background job (`bcmr copy`, `bcmr move`, `bcmr remove`). Foreground `--json` runs do not emit it.
+Emitted only when copy, move, or remove is invoked with both `--background` and
+`--json`. Foreground `--json` runs do not emit it.
 
 ```json
-{"job_id":"d912cf1b2c4","pid":45766,"log":"/Users/.../jobs/d912cf1b2c4.jsonl"}
+{"type":"submitted","job_id":"d912cf1b2c4","pid":45766,"log":"/Users/.../jobs/d912cf1b2c4.jsonl"}
 ```
 
 | Field    | Type   | Notes                                                                |
 | -------- | ------ | -------------------------------------------------------------------- |
+| `type`   | string | Always `"submitted"`.                                                |
 | `job_id` | string | Stable for the job's lifetime. Used by `bcmr status <job_id>`.       |
 | `pid`    | number | OS process ID of the detached worker.                                |
 | `log`    | string | Absolute path to the per-job NDJSON log file.                        |
@@ -38,7 +41,8 @@ The same object is also written to `<job_id>.jsonl` on disk and printed to stdou
 
 ## `progress` events
 
-Emitted at most every `200 ms` during operations. Always present.
+Rate-limited to at most one event every `200 ms` during operations. Very short
+operations can finish before the first progress event.
 
 ```json
 {"type":"progress","operation":"Uploading (serve)","bytes_done":1048576,"bytes_total":5242880,"percent":20.0,"speed_bps":4194304,"eta_secs":1,"file":"data.bin","file_size":5242880,"file_progress":1048576,"items_done":0,"items_total":1,"scanning":false}
@@ -56,13 +60,13 @@ Emitted at most every `200 ms` during operations. Always present.
 | `file`           | string   | ✅       | Current per-file display name (basename).                                                            |
 | `file_size`      | number   | ✅       | Total bytes of `file`.                                                                               |
 | `file_progress`  | number   | ✅       | Bytes transferred for `file` so far.                                                                 |
-| `items_done`     | number   | ✅       | Files / dir-entries finished. Omitted (`null` / absent) for single-file ops.                         |
+| `items_done`     | number   | ✅       | Files / directory entries finished; always present.                                                  |
 | `items_total`    | number   | ✅       | Total items expected. Omitted while scanning is in progress.                                         |
 | `scanning`       | bool     | ✅       | `true` during the initial walk before any byte is transferred. Flips to `false` once execution starts. |
 
 **Notes for consumers:**
 
-- For very short transfers, no `progress` event may fire at all — only the header (if backgrounded) and the terminal `result` event. Don't wait for at least one `progress` before declaring "started".
+- For very short transfers, no `progress` event may fire at all — only `submitted` (if backgrounded) and the terminal `result` event. Don't wait for at least one `progress` before declaring "started".
 - `speed_bps` is bytes per second despite the suffix; the unit is fixed for backwards compatibility.
 - Field order is not guaranteed; always parse by name.
 - Unknown fields may appear in future versions — ignore them.
@@ -92,13 +96,14 @@ Error:
 | `duration_secs`   | number   | ✅       | Wall-clock seconds for the run. Float.                                         |
 | `avg_speed_bps`   | number   | ✅       | **Bytes per second**. Omitted on error.                                        |
 | `bytes_skipped`   | number   | ✅       | Bytes skipped via `--append` / `--update`. Omitted when `0`.                   |
+| `reflink_count`   | number   | ✅       | Files completed through a reflink/clone fast path. Omitted when `0`.           |
 | `verified`        | bool     | ✅       | `true` when the run was invoked with `-V/--verify`. Omitted when `false`.      |
 | `error`           | string   | ✅       | Human-readable error. Present only when `status="error"`.                      |
-| `error_kind`      | string   | ✅       | Categorical: `source_not_found`, `already_exists`, `permission_denied`, `cancelled`, `is_directory`, `verification_failed`, `invalid_input`, `io_error`. Present only when `status="error"`. |
+| `error_kind`      | string   | ✅       | Categorical: `confirmation_required`, `source_not_found`, `already_exists`, `permission_denied`, `cancelled`, `is_directory`, `verification_failed`, `invalid_input`, `io_error`. Present only when `status="error"`. |
 
 ## `bcmr check --json`
 
-`bcmr check` runs in the foreground (no background job, no header line). It emits a single JSON object — not an NDJSON stream:
+`bcmr check` runs in the foreground (no background job, no `submitted` event). It emits a single JSON object — not an NDJSON stream:
 
 ```json
 {
@@ -130,7 +135,7 @@ Exit code is `0` when `in_sync=true`, `1` when not, `2` on error.
 
 ## `bcmr doctor --json`
 
-`bcmr doctor` is foreground and synchronous; under `--json` it emits a single object on stdout — no NDJSON, no header, no progress events:
+`bcmr doctor` is foreground and synchronous; under `--json` it emits a single object on stdout — no NDJSON, no `submitted`, no progress events:
 
 ```json
 {
@@ -178,10 +183,10 @@ When a background job fails, the log file ends with a single `result` event whos
 
 - **Schema versioning.** No `version` field today. Treat the schema as v0; assume best-effort backwards compat within a minor release.
 - **`phase` events.** A consumer wanting to know "scan phase finished, transfer phase started" today infers it from `scanning: true → false` between two `progress` events. A future explicit `{"type":"phase","name":"scan_complete"}` would beat the heuristic.
-- **Reflink / dedup / compress counters.** A future PR will add `reflink_count`, `dedup_count`, and `compress_ratio` to the `result` event. Treat absent fields as zero/unknown.
+- **Dedup / compress counters.** `dedup_count` and `compress_ratio` are not yet emitted. Treat absent fields as unknown.
 - **Operation-string enum.** `operation` is freeform today. Don't pattern-match; if you need to know the phase, use `scanning` or upcoming `phase` events.
 
 ## See also
 
 - `bcmr status [job_id]` — query status and tail logs of a background job.
-- `~/.local/share/bcmr/jobs/<job_id>.jsonl` — per-job log files (auto-cleaned after 7 days).
+- The `submitted.log` path — per-job log file in the platform data directory (auto-cleaned after 7 days).
