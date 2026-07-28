@@ -9,6 +9,10 @@ fn remove_temp_file(path: &Path) -> std::io::Result<()> {
         if !metadata.file_type().is_symlink() {
             let mut permissions = metadata.permissions();
             if permissions.readonly() {
+                // This branch is Windows-only. On Windows, set_readonly(false)
+                // clears FILE_ATTRIBUTE_READONLY rather than widening Unix
+                // mode bits as the cross-platform Clippy lint warns about.
+                #[allow(clippy::permissions_set_readonly_false)]
                 permissions.set_readonly(false);
                 let _ = std::fs::set_permissions(path, permissions);
             }
