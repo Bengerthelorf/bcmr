@@ -33,7 +33,19 @@ jobs:
             exit 1
           fi
 
-          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          version=$(awk '
+            /^\[package\]$/ { in_package=1; next }
+            /^\[/ { in_package=0 }
+            in_package && /^version = "/ {
+              gsub(/^version = "|"[[:space:]]*$/, "")
+              print
+              exit
+            }
+          ' Cargo.toml)
+          [[ -n "$version" ]] || {
+            echo "::error::could not read [package].version from Cargo.toml"
+            exit 1
+          }
           if [[ "$tag" != "v$version" ]]; then
             echo "::error::tag $tag does not match Cargo.toml version $version"
             exit 1
