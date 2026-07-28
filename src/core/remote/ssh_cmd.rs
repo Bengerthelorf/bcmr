@@ -1,6 +1,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::process::Command;
 
+use crate::core::transport::ssh::SSH_LIVENESS_ARGS;
+
 pub(super) static SSH_COMPRESS: AtomicBool = AtomicBool::new(false);
 
 const MACOS_SUN_PATH_LIMIT: usize = 104;
@@ -78,6 +80,7 @@ fn ssh_base_args_for(
     if !is_interactive() {
         args.extend(["-o".into(), "BatchMode=yes".into()]);
     }
+    args.extend(SSH_LIVENESS_ARGS.map(str::to_owned));
     if SSH_COMPRESS.load(Ordering::Relaxed) {
         args.extend(["-o".into(), "Compression=yes".into()]);
     }
@@ -190,5 +193,23 @@ mod tests {
                 .any(|pair| pair == ["-o", "ControlMaster=no"]),
             "an overlong external TMPDIR must fall back to non-multiplexed SSH"
         );
+    }
+
+    #[test]
+    fn legacy_ssh_has_bounded_liveness_detection_with_and_without_mux() {
+        let temp = std::path::Path::new("/short");
+        for explicit_no_multiplex in [false, true] {
+            let args = ssh_base_args_for("host", temp, explicit_no_multiplex);
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["-o", "ServerAliveInterval=15"]),
+                "legacy transport must probe a silent SSH connection"
+            );
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["-o", "ServerAliveCountMax=20"]),
+                "legacy transport must eventually close an unresponsive SSH connection"
+            );
+        }
     }
 }
