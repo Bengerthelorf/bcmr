@@ -29,6 +29,11 @@ jobs:
         shell: bash
         run: bash tests/install_script_test.sh
 
+      - name: Test release archive permissions
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash tests/release_assets_test.sh
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
