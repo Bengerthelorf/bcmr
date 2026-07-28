@@ -96,11 +96,17 @@ pub fn encode_message(msg: &Message) -> Vec<u8> {
             write_string(&mut payload, path);
             write_u64_le(&mut payload, *offset);
         }
-        Message::Put { path, size, offset } => {
+        Message::Put {
+            path,
+            size,
+            offset,
+            overwrite,
+        } => {
             write_u8(&mut payload, TYPE_PUT);
             write_string(&mut payload, path);
             write_u64_le(&mut payload, *size);
             write_u64_le(&mut payload, *offset);
+            write_u8(&mut payload, *overwrite as u8);
         }
         Message::Mkdir { path } => {
             write_u8(&mut payload, TYPE_MKDIR);
@@ -366,6 +372,7 @@ pub fn decode_message(data: &[u8]) -> Option<Message> {
             path: p.read_string()?,
             size: p.read_u64_le()?,
             offset: p.read_u64_le()?,
+            overwrite: p.read_u8()? != 0,
         },
         TYPE_MKDIR => Message::Mkdir {
             path: p.read_string()?,

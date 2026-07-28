@@ -75,6 +75,7 @@ impl ServeClientPool {
     pub async fn pipelined_put_files_striped<FChunk, FComplete>(
         &mut self,
         files: Vec<FileTransfer>,
+        overwrite: bool,
         on_chunk: FChunk,
         on_complete: FComplete,
     ) -> Result<Vec<[u8; 32]>, BcmrError>
@@ -105,6 +106,7 @@ impl ServeClientPool {
                     let hashes = client
                         .pipelined_put_files(
                             bucket_files,
+                            overwrite,
                             on_chunk_c,
                             move |local_idx, path, size| {
                                 let orig_idx = indices_for_cb[local_idx];
@@ -182,6 +184,7 @@ impl ServeClientPool {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn striped_put_file(
         &mut self,
         local: &Path,
@@ -336,6 +339,7 @@ impl ServeClientPool {
         Ok(hash)
     }
 
+    #[allow(dead_code)]
     async fn request_truncate(&mut self, remote: &str, size: u64) -> Result<(), BcmrError> {
         self.clients[0]
             .request_one(
@@ -372,6 +376,7 @@ fn divide_ranges(total: u64, n: usize) -> Vec<(u64, u64)> {
     ranges
 }
 
+#[allow(dead_code)]
 fn spawn_blake3_file(
     path: std::path::PathBuf,
 ) -> tokio::task::JoinHandle<Result<[u8; 32], BcmrError>> {

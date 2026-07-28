@@ -45,6 +45,7 @@ async fn serve_root_jail_rejects_escape() {
             path: outside_target.to_string_lossy().into_owned(),
             size: 5,
             offset: 0,
+            overwrite: false,
         },
     )
     .await
@@ -152,6 +153,7 @@ async fn serve_put_size_bound_rejects_oversized() {
             path: dst.to_string_lossy().into_owned(),
             size: 10,
             offset: 0,
+            overwrite: false,
         },
     )
     .await
@@ -212,6 +214,7 @@ async fn serve_put_dedup_rejects_block_size_mismatch() {
             path: dst.to_string_lossy().into_owned(),
             size: 100,
             offset: 0,
+            overwrite: false,
         },
     )
     .await
@@ -274,6 +277,7 @@ async fn serve_put_size_bound_rejects_short_write() {
             path: dst.to_string_lossy().into_owned(),
             size: 10,
             offset: 0,
+            overwrite: false,
         },
     )
     .await
@@ -620,6 +624,57 @@ async fn serve_put_upload() {
 
     let dst_hash = checksum::calculate_hash(&dst_path).unwrap();
     assert_eq!(dst_hash, local_hash);
+}
+
+#[tokio::test]
+async fn serve_put_refuses_to_replace_an_existing_destination_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("upload_src.bin");
+    let dst = dir.path().join("upload_dst.bin");
+    fs::write(&src, b"replacement").unwrap();
+    fs::write(&dst, b"original").unwrap();
+
+    let mut client = ServeClient::connect_local().await.unwrap();
+    let result = client.put(dst.to_str().unwrap(), &src).await;
+    client.close().await.unwrap();
+
+    assert!(
+        result.is_err(),
+        "PUT without overwrite permission must fail"
+    );
+    assert_eq!(
+        fs::read(&dst).unwrap(),
+        b"original",
+        "a rejected PUT must preserve the existing destination"
+    );
+}
+
+#[tokio::test]
+async fn serve_put_overwrite_atomically_replaces_an_existing_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("upload_src.bin");
+    let dst = dir.path().join("upload_dst.bin");
+    fs::write(&src, b"replacement").unwrap();
+    fs::write(&dst, b"original").unwrap();
+
+    let mut client = ServeClient::connect_local().await.unwrap();
+    client
+        .put_overwrite(dst.to_str().unwrap(), &src)
+        .await
+        .unwrap();
+    client.close().await.unwrap();
+
+    assert_eq!(fs::read(&dst).unwrap(), b"replacement");
+    assert!(
+        fs::read_dir(dir.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".bcmr.receive.")
+        }),
+        "a successful overwrite must remove its transaction directory"
+    );
 }
 
 #[tokio::test]

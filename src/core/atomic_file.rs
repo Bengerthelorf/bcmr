@@ -1432,10 +1432,25 @@ pub(crate) struct AtomicFile {
 
 impl AtomicFile {
     pub(crate) fn new(destination: &Path) -> Result<Self, BcmrError> {
+        Self::new_with_overwrite_policy(destination, true)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn new_no_replace(destination: &Path) -> Result<Self, BcmrError> {
+        Self::new_with_overwrite_policy(destination, false)
+    }
+
+    fn new_with_overwrite_policy(
+        destination: &Path,
+        allow_overwrite: bool,
+    ) -> Result<Self, BcmrError> {
         let parent_path = destination_parent(destination)?;
         let destination_name = file_name(destination)?.to_os_string();
         let parent = BoundDirectory::capture(&parent_path)?;
         let observed = DestinationObservation::capture(destination)?;
+        if !allow_overwrite && matches!(&observed, DestinationObservation::Existing(_)) {
+            return Err(BcmrError::TargetExists(destination.to_path_buf()));
+        }
         #[cfg(windows)]
         if matches!(&observed, DestinationObservation::Existing(_)) {
             return Err(BcmrError::InvalidInput(

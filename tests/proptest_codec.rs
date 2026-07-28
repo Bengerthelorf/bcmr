@@ -35,11 +35,14 @@ fn arb_message() -> impl Strategy<Value = Message> {
             }
         ),
         (arb_string(), any::<u64>()).prop_map(|(path, offset)| Message::Get { path, offset }),
-        (arb_string(), any::<u64>(), any::<u64>()).prop_map(|(path, size, offset)| Message::Put {
-            path,
-            size,
-            offset
-        }),
+        (arb_string(), any::<u64>(), any::<u64>(), any::<bool>()).prop_map(
+            |(path, size, offset, overwrite)| Message::Put {
+                path,
+                size,
+                offset,
+                overwrite,
+            },
+        ),
         arb_string().prop_map(|path| Message::Mkdir { path }),
         arb_string().prop_map(|path| Message::Resume { path }),
         Just(Message::Done),
@@ -125,6 +128,6 @@ proptest! {
 
     #[test]
     fn protocol_version_fixed(_ in Just(())) {
-        prop_assert_eq!(PROTOCOL_VERSION, 1);
+        prop_assert_eq!(PROTOCOL_VERSION, 2);
     }
 }

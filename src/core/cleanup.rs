@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -33,14 +32,6 @@ pub fn cleanup_partial_files() {
     global().drain_and_remove();
 }
 
-// pid + atomic counter so concurrent writers (CAS, serve PUT staging)
-// can't collide on the same temp path.
-pub fn unique_id() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{}.{}", std::process::id(), n)
-}
-
 pub struct TempFileGuard {
     registry: &'static CleanupRegistry,
     path: PathBuf,
@@ -56,10 +47,6 @@ impl TempFileGuard {
             path,
             active: true,
         }
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 
     pub fn disarm(&mut self) {

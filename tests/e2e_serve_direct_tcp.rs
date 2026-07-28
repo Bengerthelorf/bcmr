@@ -436,7 +436,7 @@ async fn serve_direct_tcp_pipelined_put_many_files_succeeds() {
         "direct-TCP must flip to AEAD; pipelining must carry the split send/recv halves through it",
     );
     let hashes = client
-        .pipelined_put_files(files, |_n| {}, |_idx, _path: &Path, _size| {})
+        .pipelined_put_files(files, false, |_n| {}, |_idx, _path: &Path, _size| {})
         .await
         .unwrap();
 
@@ -532,6 +532,7 @@ async fn serve_direct_tcp_pool_striped_put_n4_succeeds() {
     let hashes = pool
         .pipelined_put_files_striped(
             files,
+            false,
             move |n| {
                 *recv_c.lock().unwrap() += n;
             },

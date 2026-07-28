@@ -188,15 +188,7 @@ pub(super) async fn handle_serve_upload(
                 offset = 0;
             }
 
-            let use_stripe = args.use_direct_tcp()
-                && pool.len() > 1
-                && size >= STRIPING_MIN_FILE_SIZE
-                && !args.is_verify()
-                && offset == 0;
-
-            if use_stripe {
-                let _ = pool.striped_put_file(src, &remote_path).await?;
-            } else if offset > 0 {
+            if offset > 0 {
                 pool.first_mut().put_at(&remote_path, src, offset).await?;
                 if args.is_verify() {
                     let p = src.to_path_buf();
@@ -212,7 +204,16 @@ pub(super) async fn handle_serve_upload(
                     }
                 }
             } else {
-                let server_hash = pool.first_mut().put(&remote_path, src).await?;
+                // Multi-connection striped PUT currently writes directly
+                // into the visible destination and cannot provide crash-safe
+                // publication. Keep production uploads on the handle-bound
+                // transaction path until the protocol has a server-side
+                // transaction token shared across connections.
+                let server_hash = if args.is_force() {
+                    pool.first_mut().put_overwrite(&remote_path, src).await?
+                } else {
+                    pool.first_mut().put(&remote_path, src).await?
+                };
                 if args.is_verify() {
                     let p = src.to_path_buf();
                     let local_hash = tokio::task::spawn_blocking(move || {
@@ -295,12 +296,17 @@ async fn serve_upload_dir(
     let file_cb = runner.file_callback();
     let inc_for_chunks = runner.inc_callback();
     let server_hashes = pool
-        .pipelined_put_files_striped(files_to_put, inc_for_chunks, move |_idx, path, size| {
-            file_cb(
-                &path.file_name().unwrap_or_default().to_string_lossy(),
-                size,
-            );
-        })
+        .pipelined_put_files_striped(
+            files_to_put,
+            args.is_force(),
+            inc_for_chunks,
+            move |_idx, path, size| {
+                file_cb(
+                    &path.file_name().unwrap_or_default().to_string_lossy(),
+                    size,
+                );
+            },
+        )
         .await?;
 
     if args.is_verify() {

@@ -9,7 +9,7 @@ mod io;
 pub use codec::{decode_message, encode_message};
 pub use io::{read_message, write_message};
 
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 2;
 
 /// Maximum uncompressed content block carried by a Data message.
 pub const MAX_CONTENT_BLOCK_SIZE: usize = 4 * 1024 * 1024;
@@ -198,6 +198,7 @@ pub enum Message {
         path: String,
         size: u64,
         offset: u64,
+        overwrite: bool,
     },
     Mkdir {
         path: String,

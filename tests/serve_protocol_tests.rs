@@ -14,7 +14,7 @@ fn roundtrip(msg: Message) -> Message {
 
 #[test]
 fn test_protocol_version_constant() {
-    assert_eq!(PROTOCOL_VERSION, 1);
+    assert_eq!(PROTOCOL_VERSION, 2);
 }
 
 #[test]
@@ -320,6 +320,7 @@ fn test_put_roundtrip() {
         path: "/remote/dest.bin".to_string(),
         size: 4_294_967_295,
         offset: 123_456,
+        overwrite: false,
     };
     assert_eq!(roundtrip(msg.clone()), msg);
 }

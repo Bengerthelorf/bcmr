@@ -105,6 +105,19 @@ impl ServeClient {
     }
 
     pub async fn put(&mut self, path: &str, data: &Path) -> Result<[u8; 32], BcmrError> {
+        self.put_with_overwrite(path, data, false).await
+    }
+
+    pub async fn put_overwrite(&mut self, path: &str, data: &Path) -> Result<[u8; 32], BcmrError> {
+        self.put_with_overwrite(path, data, true).await
+    }
+
+    async fn put_with_overwrite(
+        &mut self,
+        path: &str,
+        data: &Path,
+        overwrite: bool,
+    ) -> Result<[u8; 32], BcmrError> {
         let metadata = tokio::fs::metadata(data).await?;
         let size = metadata.len();
 
@@ -112,6 +125,7 @@ impl ServeClient {
             path: path.to_owned(),
             size,
             offset: 0,
+            overwrite,
         })
         .await?;
 
@@ -144,6 +158,7 @@ impl ServeClient {
             path: path.to_owned(),
             size,
             offset,
+            overwrite: true,
         })
         .await?;
         self.put_streaming_from(data, offset).await?;
@@ -170,6 +185,7 @@ impl ServeClient {
         write_file_data_frames(w, tx, data, algo, &|_| {}).await
     }
 
+    #[allow(dead_code)]
     pub async fn put_chunked(
         &mut self,
         remote: &str,

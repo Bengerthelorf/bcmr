@@ -50,6 +50,7 @@ async fn serve_pipelined_put_many_files_succeeds() {
     let hashes = client
         .pipelined_put_files(
             files,
+            false,
             move |n| {
                 chunk_bytes_w.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
             },
@@ -83,6 +84,48 @@ async fn serve_pipelined_put_many_files_succeeds() {
         "first file should be exactly its declared size"
     );
     client.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn serve_pipelined_put_enforces_the_batch_overwrite_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("source.bin");
+    let dst = dir.path().join("destination.bin");
+    fs::write(&src, b"replacement").unwrap();
+    fs::write(&dst, b"original").unwrap();
+
+    let transfer = || FileTransfer {
+        remote: dst.to_string_lossy().into_owned(),
+        local: src.clone(),
+        size: src.metadata().unwrap().len(),
+        metadata: None,
+    };
+
+    let mut refusing_client = ServeClient::connect_local().await.unwrap();
+    let refused = refusing_client
+        .pipelined_put_files(
+            vec![transfer()],
+            false,
+            |_| {},
+            |_idx, _path: &Path, _size| {},
+        )
+        .await;
+    assert!(refused.is_err());
+    assert_eq!(fs::read(&dst).unwrap(), b"original");
+    drop(refusing_client);
+
+    let mut overwrite_client = ServeClient::connect_local().await.unwrap();
+    overwrite_client
+        .pipelined_put_files(
+            vec![transfer()],
+            true,
+            |_| {},
+            |_idx, _path: &Path, _size| {},
+        )
+        .await
+        .unwrap();
+    overwrite_client.close().await.unwrap();
+    assert_eq!(fs::read(&dst).unwrap(), b"replacement");
 }
 
 #[tokio::test]
@@ -182,7 +225,7 @@ async fn serve_pipelined_put_writer_error_propagates() {
 
     let mut client = ServeClient::connect_local().await.unwrap();
     let result = client
-        .pipelined_put_files(files, |_| {}, |_idx, _path: &Path, _size| {})
+        .pipelined_put_files(files, false, |_| {}, |_idx, _path: &Path, _size| {})
         .await;
     assert!(
         result.is_err(),
@@ -398,6 +441,7 @@ async fn serve_pool_pipelined_put_n4_succeeds() {
     let hashes = pool
         .pipelined_put_files_striped(
             files,
+            false,
             move |n| {
                 chunks.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
             },
@@ -515,7 +559,7 @@ async fn serve_pool_n1_degenerate_behaves_like_single_client() {
     let mut pool = ServeClientPool::connect_local(1).await.unwrap();
     assert_eq!(pool.len(), 1);
     let hashes = pool
-        .pipelined_put_files_striped(files, |_| {}, |_, _: &Path, _| {})
+        .pipelined_put_files_striped(files, false, |_| {}, |_, _: &Path, _| {})
         .await
         .unwrap();
     assert_eq!(hashes.len(), 1);
@@ -559,7 +603,7 @@ async fn serve_pool_one_bucket_error_cancels_siblings() {
 
     let mut pool = ServeClientPool::connect_local(4).await.unwrap();
     let result = pool
-        .pipelined_put_files_striped(files, |_| {}, |_, _: &Path, _| {})
+        .pipelined_put_files_striped(files, false, |_| {}, |_, _: &Path, _| {})
         .await;
     assert!(
         result.is_err(),

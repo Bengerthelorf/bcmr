@@ -12,6 +12,7 @@ impl ServeClient {
     pub async fn pipelined_put_files<FChunk, FComplete>(
         &mut self,
         files: Vec<FileTransfer>,
+        overwrite: bool,
         on_chunk: FChunk,
         on_complete: FComplete,
     ) -> Result<Vec<[u8; 32]>, BcmrError>
@@ -20,7 +21,7 @@ impl ServeClient {
         FComplete: FnMut(usize, &Path, u64),
     {
         let r = self
-            .pipelined_put_files_imp(files, on_chunk, on_complete)
+            .pipelined_put_files_imp(files, overwrite, on_chunk, on_complete)
             .await;
         if r.is_err() {
             self.poisoned = true;
@@ -31,6 +32,7 @@ impl ServeClient {
     async fn pipelined_put_files_imp<FChunk, FComplete>(
         &mut self,
         files: Vec<FileTransfer>,
+        overwrite: bool,
         on_chunk: FChunk,
         mut on_complete: FComplete,
     ) -> Result<Vec<[u8; 32]>, BcmrError>
@@ -57,6 +59,7 @@ impl ServeClient {
                             path: ft.remote,
                             size: ft.size,
                             offset: 0,
+                            overwrite,
                         },
                     )
                     .await?;

@@ -1,5 +1,5 @@
+use crate::core::atomic_file::AtomicFile;
 use crate::core::cas;
-use crate::core::cleanup::{unique_id, TempFileGuard};
 use crate::core::compress;
 use crate::core::framing::Framing;
 use crate::core::protocol::{CompressionAlgo, ListEntry, Message};
@@ -295,11 +295,16 @@ fn write_all_fd(fd: i32, mut buf: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+pub(super) struct PutOptions {
+    pub declared_size: u64,
+    pub offset: u64,
+    pub overwrite: bool,
+    pub sync: bool,
+}
+
 pub(super) async fn handle_put<W, R>(
     path: &str,
-    declared_size: u64,
-    offset: u64,
-    sync: bool,
+    options: PutOptions,
     out: &mut W,
     reader: &mut R,
     framing: &mut Framing,
@@ -310,6 +315,12 @@ where
 {
     use tokio::io::AsyncSeekExt;
 
+    let PutOptions {
+        declared_size,
+        offset,
+        overwrite,
+        sync,
+    } = options;
     if offset > declared_size {
         bail!(
             "put: offset {} past declared size {}",
@@ -319,15 +330,19 @@ where
     }
     ensure_parent_dir(path).await?;
 
-    // offset==0 stages to a sibling temp + rename so a mid-PUT crash can't
-    // leave a half-written file at `path`; offset>0 is a resume.
-    let (mut file, mut temp_guard) = if offset == 0 {
-        let temp_path = format!("{path}.bcmr.put.{}.tmp", unique_id());
-        let f = write_open(&temp_path, true).await?;
-        (
-            f,
-            Some(TempFileGuard::new(std::path::PathBuf::from(temp_path))),
-        )
+    // A fresh PUT is written through a handle-bound transaction. The
+    // overwrite policy is enforced both at staging time and again by the
+    // atomic commit, so a concurrent creator cannot slip between a preflight
+    // check and publication. offset>0 is a content-proved resume.
+    let (mut file, transaction) = if offset == 0 {
+        let destination = Path::new(path);
+        let transaction = if overwrite {
+            AtomicFile::new(destination)?
+        } else {
+            AtomicFile::new_no_replace(destination)?
+        };
+        let file = fs::File::from_std(transaction.try_clone_file()?);
+        (file, Some(transaction))
     } else {
         let mut f = write_open(path, false).await?;
         f.seek(std::io::SeekFrom::Start(offset)).await?;
@@ -423,14 +438,13 @@ where
     }
 
     file.flush().await?;
-    if sync {
+    if sync && transaction.is_none() {
         file.sync_all().await?;
     }
     drop(file);
 
-    if let Some(mut g) = temp_guard.take() {
-        tokio::fs::rename(g.path(), path).await?;
-        g.disarm();
+    if let Some(transaction) = transaction {
+        transaction.commit(sync)?;
     }
 
     let hash = hasher.map(|h| h.finalize().to_hex().to_string());
