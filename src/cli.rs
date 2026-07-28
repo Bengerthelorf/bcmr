@@ -160,6 +160,14 @@ pub enum SparseMode {
     Never,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum CompressionMode {
+    Auto,
+    Zstd,
+    Lz4,
+    None,
+}
+
 impl std::fmt::Display for Shell {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -252,8 +260,8 @@ pub struct CopyMoveArgs {
     pub jobs: Option<usize>,
 
     /// Wire compression: auto, zstd, lz4, none
-    #[arg(long, default_value = "auto")]
-    pub compress: String,
+    #[arg(long, value_enum, default_value = "auto")]
+    pub compress: CompressionMode,
 
     /// Skip server-side BLAKE3 on GET (caller verifies another way, e.g. -V)
     #[arg(long, default_value_t = false)]
@@ -646,15 +654,13 @@ impl Commands {
         use crate::core::protocol::{CAP_LZ4, CAP_ZSTD};
         match self
             .copy_move_args()
-            .map(|a| a.compress.as_str())
-            .unwrap_or("auto")
-            .to_lowercase()
-            .as_str()
+            .map(|args| args.compress)
+            .unwrap_or(CompressionMode::Auto)
         {
-            "none" | "off" | "disable" => 0,
-            "lz4" => CAP_LZ4,
-            "zstd" => CAP_ZSTD,
-            _ => CAP_LZ4 | CAP_ZSTD,
+            CompressionMode::None => 0,
+            CompressionMode::Lz4 => CAP_LZ4,
+            CompressionMode::Zstd => CAP_ZSTD,
+            CompressionMode::Auto => CAP_LZ4 | CAP_ZSTD,
         }
     }
 
@@ -916,6 +922,14 @@ mod tests {
     }
 
     #[test]
+    fn compression_mode_rejects_unknown_values() {
+        assert!(
+            Cli::try_parse_from(["bcmr", "copy", "--compress=bogus", "src", "dst"]).is_err(),
+            "a mistyped compression mode must not silently become auto"
+        );
+    }
+
+    #[test]
     fn copy_parallel_counts_reject_zero_during_clap_parsing() {
         for args in [
             ["bcmr", "copy", "-j0", "src", "dst"].as_slice(),
@@ -1087,7 +1101,7 @@ mod tests {
             no_deref: false,
             sync: false,
             jobs: None,
-            compress: "auto".to_string(),
+            compress: CompressionMode::Auto,
             fast: false,
             direct: DirectMode::Ssh,
         }
