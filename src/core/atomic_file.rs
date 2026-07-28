@@ -316,12 +316,12 @@ fn open_snapshot_file(path: &Path) -> Result<File, BcmrError> {
         use windows_sys::Win32::Storage::FileSystem::{
             FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
         };
-        return OpenOptions::new()
+        OpenOptions::new()
             .access_mode(0)
             .share_mode(FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
             .open(path)
-            .map_err(BcmrError::Io);
+            .map_err(BcmrError::Io)
     }
     #[cfg(not(any(unix, windows)))]
     {
