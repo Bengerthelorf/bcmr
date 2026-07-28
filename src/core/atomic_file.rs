@@ -2438,7 +2438,7 @@ mod tests {
     #[test]
     fn private_transaction_removes_inherited_macos_acl() {
         let parent = tempfile::tempdir().unwrap();
-        let status = std::process::Command::new("chmod")
+        let status = std::process::Command::new("/bin/chmod")
             .arg("+a")
             .arg(
                 "everyone allow list,search,add_file,add_subdirectory,\
@@ -2467,7 +2467,7 @@ mod tests {
     #[test]
     fn new_file_inherits_the_final_parent_macos_acl() {
         let parent = tempfile::tempdir().unwrap();
-        let status = std::process::Command::new("chmod")
+        let status = std::process::Command::new("/bin/chmod")
             .arg("+a")
             .arg("everyone allow read,file_inherit")
             .arg(parent.path())
@@ -2784,7 +2784,7 @@ mod tests {
     #[test]
     fn drop_keeps_the_empty_transaction_when_parent_has_an_extended_acl() {
         let parent = tempfile::tempdir().unwrap();
-        let status = std::process::Command::new("chmod")
+        let status = std::process::Command::new("/bin/chmod")
             .arg("+a")
             .arg("everyone allow list,search,add_file,add_subdirectory")
             .arg(parent.path())
