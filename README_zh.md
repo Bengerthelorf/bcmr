@@ -70,7 +70,7 @@ brew install Bengerthelorf/tap/bcmr
 ### 安装脚本 (macOS / Linux)
 
 ```bash
-curl -fsSL https://app.snaix.homes/bcmr/install | bash
+curl -fsSL https://app.snaix.homes/bcmr/install.sh | bash
 ```
 
 ### Windows
