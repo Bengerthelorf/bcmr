@@ -25,6 +25,10 @@ fn remote_args(ssh_target: &str) -> Vec<String> {
         "BatchMode=yes".into(),
         "-o".into(),
         "ConnectTimeout=10".into(),
+        "-o".into(),
+        "ControlMaster=no".into(),
+        "-o".into(),
+        "ControlPath=none".into(),
     ];
     args.extend(SSH_LIVENESS_ARGS.map(str::to_owned));
     args.extend([ssh_target.into(), "bcmr".into(), "serve".into()]);
@@ -84,6 +88,16 @@ mod tests {
     fn remote_serve_ssh_has_bounded_liveness_detection() {
         let args = remote_args("host");
 
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-o", "ControlMaster=no"]),
+            "serve pool members must use independent TCP connections"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-o", "ControlPath=none"]),
+            "serve pool members must not join a configured multiplex socket"
+        );
         assert!(
             args.windows(2)
                 .any(|pair| pair == ["-o", "ServerAliveInterval=15"]),
