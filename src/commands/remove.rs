@@ -203,8 +203,12 @@ pub async fn remove_path(
         return Ok(());
     }
 
-    let plain = cli.is_plain_progress();
-    if cli.is_interactive() && !cli.is_force() && !confirm_remove(path, is_dir, plain).await? {
+    let uses_tui = crate::ui::progress::renderer_kind(
+        crate::commands::remote_copy::progress_mode(cli),
+        cli.is_quiet(),
+        crate::config::is_json_mode(),
+    ) == crate::ui::progress::RendererKind::Tui;
+    if cli.is_interactive() && !cli.is_force() && !confirm_remove(path, is_dir, uses_tui).await? {
         return Ok(());
     }
 
@@ -236,7 +240,7 @@ pub async fn remove_path(
 
             if cli.is_interactive()
                 && !cli.is_force()
-                && !confirm_remove(entry_path, ft.is_dir(), plain).await?
+                && !confirm_remove(entry_path, ft.is_dir(), uses_tui).await?
             {
                 continue;
             }

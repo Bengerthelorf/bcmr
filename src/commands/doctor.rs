@@ -144,7 +144,7 @@ fn print_human(version: &str, local: &[Check], hosts: &[HostReport]) {
 }
 
 fn use_ascii_glyphs() -> bool {
-    crate::ui::progress::ansi_disabled_by_env() || !std::io::stdout().is_terminal()
+    crate::ui::progress::terminal_controls_disabled_by_env() || !std::io::stdout().is_terminal()
 }
 
 fn print_check(c: &Check, indent: &str, ascii: bool) {
@@ -252,20 +252,18 @@ fn check_jobs_dir() -> Check {
 }
 
 fn check_color_env() -> Check {
-    if crate::ui::progress::ansi_disabled_by_env() {
-        let no_color = std::env::var_os("NO_COLOR")
-            .map(|v| !v.is_empty())
-            .unwrap_or(false);
-        let term = std::env::var("TERM").unwrap_or_default();
+    if crate::ui::progress::terminal_controls_disabled_by_env() {
         Check::ok(
             "color env",
-            format!("ANSI suppressed (NO_COLOR={}, TERM={:?})", no_color, term),
+            "terminal controls and color disabled (TERM=\"dumb\")",
+        )
+    } else if crate::ui::progress::color_disabled_by_env() {
+        Check::ok(
+            "color env",
+            "color disabled by NO_COLOR; uncolored inline progress remains available",
         )
     } else {
-        Check::ok(
-            "color env",
-            "ANSI enabled (NO_COLOR unset, TERM not 'dumb')",
-        )
+        Check::ok("color env", "color and terminal controls enabled")
     }
 }
 

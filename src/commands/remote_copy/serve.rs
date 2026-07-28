@@ -1,4 +1,4 @@
-use super::{is_plain_mode, transfer_options_from_cli, STRIPING_MIN_FILE_SIZE};
+use super::{progress_mode, transfer_options_from_cli, STRIPING_MIN_FILE_SIZE};
 use crate::cli::Commands;
 use crate::core::checksum::bytes_to_hex;
 use crate::core::remote::{check_resume_state, parse_remote_path, RemotePath, ResumeDecision};
@@ -152,7 +152,7 @@ pub(super) async fn handle_serve_upload(
 
     let runner = ProgressRunner::new(
         total_size,
-        is_plain_mode(args),
+        progress_mode(args),
         args.is_quiet(),
         crate::config::is_json_mode(),
         crate::core::cleanup::cleanup_partial_files,
@@ -477,7 +477,7 @@ pub(super) async fn handle_serve_download(
 
     let runner = ProgressRunner::new(
         total_size,
-        is_plain_mode(args),
+        progress_mode(args),
         args.is_quiet(),
         crate::config::is_json_mode(),
         crate::core::cleanup::cleanup_partial_files,

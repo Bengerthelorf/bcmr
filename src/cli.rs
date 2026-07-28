@@ -13,7 +13,7 @@ EXAMPLES:
       bcmr copy -C ./large.iso host:backup/
 
   Background with JSON for scripts:
-      bcmr copy --json -V ./big.tar.gz host:dst/
+      bcmr copy --background --json -V ./big.tar.gz host:dst/
 
   Compare source and destination without copying:
       bcmr check ./project/ host:archives/
@@ -61,7 +61,7 @@ EXAMPLES:
       bcmr copy -C ./large.tar.gz host:dst/
 
   Background job with JSON status events:
-      bcmr copy --json -V ./big.bin host:dst/   # query: bcmr status
+      bcmr copy --background --json -V ./big.bin host:dst/   # query: bcmr status
 
   Sparse-aware copy:
       bcmr copy --sparse=auto disk.img dst.img
@@ -168,6 +168,16 @@ pub enum CompressionMode {
     None,
 }
 
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum ProgressMode {
+    #[default]
+    Auto,
+    Tui,
+    Inline,
+    Plain,
+    Off,
+}
+
 impl std::fmt::Display for Shell {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -216,9 +226,9 @@ pub struct CopyMoveArgs {
     #[arg(short = 'e', long)]
     pub exclude: Option<Vec<String>>,
 
-    /// Use plain inline progress (3-line) instead of the fancy TUI box
-    #[arg(long, alias = "tui", short_alias = 't')]
-    pub plain: bool,
+    /// Progress display: auto, tui, inline, plain, or off
+    #[arg(long, value_enum, default_value = "auto")]
+    pub progress: ProgressMode,
 
     /// Suppress progress UI; only errors print to stderr
     #[arg(short = 'q', long)]
@@ -493,9 +503,9 @@ pub enum Commands {
         #[arg(short = 'e', long, value_name = "PATTERN", value_delimiter = ',')]
         exclude: Option<Vec<String>>,
 
-        /// Use plain inline progress (3-line) instead of the fancy TUI box
-        #[arg(long, alias = "tui", short_alias = 't')]
-        plain: bool,
+        /// Progress display: auto, tui, inline, plain, or off
+        #[arg(long, value_enum, default_value = "auto")]
+        progress: ProgressMode,
 
         /// Suppress progress UI; only errors print to stderr
         #[arg(short = 'q', long)]
@@ -588,9 +598,14 @@ impl Commands {
         }
     }
 
-    pub fn is_plain_progress(&self) -> bool {
-        self.copy_move_args().is_some_and(|a| a.plain)
-            || matches!(self, Commands::Remove { plain: true, .. })
+    pub fn progress_mode(&self) -> ProgressMode {
+        self.copy_move_args()
+            .map(|args| args.progress)
+            .or(match self {
+                Commands::Remove { progress, .. } => Some(*progress),
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 
     pub fn is_quiet(&self) -> bool {
@@ -1090,7 +1105,7 @@ mod tests {
             yes: false,
             verbose: false,
             exclude: None,
-            plain: false,
+            progress: ProgressMode::Auto,
             quiet: false,
             dry_run: false,
             test_mode: None,
@@ -1133,7 +1148,7 @@ mod tests {
         assert!(!cmd.is_yes());
         assert!(cmd.is_verbose());
         assert!(cmd.is_dry_run());
-        assert!(!cmd.is_plain_progress());
+        assert_eq!(cmd.progress_mode(), ProgressMode::Auto);
         assert!(cmd.is_verify());
         assert!(cmd.is_resume());
         assert!(cmd.is_strict());
@@ -1174,7 +1189,7 @@ mod tests {
             verbose: false,
             dir: true,
             exclude: None,
-            plain: false,
+            progress: ProgressMode::Auto,
             quiet: false,
             dry_run: false,
             test_mode: None,

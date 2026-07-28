@@ -169,7 +169,7 @@ fn e2e_session_cleaned_up_after_success() {
 
     let (ok, _, stderr) = run_bcmr(&[
         "copy",
-        "-t",
+        "--progress=plain",
         "-C",
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
@@ -2989,31 +2989,43 @@ fn e2e_cross_host_copy_refuses_with_clear_error() {
 }
 
 #[test]
-fn e2e_plain_flag_and_legacy_tui_alias_both_accepted() {
+fn e2e_progress_modes_are_explicit_and_legacy_inverted_tui_alias_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("s.bin");
     fs::write(&src, b"plain-test").unwrap();
 
-    for (flag, tag) in [("--plain", "long"), ("--tui", "alias"), ("-t", "short")] {
+    for (flag, tag) in [
+        ("--progress=auto", "auto"),
+        ("--progress=tui", "tui"),
+        ("--progress=inline", "inline"),
+        ("--progress=plain", "plain"),
+        ("--progress=off", "off"),
+    ] {
         let dst = dir.path().join(format!("d_{tag}.bin"));
         let (ok, _stdout, stderr) =
             run_bcmr(&["copy", flag, src.to_str().unwrap(), dst.to_str().unwrap()]);
         assert!(ok, "{flag} should be accepted, stderr: {stderr}");
         assert!(dst.exists(), "{flag} did not produce output");
     }
+
+    let (ok, _stdout, stderr) = run_bcmr(&[
+        "copy",
+        "--tui",
+        src.to_str().unwrap(),
+        dir.path().join("legacy.bin").to_str().unwrap(),
+    ]);
+    assert!(!ok, "the old --tui alias selected the opposite renderer");
+    assert!(stderr.contains("unexpected argument '--tui'"), "{stderr}");
 }
 
 #[test]
-fn e2e_help_advertises_plain_not_tui() {
+fn e2e_help_advertises_unambiguous_progress_modes() {
     let (_ok, stdout, _stderr) = run_bcmr(&["copy", "--help"]);
     assert!(
-        stdout.contains("--plain"),
-        "expected --plain in help, got: {stdout}"
+        stdout.contains("--progress <PROGRESS>"),
+        "expected --progress in help, got: {stdout}"
     );
-    assert!(
-        !stdout.contains("--tui"),
-        "did not expect --tui in help (kept as hidden alias), got: {stdout}"
-    );
+    assert!(stdout.contains("auto, tui, inline, plain, off"), "{stdout}");
 }
 
 #[test]

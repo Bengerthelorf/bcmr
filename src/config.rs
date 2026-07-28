@@ -171,7 +171,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             progress: ProgressConfig {
-                style: "fancy".to_string(),
+                style: "auto".to_string(),
                 theme: ThemeConfig {
                     bar_complete_char: "█".to_string(),
                     bar_incomplete_char: "░".to_string(),
@@ -350,6 +350,15 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        if !matches!(
+            self.progress.style.to_ascii_lowercase().as_str(),
+            "auto" | "tui" | "inline" | "plain" | "off" | "fancy"
+        ) {
+            return Err(ConfigError::Message(format!(
+                "progress.style must be one of auto, tui, inline, plain, or off (got {:?})",
+                self.progress.style
+            )));
+        }
         if self.scp.parallel_transfers == 0 {
             return Err(ConfigError::Message(
                 "scp.parallel_transfers must be greater than zero".to_string(),
@@ -366,8 +375,16 @@ mod tests {
     #[test]
     fn test_default_config() {
         let cfg = Config::default();
-        assert_eq!(cfg.progress.style, "fancy");
+        assert_eq!(cfg.progress.style, "auto");
         assert_eq!(cfg.update_check, UpdateCheck::Off);
+    }
+
+    #[test]
+    fn progress_style_rejects_unknown_values() {
+        let mut cfg = Config::default();
+        cfg.progress.style = "fancyy".to_string();
+        let error = cfg.validate().unwrap_err().to_string();
+        assert!(error.contains("progress.style must be one of"), "{error}");
     }
 
     #[test]

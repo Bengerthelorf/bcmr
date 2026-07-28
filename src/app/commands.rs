@@ -3,7 +3,7 @@ use crate::app::prompts::{confirm_overwrite, confirm_removal, first_display_name
 use crate::app::runners::{resume_or_new_runner, start_scanning_runner};
 use crate::cli::Commands;
 use crate::commands;
-use crate::commands::remote_copy::{handle_remote_copy, is_plain_mode};
+use crate::commands::remote_copy::{handle_remote_copy, progress_mode};
 use crate::config::is_json_mode;
 use crate::core::error::BcmrError;
 use crate::output;
@@ -300,7 +300,7 @@ async fn handle_copy_one(args: &Commands, dest_override: Option<&std::path::Path
     } else {
         let runner = ProgressRunner::new(
             0,
-            is_plain_mode(args),
+            progress_mode(args),
             args.is_quiet(),
             is_json_mode(),
             crate::core::cleanup::cleanup_partial_files,

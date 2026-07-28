@@ -1,5 +1,5 @@
 use super::{
-    collect_upload_files, is_plain_mode, resolve_upload_remote, run_parallel_transfers,
+    collect_upload_files, progress_mode, resolve_upload_remote, run_parallel_transfers,
     transfer_options_from_cli, TransferItem,
 };
 use crate::cli::Commands;
@@ -64,7 +64,7 @@ pub(super) async fn handle_remote_upload(
 
     let runner = ProgressRunner::new(
         total_size,
-        is_plain_mode(args),
+        progress_mode(args),
         args.is_quiet(),
         crate::config::is_json_mode(),
         crate::core::cleanup::cleanup_partial_files,
@@ -200,7 +200,7 @@ pub(super) async fn handle_remote_download(
 
     let runner = ProgressRunner::new(
         total_size,
-        is_plain_mode(args),
+        progress_mode(args),
         args.is_quiet(),
         crate::config::is_json_mode(),
         crate::core::cleanup::cleanup_partial_files,

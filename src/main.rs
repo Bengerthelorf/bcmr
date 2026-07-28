@@ -18,6 +18,7 @@ use crate::app::updates::background_update_check;
 use crate::config::{is_json_mode, set_json_mode};
 use anyhow::Result;
 use cli::Commands;
+use std::io::IsTerminal;
 use std::sync::mpsc;
 
 fn maybe_detach(cli: &cli::Cli) -> Result<bool> {
@@ -389,11 +390,19 @@ fn levenshtein(a: &str, b: &str) -> usize {
 fn show_update_hint(update_rx: Option<mpsc::Receiver<Option<String>>>) {
     if let Some(rx) = update_rx {
         if let Ok(Some(version)) = rx.try_recv() {
-            eprintln!(
-                "\x1b[33m↑ Update available: v{} → v{} (run `bcmr update`)\x1b[0m",
+            let message = format!(
+                "↑ Update available: v{} → v{} (run `bcmr update`)",
                 env!("CARGO_PKG_VERSION"),
                 version
             );
+            if crate::ui::progress::color_disabled_by_env()
+                || crate::ui::progress::terminal_controls_disabled_by_env()
+                || !std::io::stderr().is_terminal()
+            {
+                eprintln!("{message}");
+            } else {
+                eprintln!("\x1b[33m{message}\x1b[0m");
+            }
         }
     }
 }
