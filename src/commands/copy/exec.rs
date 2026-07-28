@@ -296,7 +296,7 @@ pub(crate) async fn preserve_attributes(
         filetime::set_file_times(dst, atime, mtime)?;
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(unix)]
     super::file_copy::copy_xattrs(src, dst)?;
 
     Ok(())

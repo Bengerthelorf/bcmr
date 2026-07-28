@@ -70,7 +70,7 @@ ring = "0.17"
 zeroize = { version = "1.8", features = ["derive"] }
 tempfile = "3"
 
-[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+[target.'cfg(unix)'.dependencies]
 xattr = "1.5"
 
 [target.'cfg(windows)'.dependencies]
@@ -79,7 +79,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage
 [dev-dependencies]
 proptest = "1.5"
 
-[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
+[target.'cfg(unix)'.dev-dependencies]
 xattr = "1.5"
 
 [profile.release]

@@ -1231,7 +1231,7 @@ fn preserve_existing_security(
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(unix)]
     {
         use std::collections::HashSet;
         use xattr::FileExt;
@@ -1272,6 +1272,11 @@ fn should_preserve_existing_xattr(name: &OsStr) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+fn should_preserve_existing_xattr(_name: &OsStr) -> bool {
+    true
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 fn should_preserve_existing_xattr(_name: &OsStr) -> bool {
     true
 }
