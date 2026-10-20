@@ -76,9 +76,11 @@ function {prefix}rm{suffix}() {{
         return 0
     fi
 
-    # Reload stale scripts sourced before init after an upgrade, as well as
-    # autoload stubs or missing functions. Repeated init of this version is free.
-    if [[ ${{_bcmr_completion_version-}} != "{completion_version}" ]] ||
+    # Reload stale scripts even when sourced again after current-version init.
+    # Matching cached definitions keep repeated initialization free.
+    if [[ ${{_bcmr_completion_version-}} != "{completion_version}" ||
+          "${{functions[_bcmr]-}}" != "${{_bcmr_completion_base_definition-}}" ||
+          "${{functions[_bcmr_with_remote]-}}" != "${{_bcmr_completion_remote_definition-}}" ]] ||
         (( ! $+functions[_bcmr] || ! $+functions[_bcmr_with_remote] )); then
         if _bcmr_completion_script="$({shell_exe} completions zsh)"; then
             if ! eval "$_bcmr_completion_script"; then
@@ -90,9 +92,11 @@ function {prefix}rm{suffix}() {{
             return 0
         fi
     fi
-    if [[ ${{_bcmr_completion_version-}} != "{completion_version}" ]] ||
+    if [[ ${{_bcmr_completion_version-}} != "{completion_version}" ||
+          "${{functions[_bcmr]-}}" != "${{_bcmr_completion_base_definition-}}" ||
+          "${{functions[_bcmr_with_remote]-}}" != "${{_bcmr_completion_remote_definition-}}" ]] ||
         (( ! $+functions[_bcmr] || ! $+functions[_bcmr_with_remote] )); then
-        print -u2 -- 'bcmr: zsh completion script did not define the expected functions or version; command wrappers remain available.'
+        print -u2 -- 'bcmr: zsh completion script did not define the expected completion definitions or version; command wrappers remain available.'
         return 0
     fi
     compdef _bcmr_with_remote bcmr

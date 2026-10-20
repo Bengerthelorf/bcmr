@@ -69,7 +69,9 @@ compdef _bcmr_with_remote bcmr
 "#,
                 "\ntypeset -g _bcmr_completion_version='",
                 env!("CARGO_PKG_VERSION"),
-                "'\n"
+                "'\n",
+                "typeset -g _bcmr_completion_base_definition=\"${functions[_bcmr]}\"\n",
+                "typeset -g _bcmr_completion_remote_definition=\"${functions[_bcmr_with_remote]}\"\n"
             )
         }
         Shell::Bash => {

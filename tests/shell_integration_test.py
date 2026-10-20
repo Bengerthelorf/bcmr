@@ -189,6 +189,18 @@ compdef _bcmr_with_remote bcmr
                 self.assert_tab_buffer(stale + self.generate("--cmd", "b"),
                                        "bcp --no-de", "bcp --no-deref ")
 
+    # Re-sourcing an old file can replace functions while leaving our version marker.
+    def test_stale_completion_source_after_init_is_refreshed_in_pty(self):
+        stale_file = self.root / "stale-completions.zsh"
+        stale_file.write_text('''
+_bcmr() { _arguments '--recursive[Recursively process directories]' }
+_bcmr_with_remote() { _bcmr "$@" }
+compdef _bcmr_with_remote bcmr
+''')
+        script = self.generate("--cmd", "b")
+        self.assert_tab_buffer(script + "\nsource " + shlex.quote(str(stale_file)) + "\n" + script,
+                               "bcp --no-de", "bcp --no-deref ")
+
     def assert_tab_buffer(self, script, typed, expected):
         init_file = self.root / "init.zsh"
         init_file.write_text(script)
