@@ -83,13 +83,13 @@ jobs:
             ext: ""
 
           - target: x86_64-apple-darwin
-            os: macos-latest
+            os: macos-15
             name: bcmr-x86_64-macos
             strip: true
             ext: ""
 
           - target: aarch64-apple-darwin
-            os: macos-latest
+            os: macos-15
             name: bcmr-aarch64-macos
             strip: true
             ext: ""
@@ -299,7 +299,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-15]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -386,7 +386,7 @@ jobs:
 
   verify-tap:
     name: Verify published Homebrew package
-    runs-on: macos-latest
+    runs-on: macos-15
     needs: [release-gate, update-tap]
     if: needs.release-gate.outputs.prerelease == 'false'
     steps:
