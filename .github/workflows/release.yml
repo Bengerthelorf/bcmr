@@ -292,10 +292,38 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  verify-install:
+    name: Verify released installer (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: [release-gate, release]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Install Zsh (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh
+      - name: Install and exercise released binary
+        shell: bash
+        env:
+          BCMR_VERSION: v${{ needs.release-gate.outputs.version }}
+          EXPECTED_VERSION: ${{ needs.release-gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          export BCMR_INSTALL_DIR="$RUNNER_TEMP/bcmr released/bin"
+          bash install.sh
+          export BCMR="$BCMR_INSTALL_DIR/bcmr"
+          test "$("$BCMR" --version)" = "bcmr $EXPECTED_VERSION"
+          python3 tests/shell_integration_test.py
+          python3 tests/remote_completion_test.py
+
   publish-crate:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    needs: release
+    needs: [release, verify-install]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -312,7 +340,7 @@ jobs:
   update-tap:
     name: Update Homebrew Formula
     runs-on: ubuntu-latest
-    needs: [release-gate, release]
+    needs: [release-gate, release, verify-install]
     if: needs.release-gate.outputs.prerelease == 'false'
     steps:
       - name: Checkout
@@ -325,31 +353,13 @@ jobs:
           TAG=${GITHUB_REF#refs/tags/}
           echo "FORMULA_VERSION=${TAG#v}" >> $GITHUB_OUTPUT
 
-      - name: Read verified release checksums
-        id: shasum
+      - name: Download verified release checksum manifest
         shell: bash
         run: |
           set -euo pipefail
-          VERSION=${{ steps.release.outputs.VERSION }}
-          base="https://github.com/Bengerthelorf/bcmr/releases/download/${VERSION}"
           curl --fail --location --retry 5 --retry-all-errors \
-            --output sha256sums.txt "${base}/sha256sums.txt"
-
-          checksum() {
-            local asset=$1
-            local hash
-            hash=$(awk -v asset="$asset" '$2 == asset || $2 == "*" asset { print $1; exit }' sha256sums.txt)
-            [[ "$hash" =~ ^[0-9a-f]{64}$ ]] || {
-              echo "::error::invalid or missing checksum for $asset"
-              exit 1
-            }
-            printf '%s' "$hash"
-          }
-
-          echo "SHA_ARM_MAC=$(checksum bcmr-aarch64-macos.tar.gz)" >> "$GITHUB_OUTPUT"
-          echo "SHA_INTEL_MAC=$(checksum bcmr-x86_64-macos.tar.gz)" >> "$GITHUB_OUTPUT"
-          echo "SHA_X86_LINUX=$(checksum bcmr-x86_64-linux.tar.gz)" >> "$GITHUB_OUTPUT"
-          echo "SHA_ARM_LINUX=$(checksum bcmr-aarch64-linux.tar.gz)" >> "$GITHUB_OUTPUT"
+            --output sha256sums.txt \
+            "https://github.com/Bengerthelorf/bcmr/releases/download/${{ steps.release.outputs.VERSION }}/sha256sums.txt"
 
       - name: Checkout Tap Repository
         uses: actions/checkout@v6
@@ -359,46 +369,39 @@ jobs:
           path: homebrew-tap
 
       - name: Update Formula
+        shell: bash
         run: |
-          cd homebrew-tap/Formula
-
-          cat > bcmr.rb <<EOF
-          class Bcmr < Formula
-            desc "Better Copy Move Remove - A modern, safe file operation tool"
-            homepage "https://github.com/Bengerthelorf/bcmr"
-            version "${{ steps.release.outputs.FORMULA_VERSION }}"
-            license "Apache-2.0"
-
-            if OS.mac?
-              if Hardware::CPU.arm?
-                url "https://github.com/Bengerthelorf/bcmr/releases/download/${{ steps.release.outputs.VERSION }}/bcmr-aarch64-macos.tar.gz"
-                sha256 "${{ steps.shasum.outputs.SHA_ARM_MAC }}"
-              else
-                url "https://github.com/Bengerthelorf/bcmr/releases/download/${{ steps.release.outputs.VERSION }}/bcmr-x86_64-macos.tar.gz"
-                sha256 "${{ steps.shasum.outputs.SHA_INTEL_MAC }}"
-              end
-            elsif OS.linux?
-              if Hardware::CPU.arm?
-                url "https://github.com/Bengerthelorf/bcmr/releases/download/${{ steps.release.outputs.VERSION }}/bcmr-aarch64-linux.tar.gz"
-                sha256 "${{ steps.shasum.outputs.SHA_ARM_LINUX }}"
-              else
-                url "https://github.com/Bengerthelorf/bcmr/releases/download/${{ steps.release.outputs.VERSION }}/bcmr-x86_64-linux.tar.gz"
-                sha256 "${{ steps.shasum.outputs.SHA_X86_LINUX }}"
-              end
-            end
-
-            def install
-              bin.install "bcmr"
-            end
-
-            test do
-              system "#{bin}/bcmr", "--version"
-            end
-          end
-          EOF
-
+          set -euo pipefail
+          bash scripts/render-homebrew-formula.sh \
+            "${{ steps.release.outputs.VERSION }}" sha256sums.txt > bcmr.rb
+          mv bcmr.rb homebrew-tap/Formula/bcmr.rb
+          cd homebrew-tap
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
-          git add bcmr.rb
-          git commit -m "Update bcmr to ${{ steps.release.outputs.VERSION }}" || echo "No changes to commit"
-          git push origin main
+          git add Formula/bcmr.rb
+          if ! git diff --cached --quiet; then
+            git commit -m "Update bcmr to ${{ steps.release.outputs.VERSION }}"
+            git push origin main
+          fi
+
+  verify-tap:
+    name: Verify published Homebrew package
+    runs-on: macos-latest
+    needs: [release-gate, update-tap]
+    if: needs.release-gate.outputs.prerelease == 'false'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Install and test published formula
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ needs.release-gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          brew tap Bengerthelorf/tap
+          brew install Bengerthelorf/tap/bcmr
+          brew test Bengerthelorf/tap/bcmr
+          export BCMR="$(brew --prefix bcmr)/bin/bcmr"
+          test "$("$BCMR" --version)" = "bcmr $EXPECTED_VERSION"
+          python3 tests/shell_integration_test.py
+          python3 tests/remote_completion_test.py

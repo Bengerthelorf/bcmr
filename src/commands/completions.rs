@@ -70,7 +70,7 @@ pub fn run_install(
     tmp.persist(&path)
         .map_err(|e| anyhow!("cannot install {}: {}", path.display(), e))?;
     eprintln!("Installed {} ({})", path.display(), shell);
-    shell_reload_hint(shell);
+    shell_reload_hint(shell, &path);
     Ok(())
 }
 
@@ -78,7 +78,11 @@ fn remove_install(shell: clap_complete::Shell, path: &std::path::Path) -> Result
     match std::fs::remove_file(path) {
         Ok(()) => {
             eprintln!("Removed {}", path.display());
-            shell_reload_hint(shell);
+            if matches!(shell, clap_complete::Shell::Zsh) {
+                eprintln!("Open a new shell to clear previously loaded file-based completions.");
+            } else {
+                shell_reload_hint(shell, path);
+            }
             Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -89,14 +93,23 @@ fn remove_install(shell: clap_complete::Shell, path: &std::path::Path) -> Result
     }
 }
 
-fn shell_reload_hint(shell: clap_complete::Shell) {
+fn shell_reload_hint(shell: clap_complete::Shell, path: &std::path::Path) {
+    if matches!(shell, clap_complete::Shell::Zsh) {
+        eprintln!(
+            "File installation does not activate completions in the current shell. \
+             To activate bcmr and bcp/bmv/brm completions, add this to ~/.zshrc and run it now:\n\
+             eval \"$(bcmr init zsh --cmd b)\"\n\
+             Installed completion directory: {}\n\
+             For file-based loading, add that directory to fpath before running \
+             'autoload -Uz compinit; compinit'.",
+            path.parent().unwrap_or(path).display()
+        );
+        return;
+    }
     let hint = match shell {
         clap_complete::Shell::Bash => {
             "Reload: open a new shell. \
              Requires the bash-completion package to be installed and sourced from your rc file."
-        }
-        clap_complete::Shell::Zsh => {
-            "Reload: ensure $XDG_DATA_HOME/zsh/site-functions is on $fpath, then run 'compinit'"
         }
         clap_complete::Shell::Fish => "Fish loads it on next shell start.",
         clap_complete::Shell::Elvish => "Elvish loads it on next shell start.",

@@ -58,25 +58,25 @@ jobs:
       - name: Formatting check
         run: cargo fmt --check
 
-      - name: Test shell init scripts
-        shell: bash
-        run: |
-          cargo run -- init bash --cmd b > /dev/null
-          cargo run -- init zsh --cmd b > /dev/null
-          cargo run -- init fish --cmd b > /dev/null
-          cargo run -- init bash --cmd '' > /dev/null
-          cargo run -- init zsh --no-cmd --path /tmp > /dev/null
-          cargo run -- init bash --cmd --prefix p --suffix + > /dev/null
-          echo "All init scripts generated successfully"
+      - name: Install Zsh (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh
 
-      - name: Test shell completions (all shells)
+      - name: Test real shell initialization and remote completion
+        if: runner.os != 'Windows'
         shell: bash
         run: |
-          cargo run -- completions bash > /dev/null
-          cargo run -- completions zsh > /dev/null
-          cargo run -- completions fish > /dev/null
-          cargo run -- completions powershell > /dev/null
-          echo "All completion scripts generated successfully"
+          cargo build --locked --features test-support
+          export BCMR="$PWD/target/debug/bcmr"
+          python3 tests/shell_integration_test.py
+          python3 tests/remote_completion_test.py
+
+      - name: Test Homebrew formula installation
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          export BCMR="$PWD/target/debug/bcmr"
+          python3 tests/homebrew_formula_test.py
 
       - name: Test completions install / uninstall (POSIX shells)
         if: runner.os != 'Windows'
@@ -146,13 +146,6 @@ jobs:
 
           $output | Out-String | Invoke-Expression
           Write-Host "PowerShell completions loaded successfully"
-
-      - name: Test __complete-remote (no crash on invalid input)
-        shell: bash
-        run: |
-          cargo run -- __complete-remote "nonexistent-host:/path" 2>/dev/null || true
-          cargo run -- __complete-remote "not-a-remote" 2>/dev/null || true
-          echo "__complete-remote handled gracefully"
 
       - name: Test copy operations
         shell: bash

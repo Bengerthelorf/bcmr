@@ -72,12 +72,13 @@ BCMR 透過 `bcmr completions` 提供所有命令和參數的 tab 補全。
 :::code-group
 
 ```bash [Zsh]
-# 加入 ~/.zshrc
-eval "$(bcmr completions zsh)"
+# 加入 ~/.zshrc；需要時會自動初始化 zsh 補全系統。
+eval "$(bcmr init zsh --cmd b)"
 
-# 或產生到 fpath（啟動更快）
-bcmr completions zsh > ~/.zfunc/_bcmr
-# 確保 ~/.zshrc 中有: fpath=(~/.zfunc $fpath)
+# 可選：安裝產生的補全檔案，供 fpath 載入。
+bcmr completions zsh --install
+# 只列印實際安裝路徑，不寫入檔案：
+bcmr completions zsh --install --print
 ```
 
 ```bash [Bash]
@@ -103,6 +104,12 @@ bcmr completions powershell | Out-String | Invoke-Expression
 
 :::
 
+`bcmr init zsh --cmd b` 會建立 `bcp`、`bmv` 和 `brm`，僅在需要時初始化 `compinit`，並載入本機及遠端路徑補全。可重複執行；既有的 zsh 補全設定應放在此行之前。`--no-cmd` 保持僅設定 PATH 的行為，不初始化補全。
+
+`--install` 只寫入檔案，不會啟用目前 shell 的補全，也不會修改設定檔。命令會列印實際安裝目錄，包括未設定 `XDG_DATA_HOME` 時的預設目錄。使用檔案載入時，請先將該目錄加入 `fpath`，再執行 `autoload -Uz compinit; compinit`。上面的獨立 `init` 設定已足夠啟用命令包裝及補全。
+
+若 `compinit` 提示目錄不安全，請用 `compaudit` 檢查並修正目錄擁有權或權限後重試。初始化保留這些安全檢查；補全失敗時會提供診斷，命令包裝仍可使用。
+
 設定後即可 tab 補全命令和參數：
 
 ```
@@ -111,17 +118,25 @@ bcmr copy -<TAB>   → --recursive --preserve --force --verify ...
 ```
 
 :::callout[別名補全（Zsh）]{kind="info"}
-使用 `bcmr init zsh --cmd <前綴>` 時，別名命令（如 `bcp`、`bmv`、`brm`）的補全會自動包含，無需額外設定。只需確保 `~/.zshrc` 中同時有：
+使用 `bcmr init zsh --cmd <前綴>` 時，一行即可啟用命令包裝及補全：
 
 ```bash
 eval "$(bcmr init zsh --cmd b)"
-eval "$(bcmr completions zsh)"
 ```
 
-之後即可直接對別名命令進行 tab 補全：
+之後即可直接對命令進行 tab 補全：
 
 ```
 bcp -<TAB>   → --recursive --preserve --force --verify ...
 bmv -<TAB>   → --recursive --preserve --force --verify ...
 ```
 :::
+
+遠端主機無法使用時，Tab 補全預設保持安靜。可直接執行隱藏的補全命令查看錯誤，或為 Tab 補全開啟診斷：
+
+```bash
+bcmr __complete-remote 'user@example.com:/path/'
+export BCMR_COMPLETION_DEBUG=1
+# 關閉診斷輸出：
+unset BCMR_COMPLETION_DEBUG
+```

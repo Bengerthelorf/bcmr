@@ -117,7 +117,7 @@ Common usage:
 
   bcmr deploy <host>                 # install bcmr remotely for fast-path
   bcmr init zsh                      # set up shell integration (bcp/bmv/brm)
-  bcmr completions install zsh       # one-shot completion install
+  bcmr completions zsh --install     # one-shot completion install
   bcmr doctor                        # diagnose ssh / config / PATH issues
 
 Type `bcmr help <command>` or `bcmr <command> --help` for full options.
@@ -249,7 +249,7 @@ async fn run() -> Result<()> {
         Commands::Du { path } => commands::inspect::du(path).await?,
         Commands::Hash { path } => commands::inspect::hash(path).await?,
         Commands::CompleteRemote { partial } => {
-            for entry in crate::core::remote::complete_remote_path(partial).await {
+            for entry in crate::core::remote::complete_remote_path(partial).await? {
                 println!("{}", entry);
             }
         }

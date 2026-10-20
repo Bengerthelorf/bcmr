@@ -74,12 +74,13 @@ BCMR provides tab completion for all commands and flags via `bcmr completions`.
 :::code-group
 
 ```bash [Zsh]
-# Add to ~/.zshrc
-eval "$(bcmr completions zsh)"
+# Add to ~/.zshrc; this also initializes zsh's completion system when needed.
+eval "$(bcmr init zsh --cmd b)"
 
-# Or generate to fpath (faster startup)
-bcmr completions zsh > ~/.zfunc/_bcmr
-# Then ensure ~/.zshrc has: fpath=(~/.zfunc $fpath)
+# Optional: install a generated completion file for loading through fpath.
+bcmr completions zsh --install
+# Print its resolved location without writing it:
+bcmr completions zsh --install --print
 ```
 
 ```bash [Bash]
@@ -105,6 +106,12 @@ bcmr completions powershell | Out-String | Invoke-Expression
 
 :::
 
+`bcmr init zsh --cmd b` creates `bcp`, `bmv`, and `brm`, initializes `compinit` only if needed, and loads both local and remote completions. It is safe to run again. Keep any existing zsh completion setup before this line. `--no-cmd` retains its PATH-only behavior and does not initialize completions.
+
+`--install` only writes a file; it does not activate completion in an existing shell or edit your configuration. The command prints the resolved installation directory (including the default when `XDG_DATA_HOME` is unset). For file-based loading, add that directory to `fpath` before `autoload -Uz compinit; compinit`. The self-contained `init` line above is sufficient for command wrappers and completions.
+
+If `compinit` reports insecure directories, inspect them with `compaudit` and correct their ownership or permissions before retrying. Initialization preserves these checks and reports completion failures while leaving command wrappers available.
+
 After setup, you can tab-complete commands and flags:
 
 ```
@@ -113,17 +120,25 @@ bcmr copy -<TAB>   → --recursive --preserve --force --verify ...
 ```
 
 :::callout[Alias Completions (Zsh)]{kind="info"}
-When using `bcmr init zsh --cmd <prefix>`, completions for aliased commands (e.g., `bcp`, `bmv`, `brm`) are automatically included. No extra configuration needed — just make sure `eval "$(bcmr completions zsh)"` is also in your `~/.zshrc`:
+When using `bcmr init zsh --cmd <prefix>`, one line enables command wrappers and their completions:
 
 ```bash
 eval "$(bcmr init zsh --cmd b)"
-eval "$(bcmr completions zsh)"
 ```
 
-Then you can tab-complete aliased commands directly:
+Then you can tab-complete the commands directly:
 
 ```
 bcp -<TAB>   → --recursive --preserve --force --verify ...
 bmv -<TAB>   → --recursive --preserve --force --verify ...
 ```
 :::
+
+Remote completion normally stays quiet when a host is unavailable. To inspect a failure, run the hidden completion command directly, or enable diagnostics for Tab completion:
+
+```bash
+bcmr __complete-remote 'user@example.com:/path/'
+export BCMR_COMPLETION_DEBUG=1
+# Disable diagnostic output again:
+unset BCMR_COMPLETION_DEBUG
+```

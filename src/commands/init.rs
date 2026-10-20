@@ -17,14 +17,15 @@ pub fn generate_init_script(
     match shell {
         Shell::Bash | Shell::Zsh => {
             let mut script = String::new();
+            let shell_exe = shell_word(&exe_path);
 
             if let Some(path) = path {
                 script.push_str(&format!(
                     r#"
 # Add bcmr directory to PATH
-export PATH="{}:$PATH"
+export PATH={}:"$PATH"
 "#,
-                    path.display()
+                    shell_word(&path.to_string_lossy())
                 ));
             }
 
@@ -40,59 +41,85 @@ export PATH="{}:$PATH"
                     r#"
 # bcmr shell integration for {shell_name}
 function {prefix}cp{suffix}() {{
-    "{exe_path}" copy "$@"
+    {shell_exe} copy "$@"
 }}
 
 function {prefix}mv{suffix}() {{
-    "{exe_path}" move "$@"
+    {shell_exe} move "$@"
 }}
 
 function {prefix}rm{suffix}() {{
-    "{exe_path}" remove "$@"
+    {shell_exe} remove "$@"
 }}
 "#,
                     shell_name = shell,
                     prefix = prefix,
                     suffix = suffix,
-                    exe_path = exe_path
+                    shell_exe = shell_exe
                 ));
 
                 if matches!(shell, Shell::Zsh) {
                     script.push_str(&format!(
                         r#"
-# Completion wrappers for aliased commands. Use _bcmr_with_remote
-# (remote path completion) if present, else fall back to _bcmr.
-_{prefix}cp{suffix}() {{
-    words=("bcmr" "copy" "${{words[@]:1}}")
-    (( CURRENT += 1 ))
-    if (( $+functions[_bcmr_with_remote] )); then
-        _bcmr_with_remote "$@"
-    else
-        _bcmr "$@"
+# Initialize completion only when necessary. Keep compinit's security checks.
+# An anonymous function keeps temporary state out of the user's shell.
+() {{
+    local _bcmr_completion_script
+    if (( ! $+functions[compdef] )); then
+        if ! {{ autoload -Uz compinit && compinit; }}; then
+            print -u2 -- 'bcmr: could not initialize zsh completions with compinit; command wrappers remain available. Check compinit/compaudit diagnostics, then retry bcmr init.'
+            return 0
+        fi
     fi
-}}
-compdef _{prefix}cp{suffix} {prefix}cp{suffix}
-
-_{prefix}mv{suffix}() {{
-    words=("bcmr" "move" "${{words[@]:1}}")
-    (( CURRENT += 1 ))
-    if (( $+functions[_bcmr_with_remote] )); then
-        _bcmr_with_remote "$@"
-    else
-        _bcmr "$@"
+    if (( ! $+functions[compdef] )); then
+        print -u2 -- 'bcmr: compinit did not provide compdef; command wrappers remain available.'
+        return 0
     fi
-}}
-compdef _{prefix}mv{suffix} {prefix}mv{suffix}
 
-_{prefix}rm{suffix}() {{
-    words=("bcmr" "remove" "${{words[@]:1}}")
-    (( CURRENT += 1 ))
-    _bcmr "$@"
+    # _bcmr may just be an autoload stub installed by compinit. The remote
+    # wrapper is defined only after the complete generated script is loaded.
+    if (( ! $+functions[_bcmr] || ! $+functions[_bcmr_with_remote] )); then
+        if _bcmr_completion_script="$({shell_exe} completions zsh)"; then
+            if ! eval "$_bcmr_completion_script"; then
+                print -u2 -- 'bcmr: could not load zsh completion script; command wrappers remain available. Retry bcmr completions zsh to diagnose.'
+                return 0
+            fi
+        else
+            print -u2 -- 'bcmr: could not generate zsh completions; command wrappers remain available. Retry bcmr completions zsh to diagnose.'
+            return 0
+        fi
+    fi
+    if (( ! $+functions[_bcmr] || ! $+functions[_bcmr_with_remote] )); then
+        print -u2 -- 'bcmr: zsh completion script did not define the expected functions; command wrappers remain available.'
+        return 0
+    fi
+    compdef _bcmr_with_remote bcmr
+
+    _{prefix}cp{suffix}() {{
+        local -a words=("bcmr" "copy" "${{words[@]:1}}")
+        local -i CURRENT=$(( CURRENT + 1 ))
+        _bcmr_with_remote "$@"
+    }}
+    compdef _{prefix}cp{suffix} {prefix}cp{suffix}
+
+    _{prefix}mv{suffix}() {{
+        local -a words=("bcmr" "move" "${{words[@]:1}}")
+        local -i CURRENT=$(( CURRENT + 1 ))
+        _bcmr_with_remote "$@"
+    }}
+    compdef _{prefix}mv{suffix} {prefix}mv{suffix}
+
+    _{prefix}rm{suffix}() {{
+        local -a words=("bcmr" "remove" "${{words[@]:1}}")
+        local -i CURRENT=$(( CURRENT + 1 ))
+        _bcmr "$@"
+    }}
+    compdef _{prefix}rm{suffix} {prefix}rm{suffix}
 }}
-compdef _{prefix}rm{suffix} {prefix}rm{suffix}
 "#,
                         prefix = prefix,
                         suffix = suffix,
+                        shell_exe = shell_exe,
                     ));
                 }
 
@@ -192,6 +219,11 @@ function {prefix}rm{suffix} {{ & "{exe_path}" remove @args }}
     }
 }
 
+// Quote one literal POSIX-shell word, including quotes and substitutions.
+fn shell_word(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,7 +256,7 @@ mod tests {
     fn test_with_path() {
         let path = PathBuf::from("/some/path");
         let script = generate_init_script(&Shell::Bash, "", None, None, Some(&path), false);
-        assert!(script.contains("export PATH=\"/some/path:$PATH\""));
+        assert!(script.contains("export PATH='/some/path':\"$PATH\""));
     }
 
     #[test]

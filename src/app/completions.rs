@@ -15,7 +15,11 @@ pub(crate) fn validate_mode(mode: &str, name: &str) -> Result<()> {
 
 pub(crate) const POWERSHELL_REMOTE_INJECT: &str = r#"    $tokens = $commandAst.ToString() -split '\s+'
     if ($wordToComplete -match '.+:.+' -and $tokens.Count -ge 2 -and ($tokens[1] -eq 'copy' -or $tokens[1] -eq 'move')) {
-        $results = bcmr __complete-remote $wordToComplete 2>$null
+        if ($env:BCMR_COMPLETION_DEBUG -eq '1') {
+            $results = bcmr __complete-remote $wordToComplete
+        } else {
+            $results = bcmr __complete-remote $wordToComplete 2>$null
+        }
         if ($results) {
             $results | ForEach-Object {
                 [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
@@ -48,7 +52,11 @@ _bcmr_with_remote() {
     local cur="${words[CURRENT]}"
     if [[ "$cur" == *:* ]] && [[ "${words[2]}" == "copy" || "${words[2]}" == "move" ]]; then
         local -a results
-        results=("${(@f)$(bcmr __complete-remote "$cur" 2>/dev/null)}")
+        if [[ "${BCMR_COMPLETION_DEBUG:-}" == 1 ]]; then
+            results=("${(@f)$(bcmr __complete-remote "$cur")}")
+        else
+            results=("${(@f)$(bcmr __complete-remote "$cur" 2>/dev/null)}")
+        fi
         if [[ ${#results[@]} -gt 0 && -n "${results[1]}" ]]; then
             compadd -U -S '' -- "${results[@]}"
             return
@@ -67,9 +75,15 @@ _bcmr_with_remote() {
     local cmd="${COMP_WORDS[1]}"
     if [[ "$cur" == *:* ]] && [[ "$cmd" == "copy" || "$cmd" == "move" ]]; then
         local IFS=$'\n'
-        COMPREPLY=($(bcmr __complete-remote "$cur" 2>/dev/null))
+        if [[ "${BCMR_COMPLETION_DEBUG:-}" == 1 ]]; then
+            COMPREPLY=($(bcmr __complete-remote "$cur"))
+        else
+            COMPREPLY=($(bcmr __complete-remote "$cur" 2>/dev/null))
+        fi
         if [[ ${#COMPREPLY[@]} -gt 0 ]]; then
-            compopt -o nospace
+            if type compopt >/dev/null 2>&1; then
+                compopt -o nospace
+            fi
             return
         fi
     fi
@@ -81,7 +95,14 @@ complete -F _bcmr_with_remote bcmr
         Shell::Fish => {
             r#"
 
-complete -c bcmr -n '__fish_seen_subcommand_from copy move; and string match -q "*:*" -- (commandline -ct)' -f -a '(bcmr __complete-remote (commandline -ct) 2>/dev/null)'
+function __bcmr_complete_remote
+    if test "$BCMR_COMPLETION_DEBUG" = 1
+        bcmr __complete-remote (commandline -ct)
+    else
+        bcmr __complete-remote (commandline -ct) 2>/dev/null
+    end
+end
+complete -c bcmr -n '__fish_seen_subcommand_from copy move; and string match -q "*:*" -- (commandline -ct)' -f -a '(__bcmr_complete_remote)'
 "#
         }
         Shell::PowerShell => "",

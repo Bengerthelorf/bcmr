@@ -254,7 +254,7 @@ pub async fn resolve_remote_home(ssh_target: &str, user_spec: &str) -> Result<St
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(BcmrError::InvalidInput(ssh_error_message(
             &stderr,
-            &format!("remote ~{} expansion", user_spec),
+            &format!("remote ~{} expansion on '{}'", user_spec, ssh_target),
         )));
     }
 
@@ -320,11 +320,9 @@ pub async fn remote_remove(
     Ok(())
 }
 
-pub async fn complete_remote_path(partial: &str) -> Vec<String> {
-    let remote = match parse_remote_path(partial) {
-        Some(r) => r,
-        None => return Vec::new(),
-    };
+pub async fn complete_remote_path(partial: &str) -> Result<Vec<String>, BcmrError> {
+    let remote =
+        parse_remote_path(partial).ok_or_else(|| BcmrError::invalid_remote_path(partial))?;
 
     let (dir, prefix) = if remote.path.ends_with('/') || remote.path == "." {
         (remote.path.clone(), String::new())
@@ -333,28 +331,52 @@ pub async fn complete_remote_path(partial: &str) -> Vec<String> {
             remote.path[..=pos].to_string(),
             remote.path[pos + 1..].to_string(),
         )
+    } else if remote.path.starts_with('~') {
+        (format!("{}/", remote.path), String::new())
     } else {
         (".".to_string(), remote.path.clone())
     };
 
     let target = remote.ssh_target();
-    let output = match ssh_command(&target)
-        .arg(format!("ls -1ap '{}' 2>/dev/null", shell_escape(&dir)))
+    // Resolve only the directory used for I/O. Candidates retain the user's
+    // spelling (~, ~user, and relative paths), and no path is evaluated as code.
+    let expanded_dir = expand_remote_tilde(&target, &dir).await?;
+    let output = ssh_command(&target)
+        .arg(format!(
+            "LC_ALL=C ls -1ap -- '{}'",
+            shell_escape(&expanded_dir)
+        ))
         .output()
-        .await
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return Vec::new(),
-    };
+        .await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let context = format!("Cannot complete remote path '{}'", partial);
+        let diagnostic = if output.status.code() == Some(255) {
+            ssh_error_message(&stderr, &context)
+        } else {
+            // An authenticated remote ls can fail with "Permission denied".
+            // Preserve that diagnostic instead of calling it an SSH auth error.
+            format!(
+                "{}: remote directory listing failed ({}): {}",
+                context,
+                output.status,
+                stderr.trim()
+            )
+        };
+        return Err(BcmrError::InvalidInput(diagnostic));
+    }
 
     let base = if dir == "." { String::new() } else { dir };
+    let mut display_remote = remote;
+    display_remote.path = String::new();
+    let display_target = display_remote.display();
 
-    String::from_utf8_lossy(&output.stdout)
+    Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter(|l| *l != "./" && *l != "../")
         .filter(|l| prefix.is_empty() || l.starts_with(&prefix))
-        .map(|l| format!("{}:{}{}", target, base, l))
-        .collect()
+        .map(|l| format!("{}{}{}", display_target, base, l))
+        .collect())
 }
 
 #[cfg(test)]
