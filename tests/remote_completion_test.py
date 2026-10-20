@@ -12,6 +12,8 @@ import subprocess
 import tempfile
 import unittest
 
+from shell_test_utils import with_system_zsh_fpath
+
 
 BCMR = str(Path(os.environ.get("BCMR", "target/debug/bcmr")).resolve())
 
@@ -65,8 +67,9 @@ os.environ['HOME'] = os.environ['REMOTE_HOME']
 os.execv('/bin/sh', ['sh', '-c', command])
 """)
         ssh.chmod(0o755)
-        self.env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ["PATH"],
-                        REMOTE_HOME=str(self.home), BCMR_SSH_NO_MULTIPLEX="1")
+        self.env = with_system_zsh_fpath(dict(
+            os.environ, PATH=str(self.bin) + os.pathsep + os.environ["PATH"],
+            REMOTE_HOME=str(self.home), BCMR_SSH_NO_MULTIPLEX="1"))
         self.env.pop("BCMR_COMPLETION_DEBUG", None)
 
     def complete(self, path):

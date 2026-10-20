@@ -12,6 +12,8 @@ import tempfile
 import time
 import unittest
 
+from shell_test_utils import with_system_zsh_fpath
+
 BCMR = pathlib.Path(os.environ.get("BCMR", "target/debug/bcmr")).resolve()
 ZSH = shutil.which("zsh")
 
@@ -22,7 +24,7 @@ class ShellIntegrationTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="bcmr shell ")
         self.addCleanup(self.temp.cleanup)
         self.root = pathlib.Path(self.temp.name)
-        self.env = os.environ.copy()
+        self.env = with_system_zsh_fpath(os.environ)
         self.env.update(HOME=str(self.root), ZDOTDIR=str(self.root), TERM="xterm",
                         XDG_DATA_HOME=str(self.root / "data with spaces"))
 
@@ -169,8 +171,27 @@ class ShellIntegrationTests(unittest.TestCase):
 
     # A real ZLE Tab verifies that registration reaches clap flag completion.
     def test_tab_expands_alias_flag_in_pty(self):
+        self.assert_tab_buffer(self.generate("--cmd", "b"), "bcp --rec", "bcp --recursive ")
+
+    # Old sourced completion functions must be replaced after a binary upgrade.
+    def test_stale_preloaded_completions_are_refreshed_in_pty(self):
+        for version in (None, "0.6.3"):
+            with self.subTest(version=version):
+                stale = """
+autoload -Uz compinit
+compinit -D
+_bcmr() { _arguments '--recursive[Recursively process directories]' }
+_bcmr_with_remote() { _bcmr "$@" }
+compdef _bcmr_with_remote bcmr
+"""
+                if version is not None:
+                    stale += "typeset -g _bcmr_completion_version=" + shlex.quote(version) + "\n"
+                self.assert_tab_buffer(stale + self.generate("--cmd", "b"),
+                                       "bcp --no-de", "bcp --no-deref ")
+
+    def assert_tab_buffer(self, script, typed, expected):
         init_file = self.root / "init.zsh"
-        init_file.write_text(self.generate("--cmd", "b"))
+        init_file.write_text(script)
         pid, fd = pty.fork()
         if pid == 0:
             os.execve(ZSH, [ZSH, "-f", "-i"], self.env)
@@ -186,13 +207,14 @@ class ShellIntegrationTests(unittest.TestCase):
                     output.extend(chunk)
         try:
             command = ("PS1='BCMR_PROMPT> '; source " + shlex.quote(str(init_file)) +
-                       "; _bcmr_test_buffer() { print -r -- BCMR_BUFFER=$BUFFER; zle send-break }; "
+                       "; _bcmr_test_buffer() { print -r -- \"BCMR_BUFFER=$BUFFER:BCMR_END\"; zle send-break }; "
                        "zle -N _bcmr_test_buffer; bindkey '^X' _bcmr_test_buffer; print BCMR_READY\n")
             os.write(fd, command.encode())
             until(b"\r\nBCMR_READY\r\n")
             output.clear()
-            os.write(fd, b"bcp --rec\t\x18")
-            until(b"BCMR_BUFFER=bcp --recursive")
+            os.write(fd, typed.encode() + b"\t\x18")
+            until(b":BCMR_END\r\n")
+            self.assertIn(("BCMR_BUFFER=" + expected + ":BCMR_END").encode(), output)
             self.assertNotIn(b"command not found", output)
         finally:
             os.kill(pid, signal.SIGKILL)

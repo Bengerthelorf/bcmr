@@ -46,7 +46,8 @@ pub(crate) fn remote_completion_script(shell: &clap_complete::Shell) -> &'static
     use clap_complete::Shell;
     match shell {
         Shell::Zsh => {
-            r#"
+            concat!(
+                r#"
 
 _bcmr_with_remote() {
     local cur="${words[CURRENT]}"
@@ -65,7 +66,11 @@ _bcmr_with_remote() {
     _bcmr "$@"
 }
 compdef _bcmr_with_remote bcmr
-"#
+"#,
+                "\ntypeset -g _bcmr_completion_version='",
+                env!("CARGO_PKG_VERSION"),
+                "'\n"
+            )
         }
         Shell::Bash => {
             r#"

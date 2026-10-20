@@ -76,9 +76,10 @@ function {prefix}rm{suffix}() {{
         return 0
     fi
 
-    # _bcmr may just be an autoload stub installed by compinit. The remote
-    # wrapper is defined only after the complete generated script is loaded.
-    if (( ! $+functions[_bcmr] || ! $+functions[_bcmr_with_remote] )); then
+    # Reload stale scripts sourced before init after an upgrade, as well as
+    # autoload stubs or missing functions. Repeated init of this version is free.
+    if [[ ${{_bcmr_completion_version-}} != "{completion_version}" ]] ||
+        (( ! $+functions[_bcmr] || ! $+functions[_bcmr_with_remote] )); then
         if _bcmr_completion_script="$({shell_exe} completions zsh)"; then
             if ! eval "$_bcmr_completion_script"; then
                 print -u2 -- 'bcmr: could not load zsh completion script; command wrappers remain available. Retry bcmr completions zsh to diagnose.'
@@ -89,8 +90,9 @@ function {prefix}rm{suffix}() {{
             return 0
         fi
     fi
-    if (( ! $+functions[_bcmr] || ! $+functions[_bcmr_with_remote] )); then
-        print -u2 -- 'bcmr: zsh completion script did not define the expected functions; command wrappers remain available.'
+    if [[ ${{_bcmr_completion_version-}} != "{completion_version}" ]] ||
+        (( ! $+functions[_bcmr] || ! $+functions[_bcmr_with_remote] )); then
+        print -u2 -- 'bcmr: zsh completion script did not define the expected functions or version; command wrappers remain available.'
         return 0
     fi
     compdef _bcmr_with_remote bcmr
@@ -120,6 +122,7 @@ function {prefix}rm{suffix}() {{
                         prefix = prefix,
                         suffix = suffix,
                         shell_exe = shell_exe,
+                        completion_version = env!("CARGO_PKG_VERSION"),
                     ));
                 }
 
