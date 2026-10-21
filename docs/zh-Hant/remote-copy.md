@@ -95,11 +95,20 @@ bcmr 或協定版本不匹配時，bcmr 會顯示回退警告並使用傳統 SCP
 # 部署 bcmr 到遠端主機
 bcmr deploy user@host
 
-# 自訂安裝路徑
-bcmr deploy user@host --path /usr/local/bin/bcmr
+# 升級系統安裝（互動式終端可輸入 sudo 密碼）
+bcmr deploy user@host --path /usr/local/bin/bcmr --sudo
+
+# 對多台伺服器套用相同選項，分別部署
+bcmr deploy A100 4090 --path /usr/bin/bcmr --sudo
 ```
 
-`bcmr deploy` 自動偵測遠端 OS 與架構。相同平台時直接傳輸本機二進位檔，不同平台時從 GitHub Releases 下載對應版本。
+`bcmr deploy` 分別偵測每台伺服器的 OS 與架構。相同平台時直接傳輸本機執行檔，不同平台時從與本機版本號一致的 GitHub Release 下載對應檔案。
+
+版本檢查與安裝後驗證均針對選定路徑（預設 `~/.local/bin/bcmr`），不受 PATH 中另一份安裝的版本影響。安裝成功與略過結果都會顯示安裝路徑/版本，以及 PATH 實際選中的路徑/版本；若被另一份安裝遮蔽，會給出提示。使用 `--path` 可指定需要升級的那份安裝。
+
+各伺服器依序獨立部署，某台失敗後仍繼續處理其他目標，最後彙總成功、略過與失敗結果；存在失敗時傳回非零結束碼。重跑同一命令時，會略過選定路徑下已是本機版本的伺服器。
+
+`--sudo` 在標準輸入與標準錯誤都連接終端時，透過原生 SSH 終端輸入普通 sudo 密碼。非互動環境與 `--json` 模式使用 `sudo -n`，缺少免密權限時明確報錯。SSH 登入仍使用設定的金鑰與批次模式。
 
 ### Serve 協定優勢
 

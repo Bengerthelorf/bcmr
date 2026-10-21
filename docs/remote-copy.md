@@ -108,11 +108,20 @@ protocol, bcmr prints a fallback warning and uses legacy SCP.
 # Deploy bcmr to a remote host
 bcmr deploy user@host
 
-# Custom install path
-bcmr deploy user@host --path /usr/local/bin/bcmr
+# Upgrade a system installation (sudo can prompt in an interactive terminal)
+bcmr deploy user@host --path /usr/local/bin/bcmr --sudo
+
+# Independent deployment to multiple hosts with shared options
+bcmr deploy A100 4090 --path /usr/bin/bcmr --sudo
 ```
 
-`bcmr deploy` detects the remote OS and architecture. If the remote matches your local platform, it transfers your local binary directly. Otherwise, it downloads the correct binary from GitHub Releases.
+`bcmr deploy` detects each host's OS and architecture. Matching platforms receive the local executable; other platforms download the matching asset from the release with the local version number.
+
+Version checks and post-install verification use the selected installation path (default `~/.local/bin/bcmr`), independently of another installation on PATH. Installed and skipped results show both the selected path/version and the PATH-resolved path/version, with a warning if PATH selects another executable. Use `--path` to upgrade that specific installation.
+
+Hosts run sequentially. A failed host does not stop later hosts; the final summary lists installed, skipped and failed results. Any failure gives a nonzero exit status. Rerunning skips selected installations already at the local version.
+
+`--sudo` uses a native SSH terminal for password authentication when stdin and stderr are terminals. Non-interactive and `--json` runs use `sudo -n` and report missing passwordless permissions. SSH login still uses configured keys in batch mode.
 
 ### Serve Protocol Benefits
 

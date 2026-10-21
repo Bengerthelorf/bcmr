@@ -322,6 +322,7 @@ jobs:
           python3 tests/cli_help_test.py
           python3 tests/config_doctor_test.py
           python3 tests/managed_update_test.py
+          python3 tests/deploy_test.py
 
   publish-crate:
     name: Publish to crates.io
@@ -411,3 +412,4 @@ jobs:
           python3 tests/cli_help_test.py
           python3 tests/config_doctor_test.py
           python3 tests/managed_update_test.py
+          python3 tests/deploy_test.py

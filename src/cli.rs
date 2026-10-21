@@ -47,6 +47,30 @@ DOCUMENTATION:
   https://app.snaix.homes/bcmr
 ";
 
+const DEPLOY_AFTER_LONG_HELP: &str = "\
+EXAMPLES:
+  Upgrade a specific system installation:
+      bcmr deploy iAu --path /usr/bin/bcmr --sudo
+
+  Deploy to several hosts with the same install options:
+      bcmr deploy A100 4090 --path /usr/bin/bcmr --sudo
+
+INSTALLATION:
+  The selected path is checked and verified, independently of another bcmr on PATH.
+  The default is ~/.local/bin/bcmr. A different PATH entry can shadow it; each
+  result shows the selected installation and the PATH-resolved path and version.
+  Matching platforms upload the local executable. Other platforms download the
+  release with the local version number and verify the installed version.
+
+SUDO:
+  In an interactive terminal, SSH requests a remote PTY for native sudo password
+  authentication. Without a terminal, or with --json, sudo -n must be permitted.
+
+RESULTS:
+  Hosts run one at a time. A failure does not stop later hosts. The final summary
+  lists installed, skipped, and failed hosts; any failure returns a nonzero exit.
+";
+
 const COPY_AFTER_LONG_HELP: &str = "\
 EXAMPLES:
   Local copy with verify:
@@ -495,16 +519,18 @@ pub enum Commands {
         listen: Option<String>,
     },
 
-    /// Deploy bcmr to a remote host for serve protocol support
+    /// Deploy bcmr to one or more remote hosts for serve protocol support
+    #[command(after_long_help = DEPLOY_AFTER_LONG_HELP)]
     Deploy {
-        /// Remote target (user@host)
-        target: String,
+        /// Remote targets (SSH aliases or user@host); failures do not stop later hosts
+        #[arg(required = true, num_args = 1..)]
+        targets: Vec<String>,
 
-        /// Installation path on remote host
+        /// Installation path to check, upgrade, and verify on every remote host
         #[arg(long, default_value = "~/.local/bin/bcmr")]
         path: Option<String>,
 
-        /// Use sudo on the remote for the install step (requires passwordless sudo)
+        /// Use remote sudo (terminal: password prompt; non-interactive/JSON: sudo -n)
         #[arg(long)]
         sudo: bool,
     },

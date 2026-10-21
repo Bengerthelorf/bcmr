@@ -238,9 +238,13 @@ async fn run() -> Result<()> {
                 commands::serve::run(root.clone()).await?;
             }
         }
-        Commands::Deploy { target, path, sudo } => {
+        Commands::Deploy {
+            targets,
+            path,
+            sudo,
+        } => {
             let remote_path = path.as_deref().unwrap_or("~/.local/bin/bcmr");
-            commands::deploy::run(target, remote_path, *sudo).await?;
+            commands::deploy::run(targets, remote_path, *sudo).await?;
         }
         Commands::Doctor { hosts } => {
             commands::doctor::run(hosts, is_json_mode()).await?;

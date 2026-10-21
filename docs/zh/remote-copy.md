@@ -95,11 +95,20 @@ bcmr 或协议版本不匹配时，bcmr 会显示回退警告并使用传统 SCP
 # 部署 bcmr 到远程主机
 bcmr deploy user@host
 
-# 自定义安装路径
-bcmr deploy user@host --path /usr/local/bin/bcmr
+# 升级系统安装（交互式终端中可输入 sudo 密码）
+bcmr deploy user@host --path /usr/local/bin/bcmr --sudo
+
+# 对多台服务器应用相同选项，分别部署
+bcmr deploy A100 4090 --path /usr/bin/bcmr --sudo
 ```
 
-`bcmr deploy` 自动检测远端 OS 和架构。相同平台时直接传输本地二进制文件，不同平台时从 GitHub Releases 下载对应版本。
+`bcmr deploy` 分别检测每台服务器的 OS 和架构。相同平台时直接传输本地可执行文件，不同平台时从与本地版本号一致的 GitHub Release 下载对应文件。
+
+版本检查和安装后验证均针对选定路径（默认 `~/.local/bin/bcmr`），不会被 PATH 中另一个安装的版本影响。安装成功和跳过的结果都会显示安装路径/版本，以及 PATH 实际选中的路径/版本；如果被其他安装遮蔽，会给出提示。使用 `--path` 可以指定需要升级的那一份安装。
+
+各服务器依次独立部署，某台失败后继续处理其他目标，最后汇总成功、跳过和失败结果；存在失败时返回非零退出码。重跑同一命令时，会跳过选定路径下已是本地版本的服务器。
+
+`--sudo` 在标准输入和标准错误均连接终端时，通过原生 SSH 终端输入普通 sudo 密码。非交互环境和 `--json` 模式使用 `sudo -n`，缺少免密权限时明确报错。SSH 登录仍使用配置的密钥和批处理模式。
 
 ### Serve 协议优势
 
