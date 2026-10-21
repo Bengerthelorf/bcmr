@@ -78,6 +78,12 @@ jobs:
           python3 tests/destination_semantics_test.py
           python3 tests/remote_listing_test.py
           python3 tests/remote_overwrite_test.py
+          python3 tests/local_move_parity_test.py
+          python3 tests/remote_tree_parity_test.py
+          python3 tests/symlink_parity_test.py
+          python3 tests/transfer_cleanup_test.py
+          python3 tests/remote_cleanup_test.py
+          python3 tests/remote_sync_contract_test.py
 
       - name: Test Homebrew formula installation
         if: runner.os == 'macOS'

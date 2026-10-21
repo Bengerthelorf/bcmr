@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use tokio::io;
 
 mod handlers;
+mod listing;
 mod rendezvous;
 mod session;
 

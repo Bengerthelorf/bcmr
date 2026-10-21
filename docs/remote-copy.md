@@ -175,14 +175,31 @@ carried on protocol v2 and enforced again by the server:
 # Fails if report.pdf already exists remotely
 bcmr copy report.pdf user@host:/backup/
 
-# Explicit atomic replacement
-bcmr copy --force --yes --verify --sync report.pdf user@host:/backup/
+# Durable atomic replacement (requires negotiated serve CAP_SYNC)
+bcmr copy --force --yes --sync report.pdf user@host:/backup/
+
+# Explicit verification before publication
+bcmr copy --force --yes --verify report.pdf user@host:/backup/
 ```
 
 The server receives into a private handle-bound transaction,
 validates the declared length and hash, and only then publishes the
 file. An interrupted forced replacement retains the old final path.
 Pipelined directory uploads keep this property per file.
+
+Fresh legacy SSH uploads also use a private stage. Uploads with `-p` or `-V`
+finalize attributes and verification in a private stage before publication.
+Those SSH-assisted final renames cannot provide checked directory fsync:
+`--sync` therefore refuses legacy uploads, link-preserving uploads, and uploads
+combining `--sync` with `-p` or `-V`, before any destination writes. Ordinary
+serve uploads require every connection to negotiate `CAP_SYNC`; a missing
+capability fails explicitly. Synced downloads sync local publication on Unix.
+
+Copy follows links by default; `--no-deref` preserves link objects, including
+dangling links. Move always preserves link objects. The link-preserving remote
+route uses SSH helpers and refuses `--direct direct`; dry-run can still preview
+these operations. See [local and remote behavior](./local-remote-semantics.md)
+for exclusions, directory attributes, move cleanup and platform boundaries.
 
 Single-file striped PUT is currently disabled in production because
 independent connections cannot yet join the same server-owned

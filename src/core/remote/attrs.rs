@@ -12,26 +12,39 @@ pub async fn preserve_remote_attrs(local_src: &Path, remote: &RemotePath) -> Res
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            meta.permissions().mode() & 0o7777
+            meta.permissions().mode() & 0o777
         }
         #[cfg(not(unix))]
         {
-            0o644u32
+            if meta.is_dir() {
+                0o755u32
+            } else {
+                0o644u32
+            }
         }
     };
 
-    let mtime_secs = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let mtime_secs = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            meta.mtime()
+        }
+        #[cfg(not(unix))]
+        {
+            meta.modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs() as i64)
+                .unwrap_or(0)
+        }
+    };
 
     let atime_secs = {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            meta.atime() as u64
+            meta.atime()
         }
         #[cfg(not(unix))]
         {
@@ -39,16 +52,21 @@ pub async fn preserve_remote_attrs(local_src: &Path, remote: &RemotePath) -> Res
         }
     };
 
-    let mtime_ts = unix_to_touch_ts(mtime_secs as i64);
-    let atime_ts = unix_to_touch_ts(atime_secs as i64);
+    let mtime_ts = unix_to_touch_ts(mtime_secs);
+    let atime_ts = unix_to_touch_ts(atime_secs);
+    let path = if remote.path.starts_with('/') {
+        remote.path.clone()
+    } else {
+        format!("./{}", remote.path)
+    };
     let cmd = format!(
-        "TZ=UTC touch -m -t '{}' '{}'; TZ=UTC touch -a -t '{}' '{}'; chmod {:o} '{}'",
+        "TZ=UTC touch -m -t '{}' '{}' && TZ=UTC touch -a -t '{}' '{}' && chmod {:o} '{}'",
         mtime_ts,
-        shell_escape(&remote.path),
+        shell_escape(&path),
         atime_ts,
-        shell_escape(&remote.path),
+        shell_escape(&path),
         mode,
-        shell_escape(&remote.path)
+        shell_escape(&path)
     );
     let attr_out = ssh_command(&remote.ssh_target()).arg(cmd).output().await?;
     if !attr_out.status.success() {
@@ -64,11 +82,16 @@ pub async fn preserve_remote_attrs(local_src: &Path, remote: &RemotePath) -> Res
 pub(crate) async fn get_remote_attrs(
     remote: &RemotePath,
 ) -> Result<PortableFileMetadata, BcmrError> {
+    let path = if remote.path.starts_with('/') {
+        remote.path.clone()
+    } else {
+        format!("./{}", remote.path)
+    };
     let output = ssh_command(&remote.ssh_target())
         .arg(format!(
-            "stat -c '%X %Y %a' '{}' 2>/dev/null || stat -f '%a %m %Lp' '{}'",
-            shell_escape(&remote.path),
-            shell_escape(&remote.path)
+            "stat -Lc '%X %Y %a' '{}' 2>/dev/null || stat -Lf '%a %m %Lp' '{}'",
+            shell_escape(&path),
+            shell_escape(&path)
         ))
         .output()
         .await?;
@@ -127,7 +150,7 @@ fn apply_local_attrs(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(local_path, std::fs::Permissions::from_mode(_mode))?;
+        std::fs::set_permissions(local_path, std::fs::Permissions::from_mode(_mode & 0o777))?;
     }
 
     Ok(())

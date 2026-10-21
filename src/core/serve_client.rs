@@ -8,7 +8,7 @@ use crate::core::compress;
 use crate::core::error::BcmrError;
 use crate::core::framing::{self, RecvHalf, SendHalf};
 use crate::core::protocol::{
-    CompressionAlgo, Message, CAP_AEAD, CAP_DEDUP, CAP_LZ4, CAP_PUT_OFFSET, CAP_ZSTD,
+    CompressionAlgo, Message, CAP_AEAD, CAP_DEDUP, CAP_LZ4, CAP_PUT_OFFSET, CAP_SYNC, CAP_ZSTD,
     PROTOCOL_VERSION,
 };
 use crate::core::protocol_aead::Direction;
@@ -89,6 +89,10 @@ impl ServeClient {
 
     pub fn supports_put_offset(&self) -> bool {
         self.effective_caps & CAP_PUT_OFFSET != 0
+    }
+
+    pub fn supports_sync(&self) -> bool {
+        self.effective_caps & CAP_SYNC != 0
     }
 
     async fn handshake(&mut self, caps: u8) -> Result<(), BcmrError> {

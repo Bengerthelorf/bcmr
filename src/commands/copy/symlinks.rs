@@ -109,13 +109,20 @@ pub(super) fn check_symlink_overwrite(
     Ok(())
 }
 
-pub(super) async fn create_symlink_replacing(
+pub(crate) async fn create_symlink_replacing(
     dst: &Path,
     target: &Path,
     kind: SymlinkKind,
     replace_existing: bool,
+    sync: bool,
     _test_mode: &TestMode,
 ) -> std::result::Result<(), BcmrError> {
+    #[cfg(not(unix))]
+    if sync {
+        return Err(BcmrError::InvalidInput(
+            "--sync cannot guarantee durable symbolic-link namespace publication on this platform; refusing before transfer".into(),
+        ));
+    }
     #[cfg(feature = "test-support")]
     let fail_create = matches!(_test_mode, TestMode::FailSymlinkCreate);
     #[cfg(not(feature = "test-support"))]
@@ -133,6 +140,16 @@ pub(super) async fn create_symlink_replacing(
     let dst = dst.to_path_buf();
     let target = target.to_path_buf();
     tokio::task::spawn_blocking(move || {
+        #[cfg(unix)]
+        let parent = if sync {
+            let path = dst
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            Some(std::fs::File::open(path)?)
+        } else {
+            None
+        };
         create_symlink_replacing_sync(
             &dst,
             &target,
@@ -141,7 +158,12 @@ pub(super) async fn create_symlink_replacing(
             fail_create,
             fail_commit,
             create_destination_before_commit,
-        )
+        )?;
+        #[cfg(unix)]
+        if let Some(parent) = parent {
+            crate::core::io::durable_sync_directory_handle_strict(&parent)?;
+        }
+        Ok(())
     })
     .await?
 }

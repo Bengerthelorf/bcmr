@@ -1,10 +1,11 @@
 use super::{
-    progress_mode, resolve_download_local, resolve_upload_remote, transfer_options_from_cli,
-    STRIPING_MIN_FILE_SIZE,
+    collect_download_plan, collect_upload_plan, preserve_directories, progress_mode,
+    transfer_options_from_cli, TransferItem, STRIPING_MIN_FILE_SIZE,
 };
 use crate::cli::Commands;
 use crate::core::checksum::bytes_to_hex;
-use crate::core::remote::{check_resume_state, parse_remote_path, RemotePath, ResumeDecision};
+use crate::core::remote::staged_upload::StagedUpload;
+use crate::core::remote::{check_resume_state, RemotePath, ResumeDecision};
 use crate::core::serve_client::{FileTransfer, ServeClientPool};
 use crate::ui::runner::ProgressRunner;
 use anyhow::{bail, Result};
@@ -16,13 +17,6 @@ struct ServeFallback(String);
 
 fn fallback_error(message: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(ServeFallback(message.into()))
-}
-
-fn add_transfer_size(total: &mut u64, size: u64) -> Result<()> {
-    *total = total
-        .checked_add(size)
-        .ok_or_else(|| anyhow::anyhow!("declared transfer size exceeds u64"))?;
-    Ok(())
 }
 
 pub(super) fn allows_legacy_fallback(error: &anyhow::Error) -> bool {
@@ -121,17 +115,19 @@ pub(super) async fn handle_serve_upload(
     if args.is_dry_run() {
         return Err(fallback_error("serve: dry-run fallback to legacy"));
     }
-    if (args.is_resume() || args.is_strict() || args.is_append())
-        && args.is_recursive()
-        && sources.iter().any(|source| source.is_dir())
-    {
+    let plan = collect_upload_plan(sources, rdest, args.is_recursive(), excludes)?;
+    let has_recursive_directory = !plan.directories.is_empty();
+    if has_recursive_directory && (args.is_resume() || args.is_strict() || args.is_append()) {
         return Err(fallback_error(
             "serve: recursive --resume/--strict/--append not supported, fallback to legacy",
         ));
     }
-
-    let has_recursive_directory =
-        args.is_recursive() && sources.iter().any(|source| source.is_dir());
+    if plan.files.is_empty() && plan.directories.is_empty() {
+        return Ok(());
+    }
+    if args.is_sync() && (args.is_preserve() || args.is_verify()) {
+        bail!("--sync cannot guarantee durable remote namespace publication with --preserve or --verify uploads; refusing before transfer");
+    }
     let pool_size = serve_upload_pool_size(has_recursive_directory, parallel);
     let mut pool = if args.use_direct_tcp() {
         ServeClientPool::connect_direct_with_caps(ssh_target, args.protocol_caps(), pool_size).await
@@ -139,22 +135,12 @@ pub(super) async fn handle_serve_upload(
         ServeClientPool::connect_with_caps(ssh_target, args.protocol_caps(), pool_size).await
     }
     .map_err(|e| fallback_error(format!("serve unavailable: {e}")))?;
-
-    let mut total_size = 0u64;
-    for src in sources {
-        if src.is_file() {
-            add_transfer_size(&mut total_size, src.metadata()?.len())?;
-        } else if src.is_dir() && args.is_recursive() {
-            add_transfer_size(
-                &mut total_size,
-                crate::commands::copy::get_total_size(std::slice::from_ref(src), true, args, &[])
-                    .await?,
-            )?;
-        }
+    if args.is_sync() && !pool.supports_sync() {
+        pool.close().await?;
+        bail!("--sync requires every remote serve connection to advertise CAP_SYNC; refusing before transfer");
     }
-
     let runner = ProgressRunner::new(
-        total_size,
+        plan.total_size,
         progress_mode(args),
         args.is_quiet(),
         crate::config::is_json_mode(),
@@ -162,186 +148,216 @@ pub(super) async fn handle_serve_upload(
     )?;
     runner.set_operation_type("Uploading (serve)");
     runner.set_verify_mode(args.is_verify());
+    for directory in &plan.directories {
+        pool.mkdir(&directory.remote.path).await?;
+    }
 
-    let multi_source = sources.len() > 1;
-    for src in sources {
-        if crate::core::traversal::is_excluded(src, excludes) {
-            continue;
-        }
-        if src.is_file() {
-            let remote_path = resolve_upload_remote(src, rdest, multi_source).path;
-            let size = src.metadata()?.len();
-            (runner.file_callback())(&src.file_name().unwrap_or_default().to_string_lossy(), size);
-
-            let resume_offset =
-                upload_resume_offset(&mut pool, args, src, &remote_path, size).await?;
+    if args.is_resume() || args.is_strict() || args.is_append() {
+        for file in plan.files {
+            let decision = upload_resume_offset(
+                &mut pool,
+                args,
+                &file.local_path,
+                &file.remote.path,
+                file.size,
+            )
+            .await?;
             let resume_overwrite = matches!(
-                &resume_offset,
+                &decision,
                 Some(UploadDecision::Overwrite | UploadDecision::Append(_))
             );
-            if let Some(UploadDecision::Skip) = resume_offset {
-                (runner.inc_callback())(size);
+            if matches!(&decision, Some(UploadDecision::Skip)) {
+                (runner.inc_callback())(file.size);
                 continue;
             }
-            let mut offset = match resume_offset {
-                Some(UploadDecision::Append(o)) => o,
+            let mut offset = match decision {
+                Some(UploadDecision::Append(offset)) => offset,
                 _ => 0,
             };
             if offset > 0 && !pool.first_mut().supports_put_offset() {
                 if !crate::config::is_json_mode() {
                     eprintln!(
-                        "bcmr: remote server does not advertise CAP_PUT_OFFSET; \
-                         re-uploading '{}' from scratch (resume not supported by this server)",
-                        src.display()
+                        "bcmr: remote server does not advertise CAP_PUT_OFFSET; re-uploading '{}' from scratch",
+                        file.local_path.display()
                     );
                 }
                 offset = 0;
             }
-
-            if offset > 0 {
-                pool.first_mut().put_at(&remote_path, src, offset).await?;
-                if args.is_verify() {
-                    let p = src.to_path_buf();
-                    let local_hash = tokio::task::spawn_blocking(move || {
-                        crate::core::checksum::calculate_hash(&p)
-                    })
-                    .await??;
-                    let remote_hash = pool.first_mut().hash(&remote_path, 0, None).await?;
-                    let remote_hex = bytes_to_hex(&remote_hash);
-                    if remote_hex != local_hash {
-                        pool.close().await?;
-                        return runner.finish_err(format!("hash mismatch for {}", src.display()));
-                    }
-                }
-            } else {
-                // Multi-connection striped PUT currently writes directly
-                // into the visible destination and cannot provide crash-safe
-                // publication. Keep production uploads on the handle-bound
-                // transaction path until the protocol has a server-side
-                // transaction token shared across connections.
-                let server_hash = if args.is_force() || resume_overwrite {
-                    pool.first_mut().put_overwrite(&remote_path, src).await?
-                } else {
-                    pool.first_mut().put(&remote_path, src).await?
-                };
-                if args.is_verify() {
-                    let p = src.to_path_buf();
-                    let local_hash = tokio::task::spawn_blocking(move || {
-                        crate::core::checksum::calculate_hash(&p)
-                    })
-                    .await??;
-                    let server_hex = bytes_to_hex(&server_hash);
-                    if server_hex != local_hash {
-                        pool.close().await?;
-                        return runner.finish_err(format!("hash mismatch for {}", src.display()));
-                    }
+            if offset == 0 {
+                serve_upload_fresh_files(
+                    &mut pool,
+                    vec![file],
+                    &runner,
+                    args,
+                    args.is_force() || resume_overwrite,
+                )
+                .await?;
+                continue;
+            }
+            (runner.file_callback())(
+                &file
+                    .local_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy(),
+                file.size,
+            );
+            pool.first_mut()
+                .put_at(&file.remote.path, &file.local_path, offset)
+                .await?;
+            if args.is_verify() {
+                let source = file.local_path.clone();
+                let local_hash = tokio::task::spawn_blocking(move || {
+                    crate::core::checksum::calculate_hash(&source)
+                })
+                .await??;
+                let remote_hash = pool.first_mut().hash(&file.remote.path, 0, None).await?;
+                if bytes_to_hex(&remote_hash) != local_hash {
+                    bail!("hash mismatch for {}", file.local_path.display());
                 }
             }
             if args.is_preserve() {
-                let target = RemotePath {
-                    user: rdest.user.clone(),
-                    host: rdest.host.clone(),
-                    path: remote_path.clone(),
-                };
-                crate::core::remote::preserve_remote_attrs(src, &target).await?;
+                crate::core::remote::preserve_remote_attrs(&file.local_path, &file.remote).await?;
             }
-            (runner.inc_callback())(size);
-        } else if src.is_dir() && args.is_recursive() {
-            if args.is_resume() || args.is_strict() || args.is_append() {
-                pool.close().await?;
-                bail!(
-                    "serve: source changed to a directory after recursive resume preflight; \
-                     refusing fallback after transfer processing began"
-                );
-            }
-            let remote_dir = resolve_upload_remote(src, rdest, multi_source);
-            serve_upload_dir(&mut pool, src, &remote_dir, &runner, excludes, args).await?;
-        } else if src.is_dir() {
-            pool.close().await?;
-            bail!(
-                "Source '{}' is a directory. Use -r flag for recursive copy.",
-                src.display()
-            );
+            (runner.inc_callback())(file.size);
         }
+    } else {
+        serve_upload_fresh_files(&mut pool, plan.files, &runner, args, args.is_force()).await?;
     }
-
+    if args.is_preserve() {
+        preserve_directories(&plan.directories, true, args.is_sync()).await?;
+    }
     pool.close().await?;
     runner.finish_ok()
 }
 
-async fn serve_upload_dir(
+async fn transfer_serve_batch(
     pool: &mut ServeClientPool,
-    local_dir: &std::path::Path,
-    remote_base: &RemotePath,
+    mut files: Vec<FileTransfer>,
+    overwrite: bool,
     runner: &ProgressRunner,
-    excludes: &[regex::Regex],
-    args: &Commands,
-) -> Result<()> {
-    let remote_dir = remote_base.path.clone();
-    pool.mkdir(&remote_dir).await?;
-
-    let mut files_to_put: Vec<FileTransfer> = Vec::new();
-    for entry in crate::core::traversal::walk(local_dir, true, false, 1, excludes) {
-        let entry = entry?;
-        let path = entry.path();
-        let rel = path.strip_prefix(local_dir)?;
-        let remote_path = format!("{}/{}", remote_dir, rel.to_string_lossy());
-        if path.is_dir() {
-            pool.mkdir(&remote_path).await?;
-        } else if path.is_file() {
-            files_to_put.push(FileTransfer {
-                remote: remote_path,
-                local: path.to_path_buf(),
-                size: entry.metadata()?.len(),
-                metadata: None,
-            });
-        }
+) -> Result<Vec<[u8; 32]>> {
+    if files.len() == 1 {
+        let file = files.pop().expect("one transfer");
+        (runner.file_callback())(
+            &file.local.file_name().unwrap_or_default().to_string_lossy(),
+            file.size,
+        );
+        let hash = if overwrite {
+            pool.first_mut()
+                .put_overwrite(&file.remote, &file.local)
+                .await?
+        } else {
+            pool.first_mut().put(&file.remote, &file.local).await?
+        };
+        (runner.inc_callback())(file.size);
+        return Ok(vec![hash]);
     }
-
-    let per_file_inputs: Vec<(PathBuf, String)> = files_to_put
-        .iter()
-        .map(|f| (f.local.clone(), f.remote.clone()))
-        .collect();
-
-    let file_cb = runner.file_callback();
-    let inc_for_chunks = runner.inc_callback();
-    let server_hashes = pool
+    let file_callback = runner.file_callback();
+    Ok(pool
         .pipelined_put_files_striped(
-            files_to_put,
-            args.is_force(),
-            inc_for_chunks,
-            move |_idx, path, size| {
-                file_cb(
+            files,
+            overwrite,
+            runner.inc_callback(),
+            move |_index, path, size| {
+                file_callback(
                     &path.file_name().unwrap_or_default().to_string_lossy(),
                     size,
                 );
             },
         )
-        .await?;
+        .await?)
+}
 
-    if args.is_verify() {
-        for ((local_path, _), server_hash) in per_file_inputs.iter().zip(server_hashes.iter()) {
-            let p = local_path.clone();
-            let local_hash =
-                tokio::task::spawn_blocking(move || crate::core::checksum::calculate_hash(&p))
-                    .await??;
-            let server_hex = bytes_to_hex(server_hash);
-            if server_hex != local_hash {
-                bail!("hash mismatch for {}", local_path.display());
+async fn serve_upload_fresh_files(
+    pool: &mut ServeClientPool,
+    files: Vec<TransferItem>,
+    runner: &ProgressRunner,
+    args: &Commands,
+    allow_overwrite: bool,
+) -> Result<()> {
+    if args.is_sync() && (args.is_preserve() || args.is_verify()) {
+        bail!("--sync cannot guarantee durable remote namespace publication with --preserve or --verify uploads; refusing before transfer");
+    }
+    if !args.is_preserve() && !args.is_verify() {
+        let transfers = files
+            .into_iter()
+            .map(|file| FileTransfer {
+                remote: file.remote.path,
+                local: file.local_path,
+                size: file.size,
+                metadata: None,
+            })
+            .collect();
+        transfer_serve_batch(pool, transfers, allow_overwrite, runner).await?;
+        return Ok(());
+    }
+
+    // The PUT protocol publishes before returning its hash and has no metadata
+    // payload. Keep -V and -p private until their checks finish, then publish
+    // through the same exact-target transaction used by legacy uploads.
+    let parents = files
+        .iter()
+        .filter_map(|file| file.remote.path.rsplit_once('/').map(|(parent, _)| parent))
+        .filter(|parent| !parent.is_empty())
+        .collect::<std::collections::BTreeSet<_>>();
+    for parent in parents {
+        pool.mkdir(parent).await?;
+    }
+    let mut stages: Vec<StagedUpload> = Vec::with_capacity(files.len());
+    for file in &files {
+        match StagedUpload::create(&file.remote, allow_overwrite).await {
+            Ok(stage) => stages.push(stage),
+            Err(error) => {
+                for stage in &stages {
+                    stage.cleanup().await;
+                }
+                return Err(error.into());
             }
         }
     }
-    if args.is_preserve() {
-        for (local_path, remote_path) in &per_file_inputs {
-            let target = RemotePath {
-                user: remote_base.user.clone(),
-                host: remote_base.host.clone(),
-                path: remote_path.clone(),
-            };
-            crate::core::remote::preserve_remote_attrs(local_path, &target).await?;
+    let result: Result<()> = async {
+        let transfers = files
+            .iter()
+            .zip(&stages)
+            .map(|(file, stage)| FileTransfer {
+                remote: stage.remote().path.clone(),
+                local: file.local_path.clone(),
+                size: file.size,
+                metadata: None,
+            })
+            .collect();
+        let hashes = transfer_serve_batch(pool, transfers, false, runner).await?;
+        if hashes.len() != files.len() {
+            bail!("serve upload returned an incomplete hash list");
         }
+        for ((file, stage), hash) in files.iter().zip(&mut stages).zip(&hashes) {
+            stage.prepare().await?;
+            if args.is_verify() {
+                let source = file.local_path.clone();
+                let local_hash = tokio::task::spawn_blocking(move || {
+                    crate::core::checksum::calculate_hash(&source)
+                })
+                .await??;
+                if bytes_to_hex(hash) != local_hash {
+                    bail!("hash mismatch for {}", file.local_path.display());
+                }
+            }
+            if args.is_preserve() {
+                crate::core::remote::preserve_remote_attrs(&file.local_path, stage.remote())
+                    .await?;
+            }
+        }
+        for stage in &mut stages {
+            stage.commit().await?;
+        }
+        Ok(())
     }
-    Ok(())
+    .await;
+    for stage in &stages {
+        stage.cleanup().await;
+    }
+    result
 }
 
 pub(super) async fn handle_serve_download(
@@ -354,9 +370,7 @@ pub(super) async fn handle_serve_download(
 ) -> Result<()> {
     #[cfg(windows)]
     if args.is_sync() {
-        bail!(
-            "--sync cannot guarantee durable local namespace publication on Windows; refusing before transfer"
-        );
+        bail!("--sync cannot guarantee durable local namespace publication on Windows; refusing before transfer");
     }
     if args.is_resume() || args.is_strict() || args.is_append() {
         return Err(fallback_error(
@@ -366,112 +380,20 @@ pub(super) async fn handle_serve_download(
     if args.is_dry_run() {
         return Err(fallback_error("serve: dry-run fallback to legacy"));
     }
-
+    // SSH inventory is shared with legacy downloads. Older serve peers whose
+    // LIST does not follow directory links therefore retain correct selection.
+    let plan = collect_download_plan(sources, dest, args.is_recursive(), excludes).await?;
+    if plan.files.is_empty() && plan.directories.is_empty() {
+        return Ok(());
+    }
     let mut pool = if args.use_direct_tcp() {
         ServeClientPool::connect_direct_with_caps(ssh_target, args.protocol_caps(), parallel).await
     } else {
         ServeClientPool::connect_with_caps(ssh_target, args.protocol_caps(), parallel).await
     }
-    .map_err(|e| fallback_error(format!("serve unavailable: {e}")))?;
-
-    struct DownloadItem {
-        remote_path: String,
-        local_path: PathBuf,
-        size: u64,
-        is_dir: bool,
-        metadata: Option<crate::core::file_metadata::PortableFileMetadata>,
-    }
-
-    let mut total_size = 0u64;
-    let mut items: Vec<DownloadItem> = Vec::new();
-
-    for src in sources {
-        if crate::core::traversal::is_excluded(src, excludes) {
-            continue;
-        }
-        let src_str = src.to_string_lossy();
-        if let Some(rp) = parse_remote_path(&src_str) {
-            let (size, _mtime, is_dir) = pool.first_mut().stat(&rp.path).await?;
-            if is_dir && !args.is_recursive() {
-                pool.close().await?;
-                bail!(
-                    "Remote source '{}' is a directory. Use -r flag for recursive copy.",
-                    rp
-                );
-            }
-            if is_dir && args.is_recursive() {
-                let entries = pool.first_mut().list(&rp.path).await?;
-                let local_base = resolve_download_local(&rp, dest)?;
-                items.push(DownloadItem {
-                    remote_path: String::new(),
-                    local_path: local_base.clone(),
-                    size: 0,
-                    is_dir: true,
-                    metadata: None,
-                });
-                for entry in &entries {
-                    if crate::core::traversal::is_excluded(
-                        std::path::Path::new(&entry.path),
-                        excludes,
-                    ) {
-                        continue;
-                    }
-                    let local =
-                        crate::core::destination::remote_entry_path(&local_base, &entry.path)?;
-                    let remote = format!("{}/{}", rp.path, entry.path);
-                    if entry.is_dir {
-                        items.push(DownloadItem {
-                            remote_path: remote,
-                            local_path: local,
-                            size: 0,
-                            is_dir: true,
-                            metadata: None,
-                        });
-                    } else {
-                        add_transfer_size(&mut total_size, entry.size)?;
-                        items.push(DownloadItem {
-                            remote_path: remote,
-                            local_path: local,
-                            size: entry.size,
-                            is_dir: false,
-                            metadata: None,
-                        });
-                    }
-                }
-            } else if !is_dir {
-                add_transfer_size(&mut total_size, size)?;
-                let local = resolve_download_local(&rp, dest)?;
-                items.push(DownloadItem {
-                    remote_path: rp.path.clone(),
-                    local_path: local,
-                    size,
-                    is_dir: false,
-                    metadata: None,
-                });
-            }
-        }
-    }
-
-    if args.is_preserve() {
-        let (user, host) = match ssh_target.split_once('@') {
-            Some((user, host)) => (Some(user.to_string()), host.to_string()),
-            None => (None, ssh_target.to_string()),
-        };
-        for item in &mut items {
-            if item.is_dir {
-                continue;
-            }
-            let remote = RemotePath {
-                user: user.clone(),
-                host: host.clone(),
-                path: item.remote_path.clone(),
-            };
-            item.metadata = Some(crate::core::remote::get_remote_attrs(&remote).await?);
-        }
-    }
-
+    .map_err(|error| fallback_error(format!("serve unavailable: {error}")))?;
     let runner = ProgressRunner::new(
-        total_size,
+        plan.total_size,
         progress_mode(args),
         args.is_quiet(),
         crate::config::is_json_mode(),
@@ -479,86 +401,78 @@ pub(super) async fn handle_serve_download(
     )?;
     runner.set_operation_type("Downloading (serve)");
     runner.set_verify_mode(args.is_verify());
-
-    let use_stripe = args.use_direct_tcp() && pool.len() > 1 && !args.is_verify();
-    let mut big_files: Vec<(
-        String,
-        PathBuf,
-        u64,
-        Option<crate::core::file_metadata::PortableFileMetadata>,
-    )> = Vec::new();
-    let mut files_to_get: Vec<FileTransfer> = Vec::new();
-    for item in &items {
-        if item.is_dir {
-            if args.is_sync() {
-                crate::core::io::create_dir_all_durable_async(&item.local_path).await?;
-            } else {
-                tokio::fs::create_dir_all(&item.local_path).await?;
-            }
-        } else if use_stripe && item.size >= STRIPING_MIN_FILE_SIZE {
-            big_files.push((
-                item.remote_path.clone(),
-                item.local_path.clone(),
-                item.size,
-                item.metadata,
-            ));
+    for directory in &plan.directories {
+        if args.is_sync() {
+            crate::core::io::create_dir_all_durable_async(&directory.local_path).await?;
         } else {
-            files_to_get.push(FileTransfer {
-                remote: item.remote_path.clone(),
-                local: item.local_path.clone(),
-                size: item.size,
-                metadata: item.metadata,
-            });
+            tokio::fs::create_dir_all(&directory.local_path).await?;
         }
     }
-
-    for (remote_path, local_path, size, metadata) in &big_files {
-        (runner.file_callback())(
-            &local_path.file_name().unwrap_or_default().to_string_lossy(),
-            *size,
-        );
-        let _ = pool
-            .striped_get_file_synced_with_metadata_and_overwrite(
-                remote_path,
-                local_path,
-                *size,
-                args.is_sync(),
-                *metadata,
-                args.is_force(),
-            )
-            .await?;
-        (runner.inc_callback())(*size);
+    let use_stripe = args.use_direct_tcp() && pool.len() > 1 && !args.is_verify();
+    let mut big_files = Vec::new();
+    let mut files_to_get = Vec::new();
+    for item in plan.files {
+        let metadata = if args.is_preserve() {
+            Some(crate::core::remote::get_remote_attrs(&item.remote).await?)
+        } else {
+            None
+        };
+        let transfer = FileTransfer {
+            remote: item.remote.path,
+            local: item.local_path,
+            size: item.size,
+            metadata,
+        };
+        if use_stripe && transfer.size >= STRIPING_MIN_FILE_SIZE {
+            big_files.push(transfer);
+        } else {
+            files_to_get.push(transfer);
+        }
     }
-
+    for file in big_files {
+        (runner.file_callback())(
+            &file.local.file_name().unwrap_or_default().to_string_lossy(),
+            file.size,
+        );
+        pool.striped_get_file_synced_with_metadata_and_overwrite(
+            &file.remote,
+            &file.local,
+            file.size,
+            args.is_sync(),
+            file.metadata,
+            args.is_force(),
+        )
+        .await?;
+        (runner.inc_callback())(file.size);
+    }
     if !files_to_get.is_empty() {
-        let file_cb = runner.file_callback();
-        let inc = runner.inc_callback();
-        let sync = args.is_sync();
+        let file_callback = runner.file_callback();
         pool.pipelined_get_files_striped_with_overwrite(
             files_to_get,
-            sync,
+            args.is_sync(),
             args.is_verify(),
             args.is_force(),
-            move |_idx, path, size| {
-                file_cb(
+            move |_index, path, size| {
+                file_callback(
                     &path.file_name().unwrap_or_default().to_string_lossy(),
                     size,
                 );
             },
-            inc,
+            runner.inc_callback(),
         )
         .await?;
     }
-
+    if args.is_preserve() {
+        preserve_directories(&plan.directories, false, args.is_sync()).await?;
+    }
     pool.close().await?;
     runner.finish_ok()
 }
 
 #[cfg(test)]
 mod fallback_tests {
-    use super::{
-        add_transfer_size, allows_legacy_fallback, fallback_error, serve_upload_pool_size,
-    };
+    use super::super::add_transfer_size;
+    use super::{allows_legacy_fallback, fallback_error, serve_upload_pool_size};
 
     #[test]
     fn only_typed_preflight_failures_allow_legacy_fallback() {

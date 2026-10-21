@@ -15,7 +15,7 @@ flags:
   - { f: "-e, --exclude",       t: "regex...",           d: "—",          x: "exclude paths matching regex" }
   - { f: "-n, --dry-run",       t: bool,                 d: "false",      x: "preview without making changes" }
   - { f: "--to <DEST>",         t: "path...",            d: "—",          x: "fan-out target (repeatable); sources removed only if every target succeeds" }
-  - { f: "--no-deref",          t: bool,                 d: "false",      x: "ordinary move rejects this flag; use local copy --no-deref, then remove" }
+  - { f: "--no-deref",          t: bool,                 d: "false",      x: "accepted for consistency; moves always preserve symbolic links" }
   - { f: "-V, --verify",        t: bool,                 d: "false",      x: "verify the copy phase; same-device renames do not need a copy phase" }
   - { f: "-C, --resume",        t: bool,                 d: "false",      x: "resume interrupted move (cross-device only)" }
   - { f: "-s, --strict",        t: bool,                 d: "false",      x: "strict hash-verified resume" }
@@ -68,6 +68,9 @@ A single bare missing destination names the new file or directory. Multiple
 sources require an existing directory or an explicit trailing `/`.
 Dry-run uses the same mapping without creating directories.
 
-Remote and fan-out moves currently reject `--exclude`: removing the original
-whole tree could delete excluded files that were never copied. Use copy with
-excludes, verify the result, then remove only the intended sources.
+Local, remote and fan-out moves preserve excluded paths. Cleanup removes only
+the source entries captured before copying, after all required copies succeed.
+New or changed entries are retained; a detected source change returns an error.
+Moves preserve symbolic links themselves and never remove their targets.
+Existing destination directories merge according to the same leaf overwrite
+rules as copy. A cross-host or cross-filesystem move is not a whole-tree transaction.

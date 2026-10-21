@@ -290,36 +290,32 @@ os.execv('/bin/sh', ['sh', '-c', ' '.join(words)])
         other.mkdir()
         result = self.run_bcmr("move", "moving-*", "--exclude", "skip", "--to", self.dest,
                                "--to", other)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("--exclude", result.stderr)
+        self.assert_ok(result)
         self.assertTrue(excluded.exists(), "excluded source was deleted")
         self.assertEqual(excluded.read_text(), "excluded")
-        self.assertEqual((self.local / "moving-keep.txt").read_text(), "copied")
-        self.assert_files(self.dest, {})
-        self.assert_files(other, {})
+        self.assertFalse((self.local / "moving-keep.txt").exists())
+        self.assert_files(self.dest, {"moving-keep.txt": "copied"})
+        self.assert_files(other, {"moving-keep.txt": "copied"})
 
-    def test_recursive_fan_out_move_with_excludes_refuses_before_writes(self):
+    def test_recursive_fan_out_move_preserves_excluded_descendants(self):
         self.put(self.local, "tree-one/keep.txt", "keep")
         self.put(self.local, "tree-one/skip.txt", "excluded descendant")
         other = self.root / "other-destination"
         other.mkdir()
         result = self.run_bcmr("move", "-r", "tree-*", "--exclude", "skip", "--to", self.dest,
                                "--to", other)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("--exclude", result.stderr)
-        self.assert_files(self.local, {"tree-one/keep.txt": "keep",
-                                       "tree-one/skip.txt": "excluded descendant"})
-        self.assert_files(self.dest, {})
-        self.assert_files(other, {})
+        self.assert_ok(result)
+        self.assert_files(self.local, {"tree-one/skip.txt": "excluded descendant"})
+        self.assert_files(self.dest, {"tree-one/keep.txt": "keep"})
+        self.assert_files(other, {"tree-one/keep.txt": "keep"})
 
-    def test_remote_move_with_excludes_refuses_before_writes(self):
+    def test_remote_move_preserves_excluded_star_matches(self):
         self.put(self.home, "remote-keep.txt", "keep")
         self.put(self.home, "remote-skip.txt", "excluded")
         result = self.run_bcmr("move", "fixture:remote-*", "--exclude", "skip", self.dest)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("--exclude", result.stderr)
-        self.assert_files(self.home, {"remote-keep.txt": "keep", "remote-skip.txt": "excluded"})
-        self.assert_files(self.dest, {})
+        self.assert_ok(result)
+        self.assert_files(self.home, {"remote-skip.txt": "excluded"})
+        self.assert_files(self.dest, {"remote-keep.txt": "keep"})
 
     def test_literal_and_star_local_source_spellings_move_only_once(self):
         self.put(self.local, "unique.txt", "once")

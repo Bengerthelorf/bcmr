@@ -1,15 +1,13 @@
 use crate::cli::Commands;
 use crate::core::checksum;
 use crate::core::error::BcmrError;
-use crate::core::traversal;
-use crate::ui::display::{print_dry_run, ActionType};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
 
 use super::file_copy::{copy_file, CopyFileOptions};
-use super::overwrite::{check_overwrite, determine_dry_run_action, is_normal_write};
+use super::overwrite::check_overwrite;
 use super::plan::{CopyPlan, PlanEntry};
 use super::symlinks::{check_symlink_overwrite, create_symlink_replacing};
 
@@ -42,6 +40,12 @@ pub async fn execute_plan<F>(
 where
     F: Fn(u64) + Send + Sync + Clone + 'static,
 {
+    #[cfg(not(unix))]
+    if cli.is_sync() && !cli.is_dry_run() {
+        return Err(BcmrError::InvalidInput(
+            "--sync cannot guarantee durable local namespace publication on this platform; refusing before transfer".into(),
+        ));
+    }
     let test_mode = cli.get_test_mode();
     CopyFileOptions::from_cli(cli, test_mode.clone()).validate_reflink_compatibility()?;
     let callback = ProgressCallback {
@@ -52,7 +56,9 @@ where
 
     for entry in &plan.entries {
         if let PlanEntry::CreateDir { dst, .. } = entry {
-            if !dst.exists() {
+            if cli.is_sync() {
+                crate::core::io::create_dir_all_durable_async(dst).await?;
+            } else {
                 fs::create_dir_all(dst).await?;
             }
         }
@@ -70,9 +76,21 @@ where
         {
             check_symlink_overwrite(dst, *kind, cli)?;
             if let Some(parent) = dst.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-                fs::create_dir_all(parent).await?;
+                if cli.is_sync() {
+                    crate::core::io::create_dir_all_durable_async(parent).await?;
+                } else {
+                    fs::create_dir_all(parent).await?;
+                }
             }
-            create_symlink_replacing(dst, target, *kind, cli.is_force(), &test_mode).await?;
+            create_symlink_replacing(
+                dst,
+                target,
+                *kind,
+                cli.is_force(),
+                cli.is_sync(),
+                &test_mode,
+            )
+            .await?;
             if verbose {
                 eprintln!("'{}' -> '{}' (symlink)", target.display(), dst.display());
             }
@@ -109,7 +127,20 @@ where
     if cli.is_preserve() {
         for entry in plan.entries.iter().rev() {
             if let PlanEntry::CreateDir { src, dst } = entry {
+                #[cfg(unix)]
+                let handle = if cli.is_sync() {
+                    Some(fs::File::open(dst).await?.into_std().await)
+                } else {
+                    None
+                };
                 preserve_attributes(src, dst).await?;
+                #[cfg(unix)]
+                if let Some(handle) = handle {
+                    tokio::task::spawn_blocking(move || {
+                        crate::core::io::durable_sync_directory_handle_strict(&handle)
+                    })
+                    .await??;
+                }
             }
         }
     }
@@ -117,6 +148,7 @@ where
     Ok(())
 }
 
+#[allow(dead_code)] // Compatibility entry point; CLI operations execute a captured plan.
 pub async fn copy_path<F>(
     src: &Path,
     dst: &Path,
@@ -129,151 +161,19 @@ pub async fn copy_path<F>(
 where
     F: Fn(u64) + Send + Sync + Clone + 'static,
 {
-    let test_mode = cli.get_test_mode();
-    CopyFileOptions::from_cli(cli, test_mode.clone()).validate_reflink_compatibility()?;
-    let callback = ProgressCallback {
-        callback: progress_callback,
-        on_new_file: Arc::new(on_new_file),
-        on_reflink: Arc::new(on_reflink),
-    };
-
-    if traversal::is_excluded(src, excludes) {
-        return Ok(());
+    let no_deref = cli.is_no_deref() || matches!(cli, Commands::Move { .. });
+    let plan = super::plan::plan_copy(
+        &[src.to_path_buf()],
+        dst,
+        cli.is_recursive(),
+        no_deref,
+        excludes,
+    )
+    .await?;
+    if cli.is_dry_run() {
+        return super::plan::dry_run_plan(&plan, cli);
     }
-
-    if src.is_file() {
-        let dst_path = if crate::core::destination::local_is_directory(dst)? {
-            dst.join(
-                src.file_name()
-                    .ok_or_else(BcmrError::invalid_source_file_name)?,
-            )
-        } else {
-            dst.to_path_buf()
-        };
-
-        if dst_path.exists() && !cli.is_force() && is_normal_write(cli) {
-            return Err(BcmrError::TargetExists(dst_path));
-        }
-
-        if cli.is_dry_run() {
-            let action = determine_dry_run_action(src, &dst_path, cli)?;
-            print_dry_run(
-                action,
-                &src.to_string_lossy(),
-                Some(&dst_path.to_string_lossy()),
-            );
-            return Ok(());
-        }
-
-        copy_file(
-            src,
-            &dst_path,
-            CopyFileOptions::from_cli(cli, test_mode),
-            &callback,
-        )
-        .await?;
-
-        if cli.is_verbose() {
-            eprintln!("'{}' -> '{}'", src.display(), dst_path.display());
-        }
-    } else if cli.is_recursive() && src.is_dir() {
-        let src_dir_name = src
-            .file_name()
-            .ok_or_else(BcmrError::invalid_source_dir_name)?;
-        let new_dst = if crate::core::destination::local_is_directory(dst)? {
-            dst.join(src_dir_name)
-        } else {
-            dst.to_path_buf()
-        };
-
-        if cli.is_dry_run() && !new_dst.exists() {
-            print_dry_run(
-                ActionType::Add,
-                &src.to_string_lossy(),
-                Some(&format!("(DIR) -> {}", new_dst.display())),
-            );
-        }
-
-        if !new_dst.exists() && !cli.is_dry_run() {
-            fs::create_dir_all(&new_dst).await?;
-        }
-
-        let mut files_to_copy = Vec::new();
-        let mut dir_pairs: Vec<(PathBuf, PathBuf)> = Vec::new();
-        for entry in traversal::walk(src, true, false, 1, excludes) {
-            let entry = entry?;
-            let path = entry.path();
-
-            let relative_path = path.strip_prefix(src)?;
-            let target_path = new_dst.join(relative_path);
-
-            if path.is_dir() {
-                if !cli.is_dry_run() {
-                    if !target_path.exists() {
-                        fs::create_dir_all(&target_path).await?;
-                    }
-                    dir_pairs.push((path.to_path_buf(), target_path));
-                } else if !target_path.exists() {
-                    print_dry_run(
-                        ActionType::Add,
-                        &path.to_string_lossy(),
-                        Some(&format!("(DIR) -> {}", target_path.display())),
-                    );
-                }
-            } else if path.is_file() {
-                files_to_copy.push((path.to_path_buf(), target_path));
-            }
-        }
-
-        for (src_path, dst_path) in files_to_copy {
-            if let Some(parent) = dst_path.parent() {
-                if !parent.exists() && !cli.is_dry_run() {
-                    fs::create_dir_all(parent).await?;
-                }
-            }
-
-            if dst_path.exists() && !cli.is_force() && is_normal_write(cli) {
-                return Err(BcmrError::TargetExists(dst_path));
-            }
-
-            if cli.is_dry_run() {
-                let action = determine_dry_run_action(&src_path, &dst_path, cli)?;
-                print_dry_run(
-                    action,
-                    &src_path.to_string_lossy(),
-                    Some(&dst_path.to_string_lossy()),
-                );
-            } else {
-                copy_file(
-                    &src_path,
-                    &dst_path,
-                    CopyFileOptions::from_cli(cli, test_mode.clone()),
-                    &callback,
-                )
-                .await?;
-
-                if cli.is_verbose() {
-                    eprintln!("'{}' -> '{}'", src_path.display(), dst_path.display());
-                }
-            }
-        }
-
-        if cli.is_preserve() && !cli.is_dry_run() {
-            for (src_dir, dst_dir) in dir_pairs.iter().rev() {
-                preserve_attributes(src_dir, dst_dir).await?;
-            }
-            preserve_attributes(src, &new_dst).await?;
-        }
-    } else if src.is_dir() {
-        return Err(BcmrError::InvalidInput(format!(
-            "Source '{}' is a directory. Use -r flag for recursive copy.",
-            src.display()
-        )));
-    } else {
-        return Err(BcmrError::SourceNotFound(src.to_path_buf()));
-    }
-
-    Ok(())
+    execute_plan(&plan, cli, progress_callback, on_new_file, on_reflink).await
 }
 
 pub(crate) async fn preserve_attributes(

@@ -29,37 +29,63 @@ pub(super) async fn handle_stat(path: &str) -> Result<Message> {
     })
 }
 
-pub(super) async fn handle_list(path: &str) -> Result<Message> {
+pub(super) async fn handle_list(path: &str, root: &Path) -> Result<Message> {
     let base = Path::new(path).to_path_buf();
-    let entries = tokio::task::spawn_blocking(move || -> Result<Vec<ListEntry>> {
-        let mut out = Vec::new();
-        for entry in walkdir::WalkDir::new(&base).min_depth(1) {
-            let entry = entry?;
-            let rel = entry
-                .path()
-                .strip_prefix(&base)
-                .unwrap_or(entry.path())
-                .to_string_lossy()
-                .into_owned();
-            let meta = entry.metadata()?;
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            out.push(ListEntry {
-                path: rel,
-                size: meta.len(),
-                mtime,
-                is_dir: meta.is_dir(),
-            });
-        }
-        Ok(out)
-    })
-    .await??;
-
+    let root = root.to_path_buf();
+    let entries =
+        tokio::task::spawn_blocking(move || collect_list(base, root, |_, _| {})).await??;
     Ok(Message::ListResponse { entries })
+}
+
+fn collect_list(
+    base: std::path::PathBuf,
+    root: std::path::PathBuf,
+    mut before_read: impl FnMut(&Path, &Path),
+) -> Result<Vec<ListEntry>> {
+    let binding = super::listing::BoundListing::new(&root)?;
+    let mut out = Vec::new();
+    let mut pending = vec![(base.clone(), Vec::<std::path::PathBuf>::new())];
+    while let Some((path, mut ancestors)) = pending.pop() {
+        // Validate each followed target before opening or enumerating it.
+        // Checking only the initial LIST root permits descendant symlinks
+        // to disclose names and metadata outside the server jail.
+        let physical = std::fs::canonicalize(&path)?;
+        if !physical.starts_with(&root) {
+            bail!(
+                "LIST path '{}' escapes server root '{}'",
+                path.display(),
+                root.display()
+            );
+        }
+        before_read(&path, &physical);
+        let observation = binding.observe(&physical)?;
+        if observation.is_dir {
+            if ancestors.contains(&physical) {
+                bail!("symbolic-link directory cycle at '{}'", path.display());
+            }
+            ancestors.push(physical);
+            let mut children = observation
+                .children
+                .into_iter()
+                .map(|name| path.join(name))
+                .collect::<Vec<_>>();
+            children.sort();
+            for child in children.into_iter().rev() {
+                pending.push((child, ancestors.clone()));
+            }
+        }
+        if path == base {
+            continue;
+        }
+        let rel = path.strip_prefix(&base)?.to_string_lossy().into_owned();
+        out.push(ListEntry {
+            path: rel,
+            size: observation.size,
+            mtime: observation.mtime,
+            is_dir: observation.is_dir,
+        });
+    }
+    Ok(out)
 }
 
 pub(super) async fn handle_hash(path: &str, offset: u64, limit: Option<u64>) -> Result<Message> {
@@ -633,8 +659,12 @@ where
     Ok(())
 }
 
-pub(super) async fn handle_mkdir(path: &str) -> Result<Message> {
-    fs::create_dir_all(path).await?;
+pub(super) async fn handle_mkdir(path: &str, sync: bool) -> Result<Message> {
+    if sync {
+        crate::core::io::create_dir_all_durable_async(Path::new(path)).await?;
+    } else {
+        fs::create_dir_all(path).await?;
+    }
     Ok(Message::Ok { hash: None })
 }
 
@@ -691,4 +721,90 @@ pub(super) async fn handle_resume(path: &str) -> Result<Message> {
         size,
         block_hash: Some(block_hash),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    use super::collect_list;
+    use super::handle_mkdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn list_metadata_stays_on_checked_target_when_alias_is_retargeted() {
+        let directory = tempfile::tempdir().unwrap();
+        let jail = directory.path().join("jail");
+        std::fs::create_dir(&jail).unwrap();
+        let jail = std::fs::canonicalize(jail).unwrap();
+        let safe = jail.join("safe");
+        std::fs::write(&safe, b"abc").unwrap();
+        let outside = directory.path().join("outside");
+        std::fs::write(&outside, [b'x'; 101]).unwrap();
+        let alias = jail.join("alias");
+        std::os::unix::fs::symlink(&safe, &alias).unwrap();
+        let mut changed = false;
+        let entries = collect_list(jail.clone(), jail, |logical, _| {
+            if logical == alias {
+                std::fs::remove_file(&alias).unwrap();
+                std::os::unix::fs::symlink(&outside, &alias).unwrap();
+                changed = true;
+            }
+        })
+        .unwrap();
+        assert!(
+            changed,
+            "test did not reach the canonicalization/open boundary"
+        );
+        let entry = entries.iter().find(|entry| entry.path == "alias").unwrap();
+        assert_eq!(
+            entry.size, 3,
+            "LIST disclosed metadata of an outside replacement"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn synced_mkdir_creates_nested_empty_directories_through_existing_link_prefix() {
+        let directory = tempfile::tempdir().unwrap();
+        let real = directory.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = directory.path().join("linked-prefix");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let target = link.join("parent/empty");
+        handle_mkdir(target.to_str().unwrap(), true).await.unwrap();
+        assert!(real.join("parent/empty").is_dir());
+        assert_eq!(
+            std::fs::read_dir(real.join("parent/empty"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn synced_mkdir_reports_creation_failure_without_replacing_blocker() {
+        let directory = tempfile::tempdir().unwrap();
+        let blocker = directory.path().join("blocker");
+        std::fs::write(&blocker, b"existing bytes").unwrap();
+        let error = handle_mkdir(blocker.join("child").to_str().unwrap(), true)
+            .await
+            .expect_err("durability/creation failures must not become successful MKDIR replies");
+        let io_error = error.downcast_ref::<std::io::Error>().unwrap();
+        #[cfg(unix)]
+        assert_eq!(io_error.kind(), std::io::ErrorKind::NotADirectory);
+        #[cfg(not(unix))]
+        assert_eq!(io_error.kind(), std::io::ErrorKind::Unsupported);
+        assert_eq!(std::fs::read(blocker).unwrap(), b"existing bytes");
+    }
+
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn unsupported_synced_mkdir_refuses_before_creating_any_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("missing/empty");
+        handle_mkdir(target.to_str().unwrap(), true)
+            .await
+            .expect_err("unsupported durable namespace creation must fail closed");
+        assert!(!directory.path().join("missing").exists());
+    }
 }

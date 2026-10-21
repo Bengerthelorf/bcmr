@@ -4,10 +4,12 @@
 Run with BCMR=/absolute/path/to/bcmr python3 tests/remote_listing_test.py.
 """
 import os
+import errno
 from pathlib import Path
 import unittest
 
 import star_copy_test as fixture
+import remote_overwrite_test as overwrite
 
 
 @unittest.skipUnless(os.name == "posix", "requires a POSIX shell and filesystem")
@@ -17,6 +19,7 @@ class RemoteListingTests(unittest.TestCase):
     run_bcmr = fixture.SourceStarTests.run_bcmr
     assert_ok = fixture.SourceStarTests.assert_ok
     assert_files = fixture.SourceStarTests.assert_files
+    inject_transport_before_exec = overwrite.RemoteOverwriteTests.inject_transport_before_exec
 
     def force_portable_find(self):
         # Exercise the production fallback on GNU and BSD hosts alike; the
@@ -29,6 +32,54 @@ done
 exec /usr/bin/find "$@"
 """)
         command.chmod(0o755)
+
+    # Excluded names need not be representable by the SSH path protocol.
+    def test_excluded_non_utf8_leaf_is_pruned_before_name_validation(self):
+        for portable in (False, True):
+            if portable:
+                self.force_portable_find()
+            for host in (None, "fixture", "legacy"):
+                with self.subTest(portable=portable, host=host):
+                    label = f"{'portable' if portable else 'native'}-{host or 'local'}"
+                    tree = (self.home if host else self.local) / label
+                    self.put(tree, "keep.txt", "selected bytes")
+                    try:
+                        descriptor = os.open(os.fsencode(tree) + b"/bad\xff.tmp",
+                                             os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    except OSError as error:
+                        if error.errno in (errno.EILSEQ, errno.EINVAL):
+                            self.skipTest("fixture filesystem requires UTF-8 names")
+                        raise
+                    os.write(descriptor, b"excluded bytes")
+                    os.close(descriptor)
+                    source = f"{host}:{tree}" if host else tree
+                    destination = self.dest / label
+                    self.assert_ok(self.run_bcmr("copy", "-r", "--exclude", r"\.tmp$",
+                                                source, destination))
+                    self.assert_files(destination, {"keep.txt": "selected bytes"})
+
+    # Model a Unix peer's raw child record even on UTF-8-only client filesystems.
+    def test_excluded_non_utf8_wire_entry_does_not_reject_remote_tree(self):
+        self.inject_transport_before_exec(r'''
+import shlex
+import subprocess
+command = shlex.split(words[0]) if len(words) == 1 else []
+if len(command) >= 4 and command[:2] == ['sh', '-c'] and command[3] == 'bcmr-tree':
+    output = subprocess.run(['/bin/sh', '-c', ' '.join(words)], capture_output=True)
+    sys.stderr.buffer.write(output.stderr)
+    sys.stdout.buffer.write(output.stdout)
+    if output.returncode == 0:
+        sys.stdout.buffer.write(b'bad\xff.tmp\0f\0' + b'1\0')
+    sys.exit(output.returncode)
+''')
+        for host in ("fixture", "legacy"):
+            with self.subTest(host=host):
+                tree = self.home / ("wire-" + host)
+                self.put(tree, "keep.txt", "real selected bytes")
+                destination = self.dest / host
+                self.assert_ok(self.run_bcmr("copy", "-r", "--exclude", r"\.tmp$",
+                                            f"{host}:{tree}", destination))
+                self.assert_files(destination, {"keep.txt": "real selected bytes"})
 
     # Broken BSD framing used to return success while copying zero files.
     def test_portable_listing_copies_relative_nested_and_unusual_names(self):

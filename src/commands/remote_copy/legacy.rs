@@ -1,9 +1,9 @@
 use super::{
-    collect_upload_files, progress_mode, resolve_download_local, resolve_upload_remote,
-    run_parallel_transfers, transfer_options_from_cli, TransferItem,
+    collect_download_plan, collect_upload_plan, preserve_directories, progress_mode,
+    run_parallel_transfers, transfer_options_from_cli,
 };
 use crate::cli::Commands;
-use crate::core::remote::{self, parse_remote_path, RemotePath};
+use crate::core::remote::{self, RemotePath};
 use crate::ui::runner::ProgressRunner;
 use crate::ui::utils::format_bytes;
 use anyhow::{bail, Result};
@@ -15,55 +15,35 @@ pub(super) async fn handle_remote_upload(
     parallel: usize,
     excludes: &[regex::Regex],
 ) -> Result<()> {
-    let excludes = excludes.to_vec();
-    let mut total_size = 0u64;
-    for src in sources {
-        if parse_remote_path(&src.to_string_lossy()).is_some() {
-            bail!("Cannot copy between two remote hosts. Use local as intermediary.");
-        }
-        if src.is_file() {
-            total_size += src.metadata()?.len();
-        } else if src.is_dir() && args.is_recursive() {
-            total_size +=
-                crate::commands::copy::get_total_size(std::slice::from_ref(src), true, args, &[])
-                    .await?;
-        } else if src.is_dir() {
-            bail!(
-                "Source '{}' is a directory. Use -r flag for recursive copy.",
-                src.display()
-            );
-        } else {
-            bail!("Source '{}' not found", src.display());
-        }
-    }
-
+    let plan = collect_upload_plan(sources, rdest, args.is_recursive(), excludes)?;
     if args.is_dry_run() {
         println!(
             "Dry-run: would upload {} to {}",
-            format_bytes(total_size as f64),
+            format_bytes(plan.total_size as f64),
             rdest
         );
-        for src in sources {
-            if src.is_file() {
-                println!(
-                    "  {} -> {}",
-                    src.display(),
-                    resolve_upload_remote(src, rdest, sources.len() > 1)
-                );
-            } else if src.is_dir() && args.is_recursive() {
-                let dir_remote = resolve_upload_remote(src, rdest, sources.len() > 1);
-                for item in collect_upload_files(src, &dir_remote, &excludes)? {
-                    println!("  {} -> {}", item.local_path.display(), item.remote);
-                }
-            }
+        for directory in &plan.directories {
+            println!(
+                "  {} -> {} (DIR)",
+                directory.local_path.display(),
+                directory.remote
+            );
+        }
+        for item in &plan.files {
+            println!("  {} -> {}", item.local_path.display(), item.remote);
         }
         return Ok(());
     }
+    if plan.files.is_empty() && plan.directories.is_empty() {
+        return Ok(());
+    }
+    if args.is_sync() {
+        bail!("--sync cannot guarantee durable remote namespace publication through legacy SSH; refusing before transfer");
+    }
 
     let opts = transfer_options_from_cli(args);
-
     let runner = ProgressRunner::new(
-        total_size,
+        plan.total_size,
         progress_mode(args),
         args.is_quiet(),
         crate::config::is_json_mode(),
@@ -71,64 +51,30 @@ pub(super) async fn handle_remote_upload(
     )?;
     runner.set_operation_type("Uploading");
     runner.set_verify_mode(args.is_verify());
-    let multi_source = sources.len() > 1;
 
+    let directories: Vec<_> = plan.directories.iter().map(|d| d.remote.clone()).collect();
+    remote::ensure_remote_directories(&directories).await?;
     if parallel > 1 {
         runner.set_parallel_mode(parallel);
-
-        let mut items: Vec<TransferItem> = Vec::new();
-        for src in sources {
-            if src.is_file() {
-                let file_remote = resolve_upload_remote(src, rdest, multi_source);
-                items.push(TransferItem {
-                    local_path: src.clone(),
-                    remote: file_remote,
-                    size: src.metadata()?.len(),
-                    is_upload: true,
-                });
-            } else if src.is_dir() && args.is_recursive() {
-                let dir_remote = resolve_upload_remote(src, rdest, sources.len() > 1);
-                remote::ensure_remote_tree(src, &dir_remote).await?;
-                items.extend(collect_upload_files(src, &dir_remote, &excludes)?);
-            }
-        }
-
-        run_parallel_transfers(items, parallel, runner.handle(), &opts)
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        run_parallel_transfers(plan.files, parallel, runner.handle(), &opts).await?;
     } else {
-        for src in sources {
-            if src.is_file() {
-                let file_remote = resolve_upload_remote(src, rdest, multi_source);
-                remote::upload_file(
-                    src,
-                    &file_remote,
-                    remote::TransferCallbacks {
-                        on_progress: &runner.inc_callback(),
-                        on_skip: &runner.skip_callback(),
-                        on_new_file: &runner.file_callback(),
-                    },
-                    &opts,
-                )
-                .await?;
-            } else if src.is_dir() && args.is_recursive() {
-                let dir_remote = resolve_upload_remote(src, rdest, sources.len() > 1);
-                remote::upload_directory(
-                    src,
-                    &dir_remote,
-                    remote::TransferCallbacks {
-                        on_progress: &runner.inc_callback(),
-                        on_skip: &runner.skip_callback(),
-                        on_new_file: &runner.file_callback(),
-                    },
-                    &excludes,
-                    &opts,
-                )
-                .await?;
-            }
+        for item in &plan.files {
+            remote::upload_file(
+                &item.local_path,
+                &item.remote,
+                remote::TransferCallbacks {
+                    on_progress: &runner.inc_callback(),
+                    on_skip: &runner.skip_callback(),
+                    on_new_file: &runner.file_callback(),
+                },
+                &opts,
+            )
+            .await?;
         }
     }
-
+    if args.is_preserve() {
+        preserve_directories(&plan.directories, true, args.is_sync()).await?;
+    }
     runner.finish_ok()
 }
 
@@ -139,59 +85,36 @@ pub(super) async fn handle_remote_download(
     parallel: usize,
     excludes: &[regex::Regex],
 ) -> Result<()> {
-    let excludes = excludes.to_vec();
-
-    let mut remote_sources = Vec::new();
-    for src in sources {
-        let rsrc = parse_remote_path(&src.to_string_lossy()).ok_or_else(|| {
-            anyhow::anyhow!("Mixed local/remote sources without remote destination")
-        })?;
-        let size = remote::remote_total_size(&rsrc, args.is_recursive()).await?;
-        remote_sources.push((rsrc, size));
-    }
-
-    let total_size: u64 = remote_sources.iter().map(|(_, s)| *s).sum();
-
+    let plan = collect_download_plan(sources, dest_local, args.is_recursive(), excludes).await?;
     if args.is_dry_run() {
         println!(
             "Dry-run: would download {} to {}",
-            format_bytes(total_size as f64),
+            format_bytes(plan.total_size as f64),
             dest_local.display()
         );
-        for (rsrc, _) in &remote_sources {
-            let info = remote::remote_stat(rsrc).await?;
-            if info.is_dir && args.is_recursive() {
-                let local_dir = resolve_download_local(rsrc, dest_local)?;
-                let entries = remote::remote_list_files(rsrc).await?;
-                for (rel_path, _, is_dir_entry) in &entries {
-                    if *is_dir_entry {
-                        continue;
-                    }
-                    if crate::core::traversal::is_excluded(
-                        std::path::Path::new(rel_path),
-                        &excludes,
-                    ) {
-                        continue;
-                    }
-                    println!(
-                        "  {} -> {}",
-                        rsrc.join(rel_path),
-                        crate::core::destination::remote_entry_path(&local_dir, rel_path)?
-                            .display()
-                    );
-                }
-            } else {
-                let local_path = resolve_download_local(rsrc, dest_local)?;
-                println!("  {} -> {}", rsrc, local_path.display());
-            }
+        for directory in &plan.directories {
+            println!(
+                "  {} -> {} (DIR)",
+                directory.remote,
+                directory.local_path.display()
+            );
+        }
+        for item in &plan.files {
+            println!("  {} -> {}", item.remote, item.local_path.display());
         }
         return Ok(());
     }
+    if plan.files.is_empty() && plan.directories.is_empty() {
+        return Ok(());
+    }
+    #[cfg(not(unix))]
+    if args.is_sync() {
+        bail!("--sync cannot guarantee durable local namespace publication on this platform; refusing before transfer");
+    }
 
     let opts = transfer_options_from_cli(args);
-
     let runner = ProgressRunner::new(
-        total_size,
+        plan.total_size,
         progress_mode(args),
         args.is_quiet(),
         crate::config::is_json_mode(),
@@ -200,109 +123,34 @@ pub(super) async fn handle_remote_download(
     runner.set_operation_type("Downloading");
     runner.set_verify_mode(args.is_verify());
 
-    if parallel > 1 {
-        runner.set_parallel_mode(parallel);
-
-        let mut items: Vec<TransferItem> = Vec::new();
-        for (rsrc, _) in &remote_sources {
-            let info = remote::remote_stat(rsrc).await?;
-            if info.is_dir {
-                if !args.is_recursive() {
-                    bail!("Remote source '{}' is a directory. Use -r flag.", rsrc);
-                }
-                let local_dir = resolve_download_local(rsrc, dest_local)?;
-                let entries = remote::remote_list_files(rsrc).await?;
-                tokio::fs::create_dir_all(&local_dir).await?;
-                for (rel_path, _, is_dir_entry) in &entries {
-                    if *is_dir_entry
-                        && !crate::core::traversal::is_excluded(
-                            std::path::Path::new(rel_path),
-                            &excludes,
-                        )
-                    {
-                        tokio::fs::create_dir_all(crate::core::destination::remote_entry_path(
-                            &local_dir, rel_path,
-                        )?)
-                        .await?;
-                    }
-                }
-                for (rel_path, size, is_dir_entry) in &entries {
-                    if *is_dir_entry {
-                        continue;
-                    }
-                    if crate::core::traversal::is_excluded(
-                        std::path::Path::new(rel_path),
-                        &excludes,
-                    ) {
-                        continue;
-                    }
-                    items.push(TransferItem {
-                        local_path: crate::core::destination::remote_entry_path(
-                            &local_dir, rel_path,
-                        )?,
-                        remote: rsrc.join(rel_path),
-                        size: *size,
-                        is_upload: false,
-                    });
-                }
-            } else {
-                let local_path = resolve_download_local(rsrc, dest_local)?;
-                items.push(TransferItem {
-                    local_path,
-                    remote: rsrc.clone(),
-                    size: info.size,
-                    is_upload: false,
-                });
-            }
-        }
-
-        run_parallel_transfers(items, parallel, runner.handle(), &opts)
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-    } else {
-        for (rsrc, _) in &remote_sources {
-            let info = remote::remote_stat(rsrc).await?;
-            let inc = runner.inc_callback();
-            let skip = runner.skip_callback();
-            let file_cb = runner.file_callback();
-
-            if info.is_dir {
-                if !args.is_recursive() {
-                    bail!("Remote source '{}' is a directory. Use -r flag.", rsrc);
-                }
-                let local_dir = resolve_download_local(rsrc, dest_local)?;
-                if !local_dir.exists() {
-                    tokio::fs::create_dir_all(&local_dir).await?;
-                }
-                remote::download_directory(
-                    rsrc,
-                    &local_dir,
-                    remote::TransferCallbacks {
-                        on_progress: &inc,
-                        on_skip: &skip,
-                        on_new_file: &file_cb,
-                    },
-                    &excludes,
-                    &opts,
-                )
-                .await?;
-            } else {
-                let local_path = resolve_download_local(rsrc, dest_local)?;
-                remote::download_file(
-                    rsrc,
-                    &local_path,
-                    remote::TransferCallbacks {
-                        on_progress: &inc,
-                        on_skip: &skip,
-                        on_new_file: &file_cb,
-                    },
-                    info.size,
-                    &opts,
-                )
-                .await?;
-            }
+    for directory in &plan.directories {
+        if args.is_sync() {
+            crate::core::io::create_dir_all_durable_async(&directory.local_path).await?;
+        } else {
+            tokio::fs::create_dir_all(&directory.local_path).await?;
         }
     }
-
+    if parallel > 1 {
+        runner.set_parallel_mode(parallel);
+        run_parallel_transfers(plan.files, parallel, runner.handle(), &opts).await?;
+    } else {
+        for item in &plan.files {
+            remote::download_file(
+                &item.remote,
+                &item.local_path,
+                remote::TransferCallbacks {
+                    on_progress: &runner.inc_callback(),
+                    on_skip: &runner.skip_callback(),
+                    on_new_file: &runner.file_callback(),
+                },
+                item.size,
+                &opts,
+            )
+            .await?;
+        }
+    }
+    if args.is_preserve() {
+        preserve_directories(&plan.directories, false, args.is_sync()).await?;
+    }
     runner.finish_ok()
 }

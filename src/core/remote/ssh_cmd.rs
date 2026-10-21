@@ -105,6 +105,23 @@ pub(super) fn ssh_command(target: &str) -> Command {
     cmd
 }
 
+#[allow(dead_code)] // Used by the command binary; the core-only library omits it.
+pub(crate) async fn metadata_command(
+    target: &str,
+    command: String,
+) -> Result<Vec<u8>, crate::core::error::BcmrError> {
+    let output = ssh_command(target).arg(command).output().await?;
+    if !output.status.success() {
+        return Err(crate::core::error::BcmrError::InvalidInput(
+            ssh_error_message(
+                &String::from_utf8_lossy(&output.stderr),
+                &format!("Cannot inspect remote metadata on '{target}'"),
+            ),
+        ));
+    }
+    Ok(output.stdout)
+}
+
 pub(super) fn shell_escape(s: &str) -> String {
     s.replace('\'', "'\\''")
 }

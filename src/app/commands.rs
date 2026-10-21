@@ -161,6 +161,24 @@ pub(crate) async fn handle_copy_command(args: &Commands) -> Result<()> {
     Ok(())
 }
 
+fn select_transfer_sources(
+    sources: &[std::path::PathBuf],
+    excludes: &[regex::Regex],
+) -> Vec<std::path::PathBuf> {
+    sources
+        .iter()
+        .filter(|source| {
+            if let Some(remote) = crate::core::remote::parse_remote_path(&source.to_string_lossy())
+            {
+                !crate::core::traversal::is_remote_entry_excluded(&remote.path, "", excludes)
+            } else {
+                !crate::core::traversal::is_copy_excluded(source, source, excludes)
+            }
+        })
+        .cloned()
+        .collect()
+}
+
 async fn handle_copy_one(args: &Commands, dest_override: Option<&std::path::Path>) -> Result<()> {
     use crate::core::remote::parse_remote_path;
 
@@ -179,6 +197,12 @@ async fn handle_copy_one(args: &Commands, dest_override: Option<&std::path::Path
         }
     };
     let dest: &std::path::Path = dest_buf.as_path();
+    let selected_sources = select_transfer_sources(sources, &excludes);
+    let sources = selected_sources.as_slice();
+    if sources.is_empty() {
+        return Ok(());
+    }
+    let preserve_links = args.is_no_deref() || matches!(args, Commands::Move { .. });
 
     if let Some(mode) = args.get_reflink_mode() {
         validate_mode(&mode, "reflink")?;
@@ -188,7 +212,7 @@ async fn handle_copy_one(args: &Commands, dest_override: Option<&std::path::Path
     }
 
     for src in sources {
-        validate_source_kind(src, args.is_no_deref())?;
+        validate_source_kind(src, preserve_links)?;
     }
 
     check_basename_collisions(sources, args.is_force())?;
@@ -243,7 +267,7 @@ async fn handle_copy_one(args: &Commands, dest_override: Option<&std::path::Path
             sources,
             dest,
             args.is_recursive(),
-            args.is_no_deref(),
+            preserve_links,
             &excludes,
         )
         .await
@@ -258,6 +282,7 @@ async fn handle_copy_one(args: &Commands, dest_override: Option<&std::path::Path
         };
 
         if args.is_force()
+            && !args.is_dry_run()
             && !plan.overwrites.is_empty()
             && args.should_prompt_for_overwrite()
             && !confirm_overwrite(&plan.overwrites)?
@@ -358,20 +383,7 @@ async fn handle_copy_one(args: &Commands, dest_override: Option<&std::path::Path
     }
 }
 
-fn reject_excluded_move_cleanup(excludes: &[regex::Regex]) -> Result<()> {
-    if !excludes.is_empty() {
-        bail!(
-            "--exclude is not supported for remote or fan-out moves: deleting whole sources \
-             could remove excluded files that were not copied. Use copy --exclude, then \
-             remove only the sources you have verified. No files were moved."
-        );
-    }
-    Ok(())
-}
-
 pub(crate) async fn handle_move_command(args: &Commands) -> Result<()> {
-    use crate::core::remote::{parse_remote_path, remote_remove};
-
     let cm = args
         .copy_move_args()
         .ok_or_else(|| anyhow::anyhow!("move requires copy/move args"))?;
@@ -385,7 +397,16 @@ pub(crate) async fn handle_move_command(args: &Commands) -> Result<()> {
         return handle_move_one(args).await;
     }
 
-    reject_excluded_move_cleanup(&args.compile_excludes()?)?;
+    let excludes = args.compile_excludes()?;
+    let sources = select_transfer_sources(&cm.paths, &excludes);
+    if sources.is_empty() {
+        return Ok(());
+    }
+    let cleanup = if args.is_dry_run() {
+        None
+    } else {
+        Some(crate::app::move_cleanup::MoveCleanupPlan::capture(&sources, &excludes).await?)
+    };
 
     let mut failures = 0usize;
     for dest in &cm.to {
@@ -409,26 +430,8 @@ pub(crate) async fn handle_move_command(args: &Commands) -> Result<()> {
         return Ok(());
     }
 
-    let recursive = args.is_recursive();
-    let verbose = args.is_verbose() && !is_json_mode();
-    for src in &cm.paths {
-        let s = src.to_string_lossy();
-        if let Some(remote_src) = parse_remote_path(&s) {
-            remote_remove(&remote_src, recursive, false, false).await?;
-            if verbose {
-                println!("removed source {}", remote_src.display());
-            }
-        } else {
-            let md = src.symlink_metadata()?;
-            if md.is_dir() {
-                tokio::fs::remove_dir_all(src).await?;
-            } else {
-                tokio::fs::remove_file(src).await?;
-            }
-            if verbose {
-                println!("removed source '{}'", src.display());
-            }
-        }
+    if let Some(cleanup) = cleanup {
+        cleanup.remove().await?;
     }
     Ok(())
 }
@@ -439,15 +442,14 @@ async fn handle_move_one(args: &Commands) -> Result<()> {
     let excludes = args.compile_excludes()?;
     let (sources, dest) = args.get_sources_and_dest().map_err(anyhow::Error::msg)?;
 
-    if args.is_no_deref() {
-        bail!(
-            "--no-deref is not yet supported for bcmr move; use bcmr copy --no-deref \
-             then bcmr remove on the originals, or scp -p / rsync."
-        );
+    let selected_sources = select_transfer_sources(sources, &excludes);
+    let sources = selected_sources.as_slice();
+    if sources.is_empty() {
+        return Ok(());
     }
 
     for src in sources {
-        validate_source_kind(src, false)?;
+        validate_source_kind(src, true)?;
     }
 
     let dest_str = dest.to_string_lossy();
@@ -496,6 +498,7 @@ async fn handle_move_one(args: &Commands) -> Result<()> {
         };
 
         if !files_to_overwrite.is_empty()
+            && !args.is_dry_run()
             && args.should_prompt_for_overwrite()
             && !confirm_overwrite(&files_to_overwrite)?
         {
@@ -568,10 +571,15 @@ async fn handle_remote_move(
     dest: &std::path::Path,
     excludes: &[regex::Regex],
 ) -> Result<()> {
-    use crate::core::remote::{parse_remote_path, remote_remove};
     use crate::ui::display::{print_dry_run, ActionType};
 
-    reject_excluded_move_cleanup(excludes)?;
+    let remote_destination = crate::core::remote::parse_remote_path(&dest.to_string_lossy());
+    crate::commands::remote_copy::reject_remote_to_remote(sources, &remote_destination)?;
+    let cleanup = if args.is_dry_run() {
+        None
+    } else {
+        Some(crate::app::move_cleanup::MoveCleanupPlan::capture(sources, excludes).await?)
+    };
     handle_remote_copy(args, sources, dest, excludes).await?;
 
     if args.is_dry_run() {
@@ -584,36 +592,8 @@ async fn handle_remote_move(
         return Ok(());
     }
 
-    let recursive = args.is_recursive();
-    let verbose = args.is_verbose() && !is_json_mode();
-
-    for src in sources {
-        let src_str = src.to_string_lossy();
-        if let Some(remote_src) = parse_remote_path(&src_str) {
-            remote_remove(&remote_src, recursive, false, false).await?;
-            if verbose {
-                println!("removed source {}", remote_src.display());
-            }
-        } else {
-            let md = match src.symlink_metadata() {
-                Ok(m) => m,
-                Err(e) => {
-                    return Err(anyhow::anyhow!(
-                        "Source '{}' vanished after copy: {}",
-                        src.display(),
-                        e
-                    ));
-                }
-            };
-            if md.is_dir() {
-                tokio::fs::remove_dir_all(src).await?;
-            } else {
-                tokio::fs::remove_file(src).await?;
-            }
-            if verbose {
-                println!("removed source '{}'", src.display());
-            }
-        }
+    if let Some(cleanup) = cleanup {
+        cleanup.remove().await?;
     }
 
     Ok(())

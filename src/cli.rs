@@ -127,8 +127,9 @@ EXAMPLES:
 SOURCE STARS:
   Same source * rules as copy. Fan-out resolves matches once; sources are
   removed only after all destinations succeed.
-  --exclude is currently refused for remote/fan-out moves to protect files
-  excluded from the copy phase. Use copy --exclude, then remove verified sources.
+  Excluded paths and newly arrived source entries remain at the source.
+  Cleanup uses the captured source selection after every destination succeeds.
+  Moves preserve symbolic links; copies follow them unless --no-deref is set.
 ";
 
 const CHECK_AFTER_LONG_HELP: &str = "\
@@ -299,7 +300,7 @@ impl std::fmt::Display for Shell {
     }
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct CopyMoveArgs {
     /// Source files and destination directory (last argument is the destination,
     /// unless --to is given — then all positionals are sources)
@@ -367,7 +368,7 @@ pub struct CopyMoveArgs {
     #[arg(short = 'a', long, default_value_t = false)]
     pub append: bool,
 
-    /// Replicate symlinks for local copies (cp -P; ordinary move rejects this flag)
+    /// Preserve symbolic links instead of following them (moves always preserve links)
     #[arg(long = "no-deref", default_value_t = false)]
     pub no_deref: bool,
 

@@ -8,6 +8,7 @@ pub mod error;
 pub mod file_metadata;
 pub mod framing;
 pub mod io;
+pub mod move_file;
 pub mod protocol;
 pub mod protocol_aead;
 pub mod remote;

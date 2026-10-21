@@ -6,6 +6,8 @@ BCMR=/absolute/path/to/bcmr python3 tests/remote_overwrite_test.py
 import os
 import hashlib
 import shlex
+import shutil
+import subprocess
 import unittest
 
 import star_copy_test as fixture
@@ -46,6 +48,33 @@ class RemoteOverwriteTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 _, destination, src, dst = self.route(mode)
                 self.assert_ok(self.run_bcmr("copy", "-f", "-y", src, dst))
+                self.assertEqual(destination.read_text(), "new replacement bytes")
+
+    # Metadata/verification staging must retain ordinary parent creation rules.
+    def test_single_file_preserve_or_verify_creates_missing_parents(self):
+        for mode in self.MODES:
+            for flag in ("-p", "-V"):
+                with self.subTest(mode=mode, flag=flag):
+                    source = self.put(self.home if mode.startswith("download") else self.local,
+                                      f"{mode}-{flag[1:]}-source.txt", "nested publication bytes")
+                    base = self.home if mode.startswith("upload") else self.dest
+                    destination = base / f"{mode}-{flag[1:]}-missing" / "nested" / "payload.txt"
+                    host = "legacy" if mode.endswith("legacy") else "fixture"
+                    src = f"{host}:{source}" if mode.startswith("download") else source
+                    dst = f"{host}:{destination}" if mode.startswith("upload") else destination
+                    self.assert_ok(self.run_bcmr("copy", flag, src, dst))
+                    self.assertEqual(destination.read_text(), "nested publication bytes")
+                    self.assertEqual(list(destination.parent.glob(".bcmr.upload.*")), [])
+
+    # Explicit -p takes precedence over the previous target's ordinary mode.
+    def test_forced_preserve_uses_source_mode_on_all_routes(self):
+        for mode in self.MODES:
+            with self.subTest(mode=mode):
+                source, destination, src, dst = self.route(mode)
+                source.chmod(0o751)
+                destination.chmod(0o600)
+                self.assert_ok(self.run_bcmr("copy", "-f", "-y", "-p", src, dst))
+                self.assertEqual(destination.stat().st_mode & 0o777, 0o751)
                 self.assertEqual(destination.read_text(), "new replacement bytes")
 
     # Explicit resume continues a valid prefix without additionally requiring -f.
@@ -103,13 +132,177 @@ if words == ['bcmr', 'serve']:
         source = self.put(self.local, "race-source.txt", "incoming")
         destination = self.home / "race-target.txt"
         self.inject_transport_before_exec('''
-if any('cat ' in word and %r in word for word in words):
+if any('cat ' in word and '>' in word for word in words):
     with open(%r, 'w') as stream:
         stream.write('concurrent target')
-''' % (str(destination), str(destination)))
+''' % str(destination))
         result = self.run_bcmr("copy", source, f"legacy:{destination}")
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(destination.read_text(), "concurrent target")
+
+    def install_failed_upload_cat(self):
+        fault_bin = self.root / "fault-bin"
+        fault_bin.mkdir()
+        cat = fault_bin / "cat"
+        cat.write_text("#!/bin/sh\n/bin/dd bs=1 count=2 2>/dev/null\nexit 9\n")
+        cat.chmod(0o755)
+        self.inject_transport_before_exec('''
+if any('cat ' in word and '>' in word for word in words):
+    os.environ['PATH'] = %r + os.pathsep + os.environ['PATH']
+''' % str(fault_bin))
+
+    # Failed PUT must never truncate an existing final file before committing.
+    def test_failed_forced_legacy_upload_preserves_existing_target(self):
+        _, destination, src, dst = self.route("upload-legacy")
+        self.install_failed_upload_cat()
+        result = self.run_bcmr("copy", "-f", "-y", src, dst)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(destination.read_text(), "old destination bytes")
+        self.assertEqual(list(destination.parent.glob(".bcmr.upload.*")), [])
+
+    # An interrupted first PUT may leave a private stage, never a partial final.
+    def test_failed_new_legacy_upload_leaves_no_visible_target(self):
+        source = self.put(self.local, "new-source.txt", "complete upload payload")
+        destination = self.home / "new-target.txt"
+        self.install_failed_upload_cat()
+        result = self.run_bcmr("copy", source, f"legacy:{destination}")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(destination.exists(), "failed PUT exposed a partial final file")
+        self.assertEqual(list(destination.parent.glob(".bcmr.upload.*")), [])
+
+    # Source size is captured before the SSH size probe; EOF must match it.
+    def test_short_local_read_refuses_legacy_upload_publication(self):
+        source, destination, src, dst = self.route("upload-legacy")
+        marker = self.root / "truncated-source"
+        self.inject_transport_before_exec('''
+if any("stat -c '%%s'" in word for word in words) and not os.path.exists(%r):
+    os.truncate(%r, 2)
+    open(%r, 'w').close()
+''' % (str(marker), str(source), str(marker)))
+        result = self.run_bcmr("copy", "-f", "-y", src, dst)
+        self.assertTrue(marker.exists(), "source truncation did not reach the size probe")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(destination.read_text(), "old destination bytes")
+        self.assertEqual(list(destination.parent.glob(".bcmr.upload.*")), [])
+
+    # Verification belongs to the unpublished payload, including forced PUT.
+    def test_failed_legacy_upload_verification_preserves_existing_target(self):
+        _, destination, src, dst = self.route("upload-legacy")
+        self.inject_transport_before_exec('''
+import shlex
+if len(words) == 1 and '>' not in words[0] and shlex.split(words[0])[:1] == ['cat']:
+    os.execv('/bin/sh', ['sh', '-c', "printf 'incorrect verification payload'"])
+''')
+        result = self.run_bcmr("copy", "-f", "-y", "-V", src, dst)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(destination.read_text(), "old destination bytes")
+        self.assertEqual(list(destination.parent.glob(".bcmr.upload.*")), [])
+
+    # Attribute failure must not publish the already received forced payload.
+    def test_failed_legacy_upload_attributes_preserve_existing_target(self):
+        _, destination, src, dst = self.route("upload-legacy")
+        self.inject_transport_before_exec('''
+if any('touch -m' in word for word in words):
+    sys.stderr.write('fixture attribute failure\\n')
+    sys.exit(9)
+''')
+        result = self.run_bcmr("copy", "-f", "-y", "-p", src, dst)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(destination.read_text(), "old destination bytes")
+        self.assertEqual(list(destination.parent.glob(".bcmr.upload.*")), [])
+
+    def install_publish_race(self, destination, kind):
+        marker = self.root / "publication-race"
+        outside = self.put(self.root, "outside-race-target", "outside bytes")
+        self.inject_transport_before_exec('''
+if any('bcmr-upload-commit' in word for word in words):
+    destination = %r
+    if os.path.lexists(destination):
+        os.unlink(destination)
+    if %r == 'directory':
+        os.mkdir(destination)
+    elif %r == 'symlink':
+        os.symlink(%r, destination)
+    else:
+        with open(destination, 'w') as stream:
+            stream.write('concurrent target')
+    open(%r, 'w').close()
+''' % (str(destination), kind, kind, str(outside), str(marker)))
+        return marker, outside
+
+    # A late directory must not turn the file's final path into a container.
+    def test_forced_legacy_upload_directory_race_preserves_competing_directory(self):
+        _, destination, src, dst = self.route("upload-legacy")
+        marker, _ = self.install_publish_race(destination, "directory")
+        result = self.run_bcmr("copy", "-f", "-y", src, dst)
+        self.assertTrue(marker.exists(), "separate publication phase was not reached")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(destination.is_dir())
+        self.assertEqual(list(destination.iterdir()), [])
+
+    def test_forced_legacy_upload_symlink_race_never_writes_link_target(self):
+        _, destination, src, dst = self.route("upload-legacy")
+        marker, outside = self.install_publish_race(destination, "symlink")
+        self.assert_ok(self.run_bcmr("copy", "-f", "-y", src, dst))
+        self.assertTrue(marker.exists(), "separate publication phase was not reached")
+        self.assertFalse(destination.is_symlink())
+        self.assertEqual(destination.read_text(), "new replacement bytes")
+        self.assertEqual(outside.read_text(), "outside bytes")
+
+    def test_legacy_upload_target_created_at_publication_is_preserved(self):
+        source = self.put(self.local, "commit-race-source.txt", "incoming")
+        destination = self.home / "commit-race-target.txt"
+        marker, _ = self.install_publish_race(destination, "file")
+        result = self.run_bcmr("copy", source, f"legacy:{destination}")
+        self.assertTrue(marker.exists(), "separate publication phase was not reached")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(destination.read_text(), "concurrent target")
+
+    # Staging must retain existing ACL/xattr security, as truncation did.
+    def test_forced_upload_preserves_existing_extended_attributes(self):
+        xattr = shutil.which("xattr")
+        if not hasattr(os, "setxattr") and not xattr:
+            self.skipTest("extended attributes are unavailable")
+        for mode, flags in (("upload-legacy", ()), ("upload-serve", ("-p",)),
+                            ("upload-serve", ("-V",))):
+            with self.subTest(mode=mode, flags=flags):
+                _, destination, src, dst = self.route(mode)
+                try:
+                    if hasattr(os, "setxattr"):
+                        os.setxattr(destination, "user.bcmr-preserve", b"existing label")
+                    else:
+                        subprocess.run([xattr, "-w", "user.bcmr-preserve", "existing label", str(destination)],
+                                       check=True, capture_output=True)
+                except OSError as error:
+                    self.skipTest(f"fixture filesystem cannot store xattrs: {error}")
+                self.assert_ok(self.run_bcmr("copy", "-f", "-y", *flags, src, dst))
+                self.assertEqual(destination.read_text(), "new replacement bytes")
+                try:
+                    if hasattr(os, "getxattr"):
+                        actual = os.getxattr(destination, "user.bcmr-preserve")
+                    else:
+                        result = subprocess.run([xattr, "-px", "user.bcmr-preserve", str(destination)],
+                                                check=True, capture_output=True)
+                        actual = bytes.fromhex(result.stdout.decode())
+                except (OSError, subprocess.CalledProcessError):
+                    actual = None
+                self.assertEqual(actual, b"existing label", "staged overwrite dropped an existing xattr")
+
+    # A failed metadata clone must fail closed before changing the old target.
+    def test_failed_upload_security_copy_preserves_existing_target(self):
+        _, destination, src, dst = self.route("upload-legacy")
+        marker = self.root / "failed-security-copy"
+        self.inject_transport_before_exec('''
+if any('bcmr-upload-prepare' in word for word in words):
+    words = [word.replace('/bin/cp -p', '/usr/bin/false')
+                 .replace('cp --attributes-only', 'false --attributes-only') for word in words]
+    open(%r, 'w').close()
+''' % str(marker))
+        result = self.run_bcmr("copy", "-f", "-y", src, dst)
+        self.assertTrue(marker.exists(), "security preparation phase was not reached")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(destination.read_text(), "old destination bytes")
+        self.assertEqual(list(destination.parent.glob(".bcmr.upload.*")), [])
 
     # Resume may restart mismatching/oversized files and append an empty prefix.
     def test_serve_upload_resume_can_restart_or_append_zero_without_force(self):

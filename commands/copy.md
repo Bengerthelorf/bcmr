@@ -15,7 +15,7 @@ flags:
   - { f: "-e, --exclude",       t: "regex...",               d: "—",          x: "exclude paths matching regex (repeatable)" }
   - { f: "-n, --dry-run",       t: bool,                     d: "false",      x: "preview without making changes" }
   - { f: "--to <DEST>",         t: "path...",                d: "—",          x: "fan-out target (repeatable); all positionals become sources" }
-  - { f: "--no-deref",          t: bool,                     d: "false",      x: "local copies only: replicate symlinks instead of following them (cp -P)" }
+  - { f: "--no-deref",          t: bool,                     d: "false",      x: "preserve symbolic links locally and remotely instead of following them (cp -P)" }
   - { f: "-V, --verify",        t: bool,                     d: "false",      x: "recompute blake3 after copy" }
   - { f: "-C, --resume",        t: bool,                     d: "false",      x: "resume interrupted copies using available saved state and hashes" }
   - { f: "-s, --strict",        t: bool,                     d: "false",      x: "strict blake3 partial-hash resume" }

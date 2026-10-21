@@ -1,14 +1,18 @@
 mod attrs;
+mod cleanup;
 mod ops;
 mod patterns;
 mod resume;
 mod ssh_cmd;
+pub mod staged_upload;
 mod transfer;
+mod tree;
 
 #[allow(unused_imports)]
 pub(crate) use attrs::get_remote_attrs;
 #[allow(unused_imports)]
 pub use attrs::{apply_remote_attrs_locally, preserve_remote_attrs, verify_remote_file};
+pub use cleanup::RemoteCleanupPlan;
 #[allow(unused_imports)]
 pub use ops::{
     complete_remote_path, expand_remote_tilde, remote_file_hash, remote_file_size,
@@ -18,10 +22,16 @@ pub use ops::{
 pub use patterns::expand_remote_star;
 pub use resume::{check_resume_state, ResumeDecision};
 #[allow(unused_imports)]
+pub(crate) use ssh_cmd::metadata_command;
+#[allow(unused_imports)]
 pub(crate) use ssh_cmd::ssh_error_message;
+#[allow(unused_imports)]
 pub use transfer::{
-    download_directory, download_file, ensure_remote_tree, upload_directory, upload_file,
+    download_directory, download_file, ensure_remote_directories, ensure_remote_tree,
+    upload_directory, upload_file,
 };
+#[allow(unused_imports)]
+pub use tree::{create_remote_symlink, inventory_remote, RemoteTreeEntry};
 
 pub fn set_ssh_compression(enabled: bool) {
     ssh_cmd::SSH_COMPRESS.store(enabled, std::sync::atomic::Ordering::Relaxed);

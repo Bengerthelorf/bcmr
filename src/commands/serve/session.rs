@@ -29,6 +29,10 @@ where
     W: tokio::io::AsyncWrite + Unpin,
 {
     let mut offered_caps = SERVER_CAPS;
+    #[cfg(not(unix))]
+    {
+        offered_caps &= !CAP_SYNC;
+    }
     if !allow_direct_tcp {
         offered_caps &= !CAP_DIRECT_TCP;
     }
@@ -161,7 +165,7 @@ where
                 Err(e) => Err(e),
             },
             Message::List { path } => match validate_path(&path, root) {
-                Ok(p) => handle_list(p.to_str().unwrap_or(&path)).await,
+                Ok(p) => handle_list(p.to_str().unwrap_or(&path), root).await,
                 Err(e) => Err(e),
             },
             Message::Hash {
@@ -256,7 +260,7 @@ where
                 continue;
             }
             Message::Mkdir { path } => match validate_path(&path, root) {
-                Ok(p) => handle_mkdir(p.to_str().unwrap_or(&path)).await,
+                Ok(p) => handle_mkdir(p.to_str().unwrap_or(&path), sync).await,
                 Err(e) => Err(e),
             },
             Message::Truncate { path, size } => match validate_path(&path, root) {

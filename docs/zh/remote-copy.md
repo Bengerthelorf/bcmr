@@ -154,13 +154,28 @@ Serve PUT 默认不覆盖已存在的目标。只有显式使用
 # 远端已有 report.pdf 时失败，并保留旧文件
 bcmr copy report.pdf user@host:/backup/
 
-# 校验并同步落盘后，原子替换旧文件
-bcmr copy --force --yes --verify --sync report.pdf user@host:/backup/
+# 同步落盘后原子替换（要求协商 serve CAP_SYNC）
+bcmr copy --force --yes --sync report.pdf user@host:/backup/
+
+# 显式校验完成后发布
+bcmr copy --force --yes --verify report.pdf user@host:/backup/
 ```
 
 服务端先写入私有、句柄绑定的事务，校验长度和哈希后才发布。
 中断的强制覆盖会保留旧的最终路径；流水线目录上传对每个文件都
 保持同样的属性。
+
+新的传统 SSH 上传同样先写私有暂存文件。带 `-p` 或 `-V` 的上传会在
+私有暂存路径上完成属性和校验，再发布。辅助 SSH 命令无法提供可检查的
+目录 fsync，因此传统上传、保留链接的上传，以及同时带 `-p` 或 `-V` 的
+上传使用 `--sync` 时，都会在写入目标之前明确报错。普通 serve 上传要求
+所有连接都协商 `CAP_SYNC`，缺失该能力时不会静默降级。Unix 同步下载会
+同步本地发布操作。
+
+Copy 默认跟随链接；`--no-deref` 保留链接对象，包括断链。Move 始终保留
+链接对象。这条远程路径使用 SSH 辅助命令，不支持 `--direct direct`；
+dry-run 仍可预览。排除规则、目录属性、移动清理和平台边界见
+[本地与远程行为](./local-remote-semantics.md)。
 
 生产版暂时禁用单文件跨连接分片 PUT，因为独立连接还不能安全加入
 同一个服务端事务。`-P N` 仍会并行处理递归批次中的不同文件。

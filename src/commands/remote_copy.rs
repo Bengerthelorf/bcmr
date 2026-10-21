@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 mod legacy;
+mod links;
+mod preflight;
 mod serve;
 
 use legacy::{handle_remote_download, handle_remote_upload};
@@ -188,34 +190,210 @@ pub(super) async fn run_parallel_transfers(
     Ok(())
 }
 
-pub(super) fn collect_upload_files(
-    local_src: &std::path::Path,
-    remote_base: &RemotePath,
-    excludes: &[regex::Regex],
-) -> Result<Vec<TransferItem>> {
-    use crate::core::traversal;
+pub(super) struct DirectoryTransfer {
+    pub local_path: PathBuf,
+    pub remote: RemotePath,
+}
 
-    let mut items = Vec::new();
+pub(super) struct TransferTreePlan {
+    pub directories: Vec<DirectoryTransfer>,
+    pub files: Vec<TransferItem>,
+    pub total_size: u64,
+}
 
-    for entry in traversal::walk(local_src, true, false, 1, excludes) {
-        let entry = entry?;
-        let path = entry.path();
-        let rel = path.strip_prefix(local_src)?;
+fn add_transfer_size(total: &mut u64, size: u64) -> Result<()> {
+    *total = total
+        .checked_add(size)
+        .ok_or_else(|| anyhow::anyhow!("declared transfer size exceeds u64"))?;
+    Ok(())
+}
 
-        if path.is_file() {
-            items.push(TransferItem {
-                local_path: path.to_path_buf(),
-                remote: remote_base.join(&rel.to_string_lossy()),
-                size: entry.metadata()?.len(),
-                is_upload: true,
-            });
+impl TransferTreePlan {
+    fn new() -> Self {
+        Self {
+            directories: Vec::new(),
+            files: Vec::new(),
+            total_size: 0,
         }
     }
 
-    Ok(items)
+    fn push_file(&mut self, file: TransferItem) -> Result<()> {
+        add_transfer_size(&mut self.total_size, file.size)?;
+        self.files.push(file);
+        Ok(())
+    }
 }
 
-fn reject_remote_to_remote(sources: &[PathBuf], remote_dest: &Option<RemotePath>) -> Result<()> {
+pub(super) fn collect_upload_plan(
+    sources: &[PathBuf],
+    destination: &RemotePath,
+    recursive: bool,
+    excludes: &[regex::Regex],
+) -> Result<TransferTreePlan> {
+    use crate::core::traversal;
+
+    let selected: Vec<_> = sources
+        .iter()
+        .filter(|source| !traversal::is_copy_excluded(source, source, excludes))
+        .collect();
+    let multi_source = selected.len() > 1;
+    let mut plan = TransferTreePlan::new();
+    for source in selected {
+        let remote = resolve_upload_remote(source, destination, multi_source);
+        let metadata = source.metadata()?;
+        if metadata.is_file() {
+            plan.push_file(TransferItem {
+                local_path: source.clone(),
+                remote,
+                size: metadata.len(),
+                is_upload: true,
+            })?;
+        } else if metadata.is_dir() {
+            if !recursive {
+                anyhow::bail!(
+                    "Source '{}' is a directory. Use -r flag for recursive copy.",
+                    source.display()
+                );
+            }
+            plan.directories.push(DirectoryTransfer {
+                local_path: source.clone(),
+                remote: remote.clone(),
+            });
+            for entry in traversal::copy_walk(source, true, 1, false, excludes) {
+                let entry = entry?;
+                let path = entry.path();
+                let relative = path.strip_prefix(source)?;
+                let metadata = entry.metadata()?;
+                let relative = relative
+                    .components()
+                    .map(|component| component.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                let target = remote.join(&relative);
+                if metadata.is_dir() {
+                    plan.directories.push(DirectoryTransfer {
+                        local_path: path.to_path_buf(),
+                        remote: target,
+                    });
+                } else if metadata.is_file() {
+                    plan.push_file(TransferItem {
+                        local_path: path.to_path_buf(),
+                        remote: target,
+                        size: metadata.len(),
+                        is_upload: true,
+                    })?;
+                } else {
+                    anyhow::bail!(
+                        "Source '{}' is not a regular file or directory",
+                        path.display()
+                    );
+                }
+            }
+        } else {
+            anyhow::bail!(
+                "Source '{}' is not a regular file or directory",
+                source.display()
+            );
+        }
+    }
+    Ok(plan)
+}
+
+pub(super) async fn collect_download_plan(
+    sources: &[PathBuf],
+    destination: &std::path::Path,
+    recursive: bool,
+    excludes: &[regex::Regex],
+) -> Result<TransferTreePlan> {
+    let mut plan = TransferTreePlan::new();
+    for source in sources {
+        let remote = parse_remote_path(&source.to_string_lossy()).ok_or_else(|| {
+            anyhow::anyhow!("Mixed local/remote sources without remote destination")
+        })?;
+        let entries = remote::inventory_remote(&remote, false, excludes).await?;
+        let Some(root) = entries.first() else {
+            continue;
+        };
+        if root.is_dir && !recursive {
+            anyhow::bail!(
+                "Remote source '{}' is a directory. Use -r flag for recursive copy.",
+                remote
+            );
+        }
+        let local_base = resolve_download_local(&remote, destination)?;
+        for entry in entries {
+            let (local_path, entry_remote) = if entry.path.is_empty() {
+                (local_base.clone(), remote.clone())
+            } else {
+                (
+                    crate::core::destination::remote_entry_path(&local_base, &entry.path)?,
+                    remote.join(&entry.path),
+                )
+            };
+            if entry.link_target.is_some() {
+                anyhow::bail!("dereferenced remote inventory contains a symbolic link");
+            }
+            if entry.is_dir {
+                plan.directories.push(DirectoryTransfer {
+                    local_path,
+                    remote: entry_remote,
+                });
+            } else {
+                plan.push_file(TransferItem {
+                    local_path,
+                    remote: entry_remote,
+                    size: entry.size,
+                    is_upload: false,
+                })?;
+            }
+        }
+    }
+    Ok(plan)
+}
+
+pub(super) async fn preserve_directories(
+    directories: &[DirectoryTransfer],
+    upload: bool,
+    sync: bool,
+) -> Result<()> {
+    for directory in directories.iter().rev() {
+        if upload {
+            remote::preserve_remote_attrs(&directory.local_path, &directory.remote).await?;
+        } else {
+            #[cfg(not(unix))]
+            if sync {
+                anyhow::bail!(
+                    "--sync cannot guarantee durable local directory metadata on this platform"
+                );
+            }
+            #[cfg(unix)]
+            let handle = if sync {
+                Some(
+                    tokio::fs::File::open(&directory.local_path)
+                        .await?
+                        .into_std()
+                        .await,
+                )
+            } else {
+                None
+            };
+            remote::apply_remote_attrs_locally(&directory.remote, &directory.local_path).await?;
+            #[cfg(unix)]
+            if let Some(handle) = handle {
+                tokio::task::spawn_blocking(move || {
+                    crate::core::io::durable_sync_directory_handle_strict(&handle)
+                })
+                .await??;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn reject_remote_to_remote(
+    sources: &[PathBuf],
+    remote_dest: &Option<RemotePath>,
+) -> Result<()> {
     let Some(rdest) = remote_dest else {
         return Ok(());
     };
@@ -295,14 +473,6 @@ pub async fn handle_remote_copy(
         }
     }
 
-    if args.is_no_deref() {
-        anyhow::bail!(
-            "--no-deref is currently only supported for local-to-local copies. \
-             For symlink-aware remote transfers, use scp/rsync directly until \
-             bcmr's serve protocol grows symlink semantics."
-        );
-    }
-
     if let Some(ref rd) = remote_dest_initial {
         rd.reject_unsafe()?;
     }
@@ -363,6 +533,11 @@ pub async fn handle_remote_copy(
                 remote
             );
         }
+    }
+
+    preflight::confirm_remote_overwrites(args, sources, dest, excludes).await?;
+    if args.is_no_deref() || matches!(args, Commands::Move { .. }) {
+        return links::handle_link_copy(args, sources, dest, excludes).await;
     }
 
     let compression_mode = CONFIG.scp.compression.to_lowercase();

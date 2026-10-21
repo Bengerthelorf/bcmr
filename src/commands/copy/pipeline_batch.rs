@@ -39,10 +39,16 @@ pub async fn pipeline_copy<F>(
 where
     F: Fn(u64) + Send + Sync + Clone + 'static,
 {
+    #[cfg(not(unix))]
+    if cli.is_sync() && !cli.is_dry_run() {
+        return Err(BcmrError::InvalidInput(
+            "--sync cannot guarantee durable local namespace publication on this platform; refusing before transfer".into(),
+        ));
+    }
     let test_mode = cli.get_test_mode();
     CopyFileOptions::from_cli(cli, test_mode.clone()).validate_reflink_compatibility()?;
     let recursive = cli.is_recursive();
-    let no_deref = cli.is_no_deref();
+    let no_deref = cli.is_no_deref() || matches!(cli, Commands::Move { .. });
     let jobs = cli.local_jobs();
     let verbose = cli.is_verbose();
     let callback = ProgressCallback {
@@ -94,7 +100,9 @@ where
         match msg {
             ScanMessage::Entry(entry) => match entry {
                 PlanEntry::CreateDir { ref src, ref dst } => {
-                    if !dst.exists() {
+                    if cli.is_sync() {
+                        crate::core::io::create_dir_all_durable_async(dst).await?;
+                    } else {
                         fs::create_dir_all(dst).await?;
                     }
                     dir_entries.push((src.clone(), dst.clone()));
@@ -131,9 +139,21 @@ where
                     if let Some(parent) =
                         dst.parent().filter(|parent| !parent.as_os_str().is_empty())
                     {
-                        fs::create_dir_all(parent).await?;
+                        if cli.is_sync() {
+                            crate::core::io::create_dir_all_durable_async(parent).await?;
+                        } else {
+                            fs::create_dir_all(parent).await?;
+                        }
                     }
-                    create_symlink_replacing(dst, target, kind, cli.is_force(), &test_mode).await?;
+                    create_symlink_replacing(
+                        dst,
+                        target,
+                        kind,
+                        cli.is_force(),
+                        cli.is_sync(),
+                        &test_mode,
+                    )
+                    .await?;
                     if verbose {
                         eprintln!("'{}' -> '{}' (symlink)", target.display(), dst.display());
                     }
@@ -154,7 +174,20 @@ where
 
     if cli.is_preserve() {
         for (src, dst) in dir_entries.iter().rev() {
+            #[cfg(unix)]
+            let handle = if cli.is_sync() {
+                Some(fs::File::open(dst).await?.into_std().await)
+            } else {
+                None
+            };
             preserve_attributes(src, dst).await?;
+            #[cfg(unix)]
+            if let Some(handle) = handle {
+                tokio::task::spawn_blocking(move || {
+                    crate::core::io::durable_sync_directory_handle_strict(&handle)
+                })
+                .await??;
+            }
         }
     }
 

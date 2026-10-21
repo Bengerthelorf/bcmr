@@ -20,97 +20,54 @@ pub async fn check_overwrites(
     _cli: &Commands,
     excludes: &[regex::Regex],
 ) -> std::result::Result<Vec<FileToOverwrite>, BcmrError> {
-    let mut files_to_overwrite = Vec::new();
-
-    let dst_is_dir = crate::core::destination::local_is_directory(dst)?;
-
-    for src in sources {
-        if traversal::is_excluded(src, excludes) {
-            continue;
-        }
-
-        if src.is_file() {
-            let dst_path = if dst_is_dir {
-                dst.join(
-                    src.file_name()
-                        .ok_or_else(BcmrError::invalid_source_file_name)?,
-                )
-            } else {
-                dst.to_path_buf()
-            };
-
-            if dst_path.exists() && !traversal::is_excluded(&dst_path, excludes) {
-                files_to_overwrite.push(FileToOverwrite {
-                    path: dst_path,
-                    is_dir: false,
-                });
-            }
-        } else if recursive && src.is_dir() {
-            let src_name = src
-                .file_name()
-                .ok_or_else(BcmrError::invalid_source_dir_name)?;
-            let new_dst = if dst_is_dir {
-                dst.join(src_name)
-            } else {
-                dst.to_path_buf()
-            };
-
-            if new_dst.exists() {
-                for entry in traversal::walk(src, true, false, 1, excludes) {
-                    let entry = entry?;
-                    let path = entry.path();
-
-                    let relative_path = path.strip_prefix(src)?;
-                    let target_path = new_dst.join(relative_path);
-
-                    if target_path.exists() {
-                        files_to_overwrite.push(FileToOverwrite {
-                            path: target_path,
-                            is_dir: path.is_dir(),
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(files_to_overwrite)
+    let plan = super::plan::plan_copy(
+        sources,
+        dst,
+        recursive,
+        _cli.is_no_deref() || matches!(_cli, Commands::Move { .. }),
+        excludes,
+    )
+    .await?;
+    Ok(plan.overwrites)
 }
 
 fn get_total_size_sync(
     sources: Vec<PathBuf>,
     recursive: bool,
+    no_deref: bool,
     excludes: Vec<regex::Regex>,
 ) -> std::result::Result<u64, BcmrError> {
-    let mut total_size = 0;
-
+    let mut total_size = 0u64;
     for src in sources {
-        if traversal::is_excluded(&src, &excludes) {
+        if traversal::is_copy_excluded(&src, &src, &excludes) {
             continue;
         }
-
-        if src.is_file() {
-            total_size += src.metadata()?.len();
-        } else if src.is_dir() {
-            if recursive {
-                for entry in traversal::walk(&src, true, false, 1, &excludes) {
-                    let entry = entry?;
-                    let path = entry.path();
-                    if path.is_file() {
-                        total_size += entry.metadata()?.len();
-                    }
-                }
-            } else {
+        let metadata = src.symlink_metadata()?;
+        if no_deref && metadata.file_type().is_symlink() {
+            continue;
+        }
+        if src.metadata()?.is_dir() && !recursive {
+            return Err(BcmrError::InvalidInput(format!(
+                "Source '{}' is a directory. Use -r flag for recursive copy.",
+                src.display()
+            )));
+        }
+        for entry in traversal::copy_walk(&src, recursive, 0, no_deref, &excludes) {
+            let entry = entry?;
+            if entry.file_type().is_file() {
+                total_size = total_size
+                    .checked_add(entry.metadata()?.len())
+                    .ok_or_else(|| {
+                        BcmrError::InvalidInput("selected source size exceeds u64".into())
+                    })?;
+            } else if !entry.file_type().is_dir() && !(no_deref && entry.file_type().is_symlink()) {
                 return Err(BcmrError::InvalidInput(format!(
-                    "Source '{}' is a directory. Use -r flag for recursive copy.",
-                    src.display()
+                    "unsupported source entry '{}'",
+                    entry.path().display()
                 )));
             }
-        } else {
-            return Err(BcmrError::SourceNotFound(src));
         }
     }
-
     Ok(total_size)
 }
 
@@ -123,7 +80,9 @@ pub async fn get_total_size(
     let sources = sources.to_vec();
     let excludes = excludes.to_vec();
 
-    tokio::task::spawn_blocking(move || get_total_size_sync(sources, recursive, excludes)).await?
+    let no_deref = _cli.is_no_deref() || matches!(_cli, Commands::Move { .. });
+    tokio::task::spawn_blocking(move || get_total_size_sync(sources, recursive, no_deref, excludes))
+        .await?
 }
 
 pub(super) fn is_normal_write(cli: &Commands) -> bool {
@@ -134,8 +93,10 @@ pub(super) async fn check_overwrite(
     dst: &Path,
     cli: &Commands,
 ) -> std::result::Result<(), BcmrError> {
-    if !dst.exists() {
-        return Ok(());
+    match dst.symlink_metadata() {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(BcmrError::Io(error)),
     }
     if !cli.is_force() && is_normal_write(cli) {
         return Err(BcmrError::TargetExists(dst.to_path_buf()));

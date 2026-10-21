@@ -2960,7 +2960,7 @@ fn e2e_no_deref_dry_run_emits_overwrite_for_existing_dst() {
 
 #[cfg(unix)]
 #[test]
-fn e2e_no_deref_remote_target_refuses() {
+fn e2e_no_deref_unreachable_remote_preserves_source_link() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("target.txt"), b"x").unwrap();
     let link = dir.path().join("link.txt");
@@ -2975,10 +2975,15 @@ fn e2e_no_deref_remote_target_refuses() {
     ]);
     assert!(
         !ok,
-        "--no-deref with remote target should fail; stdout: {} stderr: {}",
+        "unreachable remote target should fail; stdout: {} stderr: {}",
         stdout, stderr
     );
-    assert!(stderr.contains("--no-deref is currently only supported for local"));
+    assert!(
+        stderr.contains("SSH") || stderr.contains("unknown host"),
+        "stderr: {stderr}"
+    );
+    assert_eq!(fs::read_link(&link).unwrap(), Path::new("target.txt"));
+    assert_eq!(fs::read(dir.path().join("target.txt")).unwrap(), b"x");
 }
 
 #[test]

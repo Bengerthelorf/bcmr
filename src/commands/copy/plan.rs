@@ -73,7 +73,7 @@ pub struct CopyPlan {
     pub overwrites: Vec<FileToOverwrite>,
 }
 
-fn is_dst_self_or_under_src(src: &Path, dst: &Path) -> std::io::Result<bool> {
+pub(crate) fn is_dst_self_or_under_src(src: &Path, dst: &Path) -> std::io::Result<bool> {
     let src_canon = src.canonicalize()?;
     let mut probe = dst.to_path_buf();
     while !probe.exists() {
@@ -93,12 +93,24 @@ pub(super) fn scan_sources(
     recursive: bool,
     no_deref: bool,
     excludes: &[regex::Regex],
+    on_entry: impl FnMut(PlanEntry, u64) -> std::result::Result<(), BcmrError>,
+) -> std::result::Result<(), BcmrError> {
+    scan_sources_into(sources, dst, recursive, no_deref, excludes, false, on_entry)
+}
+
+fn scan_sources_into(
+    sources: &[PathBuf],
+    dst: &Path,
+    recursive: bool,
+    no_deref: bool,
+    excludes: &[regex::Regex],
+    exact_destination: bool,
     mut on_entry: impl FnMut(PlanEntry, u64) -> std::result::Result<(), BcmrError>,
 ) -> std::result::Result<(), BcmrError> {
-    let dst_is_dir = crate::core::destination::local_is_directory(dst)?;
+    let dst_is_dir = !exact_destination && crate::core::destination::local_is_directory(dst)?;
 
     for src in sources {
-        if traversal::is_excluded(src, excludes) {
+        if traversal::is_copy_excluded(src, src, excludes) {
             continue;
         }
 
@@ -177,7 +189,7 @@ pub(super) fn scan_sources(
                 0,
             )?;
 
-            for entry in traversal::walk(src, true, false, 1, excludes) {
+            for entry in traversal::copy_walk(src, true, 1, no_deref, excludes) {
                 let entry = entry?;
                 let path = entry.path();
                 let relative = path.strip_prefix(src)?;
@@ -219,6 +231,11 @@ pub(super) fn scan_sources(
                         },
                         size,
                     )?;
+                } else {
+                    return Err(BcmrError::InvalidInput(format!(
+                        "unsupported source entry '{}'",
+                        path.display()
+                    )));
                 }
             }
         } else if src.is_dir() {
@@ -240,17 +257,19 @@ fn plan_copy_sync(
     recursive: bool,
     no_deref: bool,
     excludes: Vec<regex::Regex>,
+    exact_destination: bool,
 ) -> std::result::Result<CopyPlan, BcmrError> {
     let mut entries = Vec::new();
     let mut total_size = 0u64;
     let mut overwrites = Vec::new();
 
-    scan_sources(
+    scan_sources_into(
         &sources,
         &dst,
         recursive,
         no_deref,
         &excludes,
+        exact_destination,
         |entry, size| {
             total_size += size;
 
@@ -265,9 +284,7 @@ fn plan_copy_sync(
                 PlanEntry::CreateDir { .. } => None,
             };
             if let Some((path, is_dir)) = target {
-                if !traversal::is_excluded(&path, &excludes) {
-                    overwrites.push(FileToOverwrite { path, is_dir });
-                }
+                overwrites.push(FileToOverwrite { path, is_dir });
             }
 
             entries.push(entry);
@@ -292,8 +309,28 @@ pub async fn plan_copy(
     let sources = sources.to_vec();
     let dst = dst.to_path_buf();
     let excludes = excludes.to_vec();
-    tokio::task::spawn_blocking(move || plan_copy_sync(sources, dst, recursive, no_deref, excludes))
-        .await?
+    tokio::task::spawn_blocking(move || {
+        plan_copy_sync(sources, dst, recursive, no_deref, excludes, false)
+    })
+    .await?
+}
+
+/// Plan a resolved final target, without interpreting an existing directory as
+/// another parent container. Used after move destination inference.
+pub async fn plan_copy_exact(
+    source: &Path,
+    final_dst: &Path,
+    recursive: bool,
+    no_deref: bool,
+    excludes: &[regex::Regex],
+) -> std::result::Result<CopyPlan, BcmrError> {
+    let sources = vec![source.to_path_buf()];
+    let dst = final_dst.to_path_buf();
+    let excludes = excludes.to_vec();
+    tokio::task::spawn_blocking(move || {
+        plan_copy_sync(sources, dst, recursive, no_deref, excludes, true)
+    })
+    .await?
 }
 
 pub fn dry_run_plan(plan: &CopyPlan, cli: &Commands) -> std::result::Result<(), BcmrError> {

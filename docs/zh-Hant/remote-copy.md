@@ -149,13 +149,27 @@ Serve PUT 預設不覆蓋已存在的目標。只有明確使用
 # 遠端已有 report.pdf 時失敗，並保留舊檔案
 bcmr copy report.pdf user@host:/backup/
 
-# 校驗並同步落盤後，原子取代舊檔案
-bcmr copy --force --yes --verify --sync report.pdf user@host:/backup/
+# 同步落盤後原子取代（要求協商 serve CAP_SYNC）
+bcmr copy --force --yes --sync report.pdf user@host:/backup/
+
+# 明確校驗完成後發布
+bcmr copy --force --yes --verify report.pdf user@host:/backup/
 ```
 
 伺服端先寫入私有、與控制代碼綁定的交易，校驗長度與雜湊後才發布。
 中斷的強制覆蓋會保留舊的最終路徑；流水線目錄上傳對每個檔案都
 維持同樣的屬性。
+
+新的傳統 SSH 上傳同樣先寫私有暫存檔案。帶 `-p` 或 `-V` 的上傳會在
+私有暫存路徑上完成屬性和校驗，再發布。輔助 SSH 命令無法提供可檢查的
+目錄 fsync，因此傳統上傳、保留連結的上傳，以及同時帶 `-p` 或 `-V` 的
+上傳使用 `--sync` 時，都會在寫入目標之前明確報錯。普通 serve 上傳要求
+所有連線都協商 `CAP_SYNC`，缺少該能力時不會靜默降級。Unix 同步下載會
+同步本機發布操作。
+
+Copy 預設跟隨連結；`--no-deref` 保留連結物件，包括斷鏈。Move 始終保留
+連結物件。這條遠端路徑使用 SSH 輔助命令，不支援 `--direct direct`；
+dry-run 仍可預覽。
 
 正式版暫時停用單檔跨連線分片 PUT，因為獨立連線還無法安全加入
 同一個伺服端交易。`-P N` 仍會並行處理遞迴批次中的不同檔案。

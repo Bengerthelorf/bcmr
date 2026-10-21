@@ -68,6 +68,10 @@ impl ServeClientPool {
         &mut self.clients[0]
     }
 
+    pub fn supports_sync(&self) -> bool {
+        !self.clients.is_empty() && self.clients.iter().all(ServeClient::supports_sync)
+    }
+
     pub async fn mkdir(&mut self, path: &str) -> Result<(), BcmrError> {
         self.clients[0].mkdir(path).await
     }
