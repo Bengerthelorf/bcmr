@@ -3017,7 +3017,7 @@ fn e2e_subcommand_help_shows_examples() {
 }
 
 #[test]
-fn e2e_cross_host_copy_refuses_with_clear_error() {
+fn e2e_cross_host_copy_reports_connection_failure() {
     let (ok, _stdout, stderr) = run_bcmr(&[
         "copy",
         "--progress=plain",
@@ -3025,11 +3025,7 @@ fn e2e_cross_host_copy_refuses_with_clear_error() {
         "host-b-bcmr-test.invalid:dst/",
     ]);
     assert!(!ok, "expected non-zero exit");
-    assert!(
-        stderr.contains("does not support remote-to-remote"),
-        "stderr: {stderr}"
-    );
-    assert!(stderr.contains("local intermediate"), "stderr: {stderr}");
+    assert!(stderr.contains("unknown host"), "stderr: {stderr}");
 }
 
 #[test]
@@ -3187,7 +3183,7 @@ fn e2e_doctor_json_emits_structured_report() {
 }
 
 #[test]
-fn e2e_same_host_remote_to_remote_copy_refuses() {
+fn e2e_same_host_relay_reports_connection_failure() {
     let (ok, stdout, stderr) = run_bcmr(&[
         "copy",
         "--progress=plain",
@@ -3196,17 +3192,14 @@ fn e2e_same_host_remote_to_remote_copy_refuses() {
     ]);
     assert!(
         !ok,
-        "same-host remote-to-remote should fail; stdout: {} stderr: {}",
+        "unresolvable remote host should fail; stdout: {} stderr: {}",
         stdout, stderr
     );
-    assert!(
-        stderr.contains("does not support remote-to-remote"),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.contains("unknown host"), "stderr: {stderr}");
 }
 
 #[test]
-fn e2e_cross_host_move_refuses_with_clear_error() {
+fn e2e_cross_host_move_reports_connection_failure() {
     let (ok, _stdout, stderr) = run_bcmr(&[
         "move",
         "--progress=plain",
@@ -3214,8 +3207,5 @@ fn e2e_cross_host_move_refuses_with_clear_error() {
         "host-b-bcmr-test.invalid:dst/",
     ]);
     assert!(!ok, "expected non-zero exit");
-    assert!(
-        stderr.contains("does not support remote-to-remote"),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.contains("unknown host"), "stderr: {stderr}");
 }

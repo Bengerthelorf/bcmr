@@ -32,7 +32,7 @@ pub fn inject_defaults(argv: Vec<String>, config: &Config) -> Result<Vec<String>
 
     let host_args: Vec<String> = first_matching_host_args(&argv[sub_idx + 1..], config);
 
-    let user_long_flags = collect_user_long_flags(&argv[sub_idx + 1..]);
+    let user_long_flags = collect_user_long_flags(&argv[1..]);
     let profile_args = drop_overridden_flags(profile_args, &user_long_flags);
     let host_args = drop_overridden_flags(host_args, &user_long_flags);
 
@@ -82,8 +82,35 @@ fn drop_overridden_flags(injected: Vec<String>, user_flags: &HashSet<&str>) -> V
 }
 
 fn find_subcommand(argv: &[String]) -> Option<usize> {
-    argv.iter()
-        .position(|s| SUBCOMMANDS_THAT_TAKE_DEFAULTS.contains(&s.as_str()))
+    let mut position = 1;
+    while position < argv.len() {
+        let token = argv[position].as_str();
+        if token == "--" {
+            return None;
+        }
+        if global_option_takes_value(token) {
+            position += 2;
+        } else if SUBCOMMANDS_THAT_TAKE_DEFAULTS.contains(&token) {
+            return Some(position);
+        } else {
+            position += 1;
+        }
+    }
+    None
+}
+
+fn global_option_takes_value(token: &str) -> bool {
+    matches!(
+        token,
+        "--config"
+            | "--profile"
+            | "--ssh-port"
+            | "--ssh-identity"
+            | "--ssh-config"
+            | "--ssh-jump"
+            | "--remote-backend"
+            | "--_bg"
+    )
 }
 
 fn profile_from_argv_or_env(argv: &[String]) -> Option<String> {
@@ -129,7 +156,19 @@ fn first_matching_host_args(after_sub: &[String], config: &Config) -> Vec<String
     if config.host.is_empty() {
         return Vec::new();
     }
-    for token in after_sub {
+    let mut tokens = after_sub.iter();
+    while let Some(token) = tokens.next() {
+        if global_option_takes_value(token) {
+            tokens.next();
+            continue;
+        }
+        if token
+            .strip_prefix("--")
+            .and_then(|token| token.split_once('='))
+            .is_some_and(|(name, _)| global_option_takes_value(&format!("--{name}")))
+        {
+            continue;
+        }
         let candidate: &str =
             if let Some(eq) = token.strip_prefix("--").and_then(|s| s.split_once('=')) {
                 eq.1
@@ -183,6 +222,53 @@ mod tests {
         let cfg = Config::default();
         let argv = s(&["bcmr", "copy", "src", "host:dst"]);
         assert_eq!(inject_defaults(argv.clone(), &cfg).unwrap(), argv);
+    }
+
+    #[test]
+    fn ssh_option_values_are_not_subcommands_or_endpoint_defaults() {
+        let cfg = cfg_with(&[("identity", &["-V"]), ("actual", &["-p"])], &[]);
+        let argv = s(&[
+            "bcmr",
+            "--ssh-jump",
+            "copy",
+            "copy",
+            "--ssh-identity",
+            "identity:key",
+            "src",
+            "actual:dst",
+        ]);
+        assert_eq!(
+            inject_defaults(argv, &cfg).unwrap(),
+            s(&[
+                "bcmr",
+                "--ssh-jump",
+                "copy",
+                "copy",
+                "-p",
+                "--ssh-identity",
+                "identity:key",
+                "src",
+                "actual:dst"
+            ])
+        );
+    }
+
+    #[test]
+    fn global_temporary_ssh_option_overrides_host_defaults() {
+        let cfg = cfg_with(&[("actual", &["--ssh-port", "2299", "-p"])], &[]);
+        let argv = s(&["bcmr", "--ssh-port", "2222", "copy", "src", "actual:dst"]);
+        assert_eq!(
+            inject_defaults(argv, &cfg).unwrap(),
+            s(&[
+                "bcmr",
+                "--ssh-port",
+                "2222",
+                "copy",
+                "-p",
+                "src",
+                "actual:dst"
+            ])
+        );
     }
 
     #[test]

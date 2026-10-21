@@ -31,7 +31,12 @@ fn remote_args(ssh_target: &str) -> Vec<String> {
         "ControlPath=none".into(),
     ];
     args.extend(SSH_LIVENESS_ARGS.map(str::to_owned));
-    args.extend([ssh_target.into(), "bcmr".into(), "serve".into()]);
+    args.extend(crate::core::ssh_options::extra_args(ssh_target));
+    args.extend([
+        crate::core::ssh_options::destination_arg(ssh_target),
+        "bcmr".into(),
+        "serve".into(),
+    ]);
     args
 }
 

@@ -225,7 +225,7 @@ bcmr copy --fast -V user@host:/big.bin ./local.bin
 - 支持上传和下载两个方向
 
 :::callout[限制]{kind="warn"}
-- 无法直接在两个远程主机之间复制 — 请使用本地作为中转
+- 远程到远程通过本机流式中转，详见 [传输后端](./transfer-backends.md)。
 - Serve 快路径的断点续传（`-C`）：单文件上传已原生支持；递归目录上传和所有下载在指定 `--resume/--strict/--append` 时自动回退到传统模式
 - 在共享可写目标目录中，中断的上传可能留下空的私有 `.bcmr.receive.*` 恢复目录；BCMR 不会在可竞争的命名空间中执行不安全的按名称清理
 :::
@@ -240,3 +240,5 @@ BCMR 通过 `[user@]host:path` 格式检测远程路径。以下模式被识别�
 - Windows 盘符（`C:\file`）
 
 目标路径规则和仍未统一的行为见 [本地与远程行为对照](./local-remote-semantics.md)。
+
+混合来源、聚合限速与 SFTP-only 账号详见 [传输后端](./transfer-backends.md)。

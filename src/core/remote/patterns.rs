@@ -24,6 +24,13 @@ async fn query(remote: &RemotePath, command: String) -> Result<Vec<u8>, BcmrErro
 }
 
 async fn exists(remote: &RemotePath, directory_only: bool) -> Result<bool, BcmrError> {
+    if super::backend::is_sftp(&remote.ssh_target()).await? {
+        return match super::sftp_ops::attrs(remote, directory_only).await {
+            Ok(attrs) => Ok(!directory_only || attrs.is_dir()),
+            Err(error) if super::backend::missing(&error) => Ok(false),
+            Err(error) => Err(error),
+        };
+    }
     let path = shell_escape(&remote.path);
     let condition = if directory_only {
         format!("test -d '{path}'")
@@ -35,6 +42,13 @@ async fn exists(remote: &RemotePath, directory_only: bool) -> Result<bool, BcmrE
 }
 
 async fn names(remote: &RemotePath) -> Result<Vec<String>, BcmrError> {
+    if super::backend::is_sftp(&remote.ssh_target()).await? {
+        return match super::sftp_ops::names(remote).await {
+            Ok(names) => Ok(names),
+            Err(error) if super::backend::missing(&error) => Ok(Vec::new()),
+            Err(error) => Err(error),
+        };
+    }
     // `/.` follows a directory symlink without recursively following children.
     // Prefix relative paths so find cannot interpret a leading '-' as an option.
     let base = if remote.path.starts_with('/') {

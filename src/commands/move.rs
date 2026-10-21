@@ -10,7 +10,7 @@ pub use copy::FileToOverwrite;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
-fn refuse_same_file_move(src: &Path, dst: &Path) -> std::result::Result<(), BcmrError> {
+pub(crate) fn refuse_same_file_move(src: &Path, dst: &Path) -> std::result::Result<(), BcmrError> {
     if std::fs::symlink_metadata(dst)
         .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
     {

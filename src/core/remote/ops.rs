@@ -1,10 +1,23 @@
 use super::ssh_cmd::{shell_escape, ssh_command, ssh_error_message};
+use super::{backend, sftp_ops};
 use super::{parse_remote_path, RemoteFileInfo, RemotePath};
 use crate::core::error::BcmrError;
 use tokio::io::AsyncReadExt;
 
+fn option_safe_path(path: &str) -> String {
+    if path.starts_with('/') {
+        path.to_owned()
+    } else {
+        format!("./{path}")
+    }
+}
+
 pub async fn validate_ssh_connection(remote: &RemotePath) -> Result<(), BcmrError> {
     let target = remote.ssh_target();
+    if backend::is_sftp(&target).await? {
+        backend::session(&target).await?;
+        return Ok(());
+    }
     let output = ssh_command(&target).arg("echo ok").output().await?;
 
     if !output.status.success() {
@@ -18,11 +31,18 @@ pub async fn validate_ssh_connection(remote: &RemotePath) -> Result<(), BcmrErro
 }
 
 pub async fn remote_file_size(remote: &RemotePath) -> Result<Option<u64>, BcmrError> {
+    if backend::is_sftp(&remote.ssh_target()).await? {
+        return match sftp_ops::attrs(remote, true).await {
+            Ok(attrs) => Ok(attrs.size),
+            Err(error) if backend::missing(&error) => Ok(None),
+            Err(error) => Err(error),
+        };
+    }
     let output = ssh_command(&remote.ssh_target())
         .arg(format!(
             "stat -c '%s' '{}' 2>/dev/null || stat -f '%z' '{}'",
-            shell_escape(&remote.path),
-            shell_escape(&remote.path)
+            shell_escape(&option_safe_path(&remote.path)),
+            shell_escape(&option_safe_path(&remote.path))
         ))
         .output()
         .await?;
@@ -36,7 +56,14 @@ pub async fn remote_file_size(remote: &RemotePath) -> Result<Option<u64>, BcmrEr
 }
 
 pub async fn remote_stat(remote: &RemotePath) -> Result<RemoteFileInfo, BcmrError> {
-    let escaped = shell_escape(&remote.path);
+    if backend::is_sftp(&remote.ssh_target()).await? {
+        let attrs = sftp_ops::attrs(remote, true).await?;
+        return Ok(RemoteFileInfo {
+            is_dir: attrs.is_dir(),
+            size: attrs.size.unwrap_or(0),
+        });
+    }
+    let escaped = shell_escape(&option_safe_path(&remote.path));
     let output = ssh_command(&remote.ssh_target())
         .arg(format!(
             "LC_ALL=C stat -c '%F %s' '{0}' 2>/dev/null || LC_ALL=C stat -f '%HT %z' '{0}'",
@@ -65,6 +92,22 @@ pub async fn remote_stat(remote: &RemotePath) -> Result<RemoteFileInfo, BcmrErro
 }
 
 pub async fn remote_total_size(remote: &RemotePath, recursive: bool) -> Result<u64, BcmrError> {
+    if backend::is_sftp(&remote.ssh_target()).await? {
+        let entries = sftp_ops::inventory(remote, false, &[]).await?;
+        if entries.first().is_some_and(|entry| entry.is_dir) && !recursive {
+            return Err(backend::invalid(
+                "Remote source is a directory. Use -r flag for recursive copy.",
+            ));
+        }
+        return entries
+            .iter()
+            .filter(|entry| !entry.is_dir)
+            .try_fold(0u64, |total, entry| {
+                total
+                    .checked_add(entry.size)
+                    .ok_or_else(|| backend::invalid("remote total size overflow"))
+            });
+    }
     let info = remote_stat(remote).await?;
 
     if !info.is_dir {
@@ -78,7 +121,7 @@ pub async fn remote_total_size(remote: &RemotePath, recursive: bool) -> Result<u
         )));
     }
 
-    let escaped = shell_escape(&remote.path);
+    let escaped = shell_escape(&option_safe_path(&remote.path));
     let output = ssh_command(&remote.ssh_target())
         .arg(format!("LC_ALL=C du -sk '{}' 2>/dev/null", escaped))
         .output()
@@ -172,10 +215,18 @@ fn parse_remote_listing(raw: &[u8]) -> Result<Vec<(String, u64, bool)>, &'static
 }
 
 pub async fn remote_list_files(remote: &RemotePath) -> Result<Vec<(String, u64, bool)>, BcmrError> {
+    if backend::is_sftp(&remote.ssh_target()).await? {
+        return Ok(sftp_ops::inventory(remote, false, &[])
+            .await?
+            .into_iter()
+            .filter(|entry| !entry.path.is_empty())
+            .map(|entry| (entry.path, entry.size, entry.is_dir))
+            .collect());
+    }
     let command = format!(
         "sh -c '{}' bcmr-list '{}'",
         shell_escape(REMOTE_LIST_SCRIPT),
-        shell_escape(&remote.path)
+        shell_escape(&option_safe_path(&remote.path))
     );
     let output = ssh_command(&remote.ssh_target())
         .arg(command)
@@ -198,7 +249,25 @@ pub async fn remote_list_files(remote: &RemotePath) -> Result<Vec<(String, u64, 
 pub async fn remote_list_shallow(
     remote: &RemotePath,
 ) -> Result<Vec<(String, u64, bool)>, BcmrError> {
-    let escaped = shell_escape(&remote.path);
+    if backend::is_sftp(&remote.ssh_target()).await? {
+        let entries = backend::session(&remote.ssh_target())
+            .await?
+            .lock()
+            .await
+            .readdir(&remote.path)
+            .await?;
+        return entries
+            .into_iter()
+            .map(|(name, attrs)| {
+                Ok((
+                    sftp_ops::utf8(name, "directory entry")?,
+                    attrs.size.unwrap_or(0),
+                    attrs.is_dir(),
+                ))
+            })
+            .collect();
+    }
+    let escaped = shell_escape(&option_safe_path(&remote.path));
     let cmd = format!(
         "find '{}' -maxdepth 1 -mindepth 1 -printf '%f\\0%s\\0%y\\0' 2>/dev/null; true",
         escaped
@@ -232,9 +301,16 @@ pub async fn remote_file_hash(
     remote: &RemotePath,
     limit: Option<u64>,
 ) -> Result<String, BcmrError> {
+    if backend::is_sftp(&remote.ssh_target()).await? {
+        return sftp_ops::hash(remote, limit).await;
+    }
     let cmd = match limit {
-        Some(n) => format!("head -c {} '{}'", n, shell_escape(&remote.path)),
-        None => format!("cat '{}'", shell_escape(&remote.path)),
+        Some(n) => format!(
+            "head -c {} '{}'",
+            n,
+            shell_escape(&option_safe_path(&remote.path))
+        ),
+        None => format!("cat '{}'", shell_escape(&option_safe_path(&remote.path))),
     };
 
     let mut child = ssh_command(&remote.ssh_target())
@@ -291,6 +367,9 @@ fn split_tilde_prefix(path: &str) -> Option<(&str, &str)> {
 }
 
 pub async fn resolve_remote_home(ssh_target: &str, user_spec: &str) -> Result<String, BcmrError> {
+    if backend::is_sftp(ssh_target).await? {
+        return sftp_ops::expand_tilde(ssh_target, &format!("~{user_spec}")).await;
+    }
     let probe = if user_spec.is_empty() {
         "printf '%s' \"$HOME\"".to_string()
     } else {
@@ -335,7 +414,18 @@ pub async fn expand_remote_tilde(ssh_target: &str, path: &str) -> Result<String,
 }
 
 pub async fn remote_path_is_directory(remote: &RemotePath) -> bool {
-    let cmd = format!("test -d '{}'", shell_escape(&remote.path));
+    if backend::is_sftp(&remote.ssh_target())
+        .await
+        .unwrap_or(false)
+    {
+        return sftp_ops::attrs(remote, true)
+            .await
+            .is_ok_and(|attrs| attrs.is_dir());
+    }
+    let cmd = format!(
+        "test -d '{}'",
+        shell_escape(&option_safe_path(&remote.path))
+    );
     let status = ssh_command(&remote.ssh_target())
         .arg(&cmd)
         .stdout(std::process::Stdio::null())
@@ -352,7 +442,43 @@ pub async fn remote_remove(
     dir_only: bool,
 ) -> Result<(), BcmrError> {
     let target = remote.ssh_target();
-    let escaped = shell_escape(&remote.path);
+    if backend::is_sftp(&target).await? {
+        let metadata = match sftp_ops::attrs(remote, false).await {
+            Ok(metadata) => metadata,
+            Err(error) if force && backend::missing(&error) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let session = backend::session(&target).await?;
+        if dir_only {
+            return session.lock().await.rmdir(&remote.path).await;
+        }
+        if metadata.is_dir() {
+            if !recursive {
+                return Err(backend::invalid(
+                    "remote source is a directory; use -r or -d",
+                ));
+            }
+            for entry in sftp_ops::inventory(remote, true, &[])
+                .await?
+                .into_iter()
+                .rev()
+            {
+                let selected = if entry.path.is_empty() {
+                    remote.clone()
+                } else {
+                    remote.join(&entry.path)
+                };
+                if entry.is_dir {
+                    session.lock().await.rmdir(&selected.path).await?;
+                } else {
+                    session.lock().await.remove(&selected.path).await?;
+                }
+            }
+            return Ok(());
+        }
+        return session.lock().await.remove(&remote.path).await;
+    }
+    let escaped = shell_escape(&option_safe_path(&remote.path));
     let cmd = if dir_only {
         format!("rmdir -- '{}'", escaped)
     } else {
@@ -398,6 +524,36 @@ pub async fn complete_remote_path(partial: &str) -> Result<Vec<String>, BcmrErro
     // Resolve only the directory used for I/O. Candidates retain the user's
     // spelling (~, ~user, and relative paths), and no path is evaluated as code.
     let expanded_dir = expand_remote_tilde(&target, &dir).await?;
+    if backend::is_sftp(&target).await? {
+        let entries = backend::session(&target)
+            .await?
+            .lock()
+            .await
+            .readdir(&expanded_dir)
+            .await?;
+        let base = if dir == "." { "" } else { &dir };
+        let mut candidates = Vec::new();
+        for (name, attrs) in entries {
+            let name = sftp_ops::utf8(name, "completion name")?;
+            if !prefix.is_empty() && !name.starts_with(&prefix) {
+                continue;
+            }
+            let mut candidate = remote.clone();
+            candidate.path = format!("{base}{name}{}", if attrs.is_dir() { "/" } else { "" });
+            candidates.push(
+                if partial
+                    .get(..6)
+                    .is_some_and(|scheme| scheme.eq_ignore_ascii_case("scp://"))
+                {
+                    candidate.uri_display()
+                } else {
+                    candidate.display()
+                },
+            );
+        }
+        candidates.sort();
+        return Ok(candidates);
+    }
     let output = ssh_command(&target)
         .arg(format!(
             "LC_ALL=C ls -1ap -- '{}'",
@@ -424,15 +580,22 @@ pub async fn complete_remote_path(partial: &str) -> Result<Vec<String>, BcmrErro
     }
 
     let base = if dir == "." { String::new() } else { dir };
-    let mut display_remote = remote;
-    display_remote.path = String::new();
-    let display_target = display_remote.display();
-
     Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter(|l| *l != "./" && *l != "../")
         .filter(|l| prefix.is_empty() || l.starts_with(&prefix))
-        .map(|l| format!("{}{}{}", display_target, base, l))
+        .map(|name| {
+            let mut candidate = remote.clone();
+            candidate.path = format!("{base}{name}");
+            if partial
+                .get(..6)
+                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("scp://"))
+            {
+                candidate.uri_display()
+            } else {
+                candidate.display()
+            }
+        })
         .collect())
 }
 

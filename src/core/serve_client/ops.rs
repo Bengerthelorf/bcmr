@@ -86,7 +86,10 @@ impl ServeClient {
             match self.recv().await? {
                 message @ (Message::Data { .. } | Message::DataCompressed { .. }) => {
                     let decoded = compress::decode_data_block(message)?;
-                    on_data(&decoded);
+                    for chunk in decoded.chunks(crate::core::bandwidth::chunk_size()) {
+                        crate::core::bandwidth::acquire(chunk.len()).await;
+                        on_data(chunk);
+                    }
                 }
                 Message::Ok { hash } => {
                     return match hash {
@@ -129,7 +132,12 @@ impl ServeClient {
         })
         .await?;
 
-        if self.dedup_enabled && size >= DEDUP_MIN_FILE_SIZE {
+        // CAS PUT requires one whole 4 MiB block per frame. Under a payload
+        // cap, bounded streaming avoids releasing that block in a single burst.
+        if !crate::core::bandwidth::is_enabled()
+            && self.dedup_enabled
+            && size >= DEDUP_MIN_FILE_SIZE
+        {
             self.put_with_dedup(data, size).await?;
         } else {
             self.put_streaming(data).await?;
@@ -209,15 +217,16 @@ impl ServeClient {
         let mut file = File::open(local).await?;
         file.seek(std::io::SeekFrom::Start(local_offset)).await?;
         let mut remaining = length;
-        let mut buf = vec![0u8; DEDUP_BLOCK_SIZE];
+        let mut buf = vec![0u8; DEDUP_BLOCK_SIZE.min(crate::core::bandwidth::chunk_size())];
         while remaining > 0 {
-            let want = remaining.min(DEDUP_BLOCK_SIZE as u64) as usize;
+            let want = remaining.min(buf.len() as u64) as usize;
             let n = file.read(&mut buf[..want]).await?;
             if n == 0 {
                 return Err(BcmrError::InvalidInput(format!(
                     "local source truncated: expected {length} bytes from offset {local_offset}"
                 )));
             }
+            crate::core::bandwidth::acquire(n).await;
             let frame = compress::encode_block(algo, buf[..n].to_vec())?;
             tx.write_message(w, &frame).await?;
             remaining -= n as u64;
@@ -289,15 +298,35 @@ impl ServeClient {
                             "get_chunked local write offset overflowed u64".into(),
                         )
                     })?;
-                    let file = std::sync::Arc::clone(&destination);
-                    tokio::task::spawn_blocking(move || {
-                        crate::core::atomic_file::positional_write_all(
-                            &file,
-                            &decoded,
-                            write_offset,
-                        )
-                    })
-                    .await??;
+                    if !crate::core::bandwidth::is_enabled() {
+                        let file = std::sync::Arc::clone(&destination);
+                        tokio::task::spawn_blocking(move || {
+                            crate::core::atomic_file::positional_write_all(
+                                &file,
+                                &decoded,
+                                write_offset,
+                            )
+                        })
+                        .await??;
+                    } else {
+                        let mut offset = write_offset;
+                        for chunk in decoded.chunks(crate::core::bandwidth::chunk_size()) {
+                            crate::core::bandwidth::acquire(chunk.len()).await;
+                            let file = std::sync::Arc::clone(&destination);
+                            let bytes = chunk.to_vec();
+                            tokio::task::spawn_blocking(move || {
+                                crate::core::atomic_file::positional_write_all(
+                                    &file, &bytes, offset,
+                                )
+                            })
+                            .await??;
+                            offset = offset.checked_add(chunk.len() as u64).ok_or_else(|| {
+                                BcmrError::InvalidInput(
+                                    "get_chunked local write offset overflowed u64".into(),
+                                )
+                            })?;
+                        }
+                    }
                     written = next_written;
                 }
                 Message::Ok { .. } => {

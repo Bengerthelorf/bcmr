@@ -1,5 +1,6 @@
 use crate::config::CONFIG;
 use crate::ui::progress::ProgressRenderer;
+use crate::ui::runner::ProgressCancellation;
 use crate::ui::state::ProgressData;
 use crate::ui::suspend::{install_suspend_handler, suspend_now};
 use crate::ui::utils::{format_bytes, format_eta, get_gradient_color, parse_hex_color};
@@ -28,6 +29,7 @@ pub struct TuiProgress {
     alternate_screen_enabled: bool,
     last_terminal_size: Option<(u16, u16)>,
     compact_layout: bool,
+    cancellation: Option<ProgressCancellation>,
 }
 
 fn use_compact_layout(term_width: u16, term_height: u16, required_height: u16) -> bool {
@@ -62,7 +64,30 @@ impl TuiProgress {
             alternate_screen_enabled: false,
             last_terminal_size: None,
             compact_layout: false,
+            cancellation: None,
         })
+    }
+
+    fn handle_key_event(&mut self, key: event::KeyEvent) -> io::Result<bool> {
+        if !key.modifiers.contains(event::KeyModifiers::CONTROL) {
+            return Ok(false);
+        }
+        match key.code {
+            KeyCode::Char('c') => {
+                if let Some(cancellation) = &self.cancellation {
+                    cancellation.request();
+                } else {
+                    self.finish()?;
+                    std::process::exit(130);
+                }
+                Ok(true)
+            }
+            KeyCode::Char('z') => {
+                suspend_now(&self.suspended);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     fn total_lines(&self) -> u16 {
@@ -138,7 +163,12 @@ impl TuiProgress {
     }
 
     fn redraw(&mut self) -> io::Result<()> {
-        if self.finished {
+        if self.finished
+            || self
+                .cancellation
+                .as_ref()
+                .is_some_and(ProgressCancellation::is_cancelled)
+        {
             return Ok(());
         }
 
@@ -164,10 +194,6 @@ impl TuiProgress {
         self.last_terminal_size = Some((term_width, term_height));
         self.compact_layout = compact_layout;
 
-        if compact_layout {
-            return self.redraw_compact(term_width);
-        }
-
         let new_lines = self.total_lines();
         if self.last_rendered_lines > new_lines {
             let mut stdout = stdout();
@@ -188,20 +214,14 @@ impl TuiProgress {
 
         if event::poll(Duration::from_millis(0))? {
             if let Event::Key(key) = event::read()? {
-                if key.modifiers.contains(event::KeyModifiers::CONTROL) {
-                    match key.code {
-                        KeyCode::Char('c') => {
-                            self.finish()?;
-                            std::process::exit(130);
-                        }
-                        KeyCode::Char('z') => {
-                            suspend_now(&self.suspended);
-                            return Ok(());
-                        }
-                        _ => {}
-                    }
+                if self.handle_key_event(key)? {
+                    return Ok(());
                 }
             }
+        }
+
+        if compact_layout {
+            return self.redraw_compact(term_width);
         }
 
         let total_progress = (self.data.current_bytes as f64 / self.data.total_bytes.max(1) as f64
@@ -563,6 +583,10 @@ impl Drop for TuiProgress {
 }
 
 impl ProgressRenderer for TuiProgress {
+    fn set_cancellation(&mut self, cancellation: ProgressCancellation) {
+        self.cancellation = Some(cancellation);
+    }
+
     fn set_total_items(&mut self, total: usize) {
         self.data.items_total = Some(total);
         let _ = self.redraw();
@@ -673,6 +697,27 @@ impl ProgressRenderer for TuiProgress {
 #[cfg(test)]
 mod tests {
     use super::{clip_line_to_width, use_compact_layout};
+    use crate::ui::progress::ProgressRenderer;
+    use crate::ui::runner::ProgressCancellation;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[tokio::test]
+    async fn raw_ctrl_c_requests_caller_cancellation_without_exiting() {
+        let mut progress = super::TuiProgress::new(100).unwrap();
+        let cancellation = ProgressCancellation::default();
+        progress.set_cancellation(cancellation.clone());
+
+        assert!(!progress
+            .handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+            .unwrap());
+        assert!(!cancellation.is_cancelled());
+        assert!(progress
+            .handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+            .unwrap());
+        tokio::time::timeout(std::time::Duration::from_secs(1), cancellation.cancelled())
+            .await
+            .expect("raw Ctrl-C must wake the asynchronous cleanup owner");
+    }
 
     #[test]
     fn compact_layout_handles_narrow_or_short_terminals() {

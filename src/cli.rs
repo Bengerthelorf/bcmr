@@ -6,6 +6,12 @@ EXAMPLES:
   Copy a file to a remote host:
       bcmr copy ./report.pdf host:backup/
 
+  Use a temporary SSH port and identity:
+      bcmr --ssh-port 2222 --ssh-identity ~/.ssh/work copy ./report.pdf host:backup/
+
+  Download an absolute URI path (its port overrides --ssh-port):
+      bcmr copy 'scp://alice@host:2222/srv/report%20Q4.pdf' ./downloads/
+
   Recursive with attribute preservation:
       bcmr copy -r -p ./project/ host:archives/
 
@@ -17,6 +23,16 @@ EXAMPLES:
 
   Compare source and destination without copying:
       bcmr check -r ./project/ host:archives/
+
+  Mix local and remote sources, or relay between servers:
+      bcmr copy local.txt 'host:remote.txt' ./downloads/
+      bcmr copy -r -V 'host-a:results' 'host-b:archive/'
+
+  Limit aggregate payload or select an SFTP-only account:
+      bcmr copy --bandwidth-limit 10MiB/s 'host:large' ./
+      bcmr copy --remote-backend=sftp file 'restricted:new/'
+      SFTP file publication needs hardlink@openssh.com; existing SFTP
+      targets cannot be force-replaced while preserving ACL/xattr safety.
 
 ENVIRONMENT:
   BCMR_CAS_DIR                  CAS directory (default: $XDG_CACHE_HOME/bcmr/cas)
@@ -252,6 +268,26 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "NAME")]
     pub profile: Option<String>,
 
+    /// Temporary SSH port (an explicit scp:// endpoint port takes precedence)
+    #[arg(long, global = true, value_name = "PORT", value_parser = clap::value_parser!(u16).range(1..))]
+    pub ssh_port: Option<u16>,
+
+    /// Temporary SSH identity file (repeat to offer several keys)
+    #[arg(long, global = true, value_name = "PATH")]
+    pub ssh_identity: Vec<PathBuf>,
+
+    /// Temporary OpenSSH configuration file (separate from bcmr --config)
+    #[arg(long, global = true, value_name = "PATH")]
+    pub ssh_config: Option<PathBuf>,
+
+    /// Temporary SSH jump host or comma-separated jump chain
+    #[arg(long, global = true, value_name = "HOST")]
+    pub ssh_jump: Option<String>,
+
+    /// Remote backend: auto detects exec-denied SFTP accounts; ssh uses serve/shell
+    #[arg(long, global = true, default_value = "auto", value_parser = ["auto", "ssh", "sftp"])]
+    pub remote_backend: String,
+
     #[arg(long = "_bg", hide = true, value_parser = parse_job_id)]
     pub _bg: Option<String>,
 }
@@ -379,6 +415,10 @@ pub struct CopyMoveArgs {
     /// Parallel local file copies (default: CPU count, capped at 8)
     #[arg(short = 'j', long = "jobs", value_parser = parse_positive_usize)]
     pub jobs: Option<usize>,
+
+    /// Aggregate payload bytes/s across all workers (e.g. 10MiB or 5MB/s)
+    #[arg(long, value_name = "RATE", value_parser = crate::core::bandwidth::parse_rate)]
+    pub bandwidth_limit: Option<u64>,
 
     /// Wire compression: auto, zstd, lz4, none
     #[arg(long, value_enum, default_value = "auto")]
@@ -1064,6 +1104,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn temporary_ssh_options_parse_globally_without_stealing_existing_flags() {
+        let cli = Cli::try_parse_from([
+            "bcmr",
+            "--ssh-port",
+            "2222",
+            "copy",
+            "--ssh-identity",
+            "first key",
+            "--ssh-identity",
+            "second key",
+            "--ssh-config",
+            "ssh config",
+            "--ssh-jump",
+            "jump",
+            "--config",
+            "bcmr.toml",
+            "-P",
+            "3",
+            "src",
+            "host:dst",
+        ])
+        .unwrap();
+        assert_eq!(cli.ssh_port, Some(2222));
+        assert_eq!(
+            cli.ssh_identity,
+            [PathBuf::from("first key"), PathBuf::from("second key")]
+        );
+        assert_eq!(cli.ssh_config, Some(PathBuf::from("ssh config")));
+        assert_eq!(cli.config, Some(PathBuf::from("bcmr.toml")));
+        assert_eq!(cli.ssh_jump.as_deref(), Some("jump"));
+        assert_eq!(cli.command.get_parallel(), Some(3));
+        for port in ["0", "65536", "-1", "abc"] {
+            assert!(Cli::try_parse_from(["bcmr", "--ssh-port", port, "doctor"]).is_err());
+        }
+    }
+
+    #[test]
     fn background_execution_is_an_explicit_global_flag() {
         let parsed = Cli::try_parse_from(["bcmr", "--background", "copy", "--yes", "src", "dst"]);
         assert!(
@@ -1253,6 +1330,7 @@ mod tests {
             no_deref: false,
             sync: false,
             jobs: None,
+            bandwidth_limit: None,
             compress: CompressionMode::Auto,
             fast: false,
             direct: DirectMode::Ssh,

@@ -268,6 +268,7 @@ pub struct LocalCleanupPlan {
 
 impl LocalCleanupPlan {
     pub fn capture(paths: &[PathBuf], excludes: &[regex::Regex]) -> Result<Self, BcmrError> {
+        crate::core::interrupt::check()?;
         let mut entries = Vec::new();
         let mut seen = HashSet::new();
         for source in paths {
@@ -277,6 +278,7 @@ impl LocalCleanupPlan {
             // Explicit no_deref keeps both root and descendant links as leaves;
             // preorder pruning happens before reading excluded directories.
             for entry in traversal::copy_walk(source, true, 0, true, excludes) {
+                crate::core::interrupt::check()?;
                 let entry = entry?;
                 let path = std::path::absolute(entry.path())?;
                 if seen.insert(path.clone()) {
@@ -291,14 +293,26 @@ impl LocalCleanupPlan {
     }
 
     pub async fn remove(&self) -> Result<(), BcmrError> {
-        self.remove_with_hook(|_| {})
+        self.remove_with_hooks_async(|_| {}, |_, _| {}).await
     }
 
+    #[cfg(test)]
     fn remove_with_hook(&self, before_quarantine: impl FnMut(&Path)) -> Result<(), BcmrError> {
         self.remove_with_hooks(before_quarantine, |_, _| {})
     }
 
+    #[cfg(test)]
     fn remove_with_hooks(
+        &self,
+        before_quarantine: impl FnMut(&Path),
+        after_quarantine: impl FnMut(&Path, &Path),
+    ) -> Result<(), BcmrError> {
+        futures::executor::block_on(
+            self.remove_with_hooks_async(before_quarantine, after_quarantine),
+        )
+    }
+
+    async fn remove_with_hooks_async(
         &self,
         mut before_quarantine: impl FnMut(&Path),
         mut after_quarantine: impl FnMut(&Path, &Path),
@@ -327,6 +341,7 @@ impl LocalCleanupPlan {
             (aliases, expected_changes)
         };
         for entry in self.entries.iter().rev() {
+            crate::core::interrupt::check()?;
             #[cfg(unix)]
             let next_alias = aliases.get_mut(&entry.stamp.identity).and_then(|group| {
                 group.pop();
@@ -363,6 +378,7 @@ impl LocalCleanupPlan {
                 .path
                 .parent()
                 .ok_or_else(|| BcmrError::InvalidInput("cleanup source has no parent".into()))?;
+            crate::core::interrupt::check()?;
             let mut quarantine = tempfile::Builder::new()
                 .prefix(".bcmr.move.")
                 .tempdir_in(parent)?;
@@ -371,6 +387,10 @@ impl LocalCleanupPlan {
             quarantine.disable_cleanup(true);
             let private_path = quarantine.path().join("entry");
             before_quarantine(&entry.path);
+            if let Err(error) = crate::core::interrupt::check() {
+                let _ = std::fs::remove_dir(quarantine.path());
+                return Err(error);
+            }
             if let Err(error) = rename_no_replace(&entry.path, &private_path) {
                 let _ = std::fs::remove_dir(quarantine.path());
                 return Err(error.into());
@@ -397,6 +417,45 @@ impl LocalCleanupPlan {
                         )
                     }
                 )));
+            }
+            let validation = async {
+                crate::core::interrupt::check()?;
+                if entry.stamp.kind != EntryKind::Directory
+                    && crate::core::remote::move_delivery::has_local(&entry.path)
+                {
+                    // The original name is now absent. A destination that is
+                    // merely another spelling of that entry cannot validate.
+                    // Keep quarantine alive until the read finishes or cancels.
+                    crate::core::interrupt::read_only(
+                        crate::core::remote::move_delivery::validate_local(&entry.path),
+                    )
+                    .await?;
+                    let actual = SourceStamp::capture(&private_path)?;
+                    if !entry.stamp.matches_after_rename(&actual) {
+                        return Err(BcmrError::DestinationChanged(entry.path.clone()));
+                    }
+                }
+                crate::core::interrupt::check()
+            }
+            .await;
+            if let Err(error) = validation {
+                if rename_no_replace(&private_path, &entry.path).is_ok() {
+                    let _ = std::fs::remove_dir(quarantine.path());
+                    return Err(error);
+                }
+                let message = format!(
+                    "{error}; source recovery data retained at '{}'",
+                    private_path.display()
+                );
+                return Err(match error {
+                    BcmrError::Io(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                        BcmrError::Io(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            message,
+                        ))
+                    }
+                    _ => BcmrError::InvalidInput(message),
+                });
             }
             if let Err(error) = remove_leaf(&private_path, entry.stamp.kind) {
                 // A child may arrive after the empty-directory precheck.
@@ -429,6 +488,7 @@ impl LocalCleanupPlan {
                 expected_changes.insert(entry.stamp.identity, updated.changed);
             }
         }
+        crate::core::interrupt::check()?;
         Ok(())
     }
 }

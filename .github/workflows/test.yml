@@ -43,6 +43,10 @@ jobs:
           brew install coreutils
           echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
 
+      - name: Install POSIX test dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh openssh-sftp-server
+
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
 
@@ -57,10 +61,6 @@ jobs:
 
       - name: Formatting check
         run: cargo fmt --check
-
-      - name: Install Zsh (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y zsh
 
       - name: Test CLI usability and real shell integration
         if: runner.os != 'Windows'
@@ -84,6 +84,14 @@ jobs:
           python3 tests/transfer_cleanup_test.py
           python3 tests/remote_cleanup_test.py
           python3 tests/remote_sync_contract_test.py
+          python3 tests/ssh_options_test.py
+          python3 tests/bandwidth_test.py
+          python3 tests/composite_transfer_test.py
+          python3 tests/serve_stream_lifecycle_test.py
+          python3 tests/composite_safety_test.py
+          python3 tests/relay_identity_test.py
+          python3 tests/sftp_stage_test.py
+          python3 tests/cleanup_interrupt_test.py
 
       - name: Test Homebrew formula installation
         if: runner.os == 'macOS'

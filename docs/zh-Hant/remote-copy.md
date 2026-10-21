@@ -219,7 +219,7 @@ bcmr copy --fast -V user@host:/big.bin ./local.bin
 - 支援上傳和下載兩個方向
 
 :::callout[限制]{kind="warn"}
-- 無法直接在兩個遠端主機之間複製 — 請使用本機作為中轉
+- 遠端到遠端透過本機串流中轉，支援混合來源與 SFTP-only 帳號；見 [傳輸後端（簡體中文）](../zh/transfer-backends.md)。
 - Serve 快路徑的斷點續傳（`-C`）：單檔案上傳已原生支援；遞迴目錄上傳和所有下載在指定 `--resume/--strict/--append` 時自動回退到傳統模式
 - 在共享可寫目標目錄中，中斷的上傳可能留下空的私有 `.bcmr.receive.*` 復原目錄；BCMR 不會在可競爭的命名空間中執行不安全的按名稱清理
 :::

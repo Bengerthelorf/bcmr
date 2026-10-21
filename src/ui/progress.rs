@@ -10,6 +10,8 @@ pub trait ProgressRenderer: Send {
     fn inc_current(&mut self, delta: u64);
     fn finish(&mut self) -> io::Result<()>;
 
+    fn set_cancellation(&mut self, _cancellation: crate::ui::runner::ProgressCancellation) {}
+
     fn finish_err(&mut self, _msg: &str) -> io::Result<()> {
         self.finish()
     }

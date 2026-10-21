@@ -16,6 +16,7 @@ pub(super) async fn handle_remote_upload(
     excludes: &[regex::Regex],
 ) -> Result<()> {
     let plan = collect_upload_plan(sources, rdest, args.is_recursive(), excludes)?;
+    crate::core::interrupt::check()?;
     if args.is_dry_run() {
         println!(
             "Dry-run: would upload {} to {}",
@@ -42,6 +43,7 @@ pub(super) async fn handle_remote_upload(
     }
 
     let opts = transfer_options_from_cli(args);
+    crate::core::interrupt::check()?;
     let runner = ProgressRunner::new(
         plan.total_size,
         progress_mode(args),
@@ -86,6 +88,7 @@ pub(super) async fn handle_remote_download(
     excludes: &[regex::Regex],
 ) -> Result<()> {
     let plan = collect_download_plan(sources, dest_local, args.is_recursive(), excludes).await?;
+    crate::core::interrupt::check()?;
     if args.is_dry_run() {
         println!(
             "Dry-run: would download {} to {}",
@@ -113,6 +116,7 @@ pub(super) async fn handle_remote_download(
     }
 
     let opts = transfer_options_from_cli(args);
+    crate::core::interrupt::check()?;
     let runner = ProgressRunner::new(
         plan.total_size,
         progress_mode(args),

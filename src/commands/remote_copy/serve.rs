@@ -4,12 +4,15 @@ use super::{
 };
 use crate::cli::Commands;
 use crate::core::checksum::bytes_to_hex;
+use crate::core::file_metadata::PortableFileMetadata;
 use crate::core::remote::staged_upload::StagedUpload;
 use crate::core::remote::{check_resume_state, RemotePath, ResumeDecision};
 use crate::core::serve_client::{FileTransfer, ServeClientPool};
 use crate::ui::runner::ProgressRunner;
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
+
+type UploadMetadata = std::collections::HashMap<PathBuf, PortableFileMetadata>;
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -112,10 +115,24 @@ pub(super) async fn handle_serve_upload(
     excludes: &[regex::Regex],
     parallel: usize,
 ) -> Result<()> {
+    crate::core::interrupt::check()?;
     if args.is_dry_run() {
         return Err(fallback_error("serve: dry-run fallback to legacy"));
     }
     let plan = collect_upload_plan(sources, rdest, args.is_recursive(), excludes)?;
+    let original_metadata: UploadMetadata = if args.is_preserve() {
+        plan.files
+            .iter()
+            .map(|file| {
+                Ok((
+                    file.local_path.clone(),
+                    super::endpoint::local_metadata(&file.local_path.metadata()?),
+                ))
+            })
+            .collect::<std::io::Result<_>>()?
+    } else {
+        Default::default()
+    };
     let has_recursive_directory = !plan.directories.is_empty();
     if has_recursive_directory && (args.is_resume() || args.is_strict() || args.is_append()) {
         return Err(fallback_error(
@@ -139,6 +156,7 @@ pub(super) async fn handle_serve_upload(
         pool.close().await?;
         bail!("--sync requires every remote serve connection to advertise CAP_SYNC; refusing before transfer");
     }
+    crate::core::interrupt::check()?;
     let runner = ProgressRunner::new(
         plan.total_size,
         progress_mode(args),
@@ -190,6 +208,7 @@ pub(super) async fn handle_serve_upload(
                     &runner,
                     args,
                     args.is_force() || resume_overwrite,
+                    &original_metadata,
                 )
                 .await?;
                 continue;
@@ -217,12 +236,24 @@ pub(super) async fn handle_serve_upload(
                 }
             }
             if args.is_preserve() {
-                crate::core::remote::preserve_remote_attrs(&file.local_path, &file.remote).await?;
+                crate::core::remote::set_remote_attrs(
+                    &file.remote,
+                    original_metadata[&file.local_path],
+                )
+                .await?;
             }
             (runner.inc_callback())(file.size);
         }
     } else {
-        serve_upload_fresh_files(&mut pool, plan.files, &runner, args, args.is_force()).await?;
+        serve_upload_fresh_files(
+            &mut pool,
+            plan.files,
+            &runner,
+            args,
+            args.is_force(),
+            &original_metadata,
+        )
+        .await?;
     }
     if args.is_preserve() {
         preserve_directories(&plan.directories, true, args.is_sync()).await?;
@@ -275,6 +306,7 @@ async fn serve_upload_fresh_files(
     runner: &ProgressRunner,
     args: &Commands,
     allow_overwrite: bool,
+    original_metadata: &UploadMetadata,
 ) -> Result<()> {
     if args.is_sync() && (args.is_preserve() || args.is_verify()) {
         bail!("--sync cannot guarantee durable remote namespace publication with --preserve or --verify uploads; refusing before transfer");
@@ -344,8 +376,11 @@ async fn serve_upload_fresh_files(
                 }
             }
             if args.is_preserve() {
-                crate::core::remote::preserve_remote_attrs(&file.local_path, stage.remote())
-                    .await?;
+                crate::core::remote::set_remote_attrs(
+                    stage.remote(),
+                    original_metadata[&file.local_path],
+                )
+                .await?;
             }
         }
         for stage in &mut stages {
@@ -377,6 +412,7 @@ pub(super) async fn handle_serve_download(
             "serve: download --resume/--strict/--append not yet supported, fallback to legacy",
         ));
     }
+    crate::core::interrupt::check()?;
     if args.is_dry_run() {
         return Err(fallback_error("serve: dry-run fallback to legacy"));
     }
@@ -392,6 +428,7 @@ pub(super) async fn handle_serve_download(
         ServeClientPool::connect_with_caps(ssh_target, args.protocol_caps(), parallel).await
     }
     .map_err(|error| fallback_error(format!("serve unavailable: {error}")))?;
+    crate::core::interrupt::check()?;
     let runner = ProgressRunner::new(
         plan.total_size,
         progress_mode(args),

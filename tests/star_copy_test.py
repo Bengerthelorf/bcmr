@@ -243,13 +243,12 @@ os.execv('/bin/sh', ['sh', '-c', ' '.join(words)])
         self.assert_files(self.dest, {"host-one.txt": "host one", "host-two.txt": "host two"})
 
     # Fails if remote dispatch quietly drops a source from the local half.
-    def test_mixed_local_and_remote_sources_rejected_before_writes(self):
+    def test_mixed_local_and_remote_sources_keep_both_halves(self):
         source = self.put(self.local, "local.txt", "local")
         self.put(self.home, "remote.txt", "remote")
         result = self.run_bcmr("copy", source, "fixture:remote*", self.dest)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertRegex(result.stderr.lower(), r"mixed|mixing|local.*remote|remote.*local")
-        self.assert_files(self.dest, {})
+        self.assert_ok(result)
+        self.assert_files(self.dest, {"local.txt": "local", "remote.txt": "remote"})
 
     # Fails if move deletes nonmatching sources or fails to remove copied matches.
     def test_remote_move_removes_only_matched_sources_after_success(self):

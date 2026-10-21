@@ -1,87 +1,50 @@
 use super::ops::remote_file_hash;
-use super::ssh_cmd::{shell_escape, ssh_command, ssh_error_message};
+use super::ssh_cmd::{shell_escape, ssh_command};
 use super::RemotePath;
 use crate::core::error::BcmrError;
 use crate::core::file_metadata::PortableFileMetadata;
 use std::path::Path;
 
-pub async fn preserve_remote_attrs(local_src: &Path, remote: &RemotePath) -> Result<(), BcmrError> {
+pub(crate) fn local_attrs(local_src: &Path) -> Result<PortableFileMetadata, BcmrError> {
     let meta = local_src.metadata()?;
-
-    let mode = {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            meta.permissions().mode() & 0o777
-        }
-        #[cfg(not(unix))]
-        {
-            if meta.is_dir() {
-                0o755u32
-            } else {
-                0o644u32
-            }
-        }
-    };
-
-    let mtime_secs = {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            meta.mtime()
-        }
-        #[cfg(not(unix))]
-        {
-            meta.modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|duration| duration.as_secs() as i64)
-                .unwrap_or(0)
-        }
-    };
-
-    let atime_secs = {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            meta.atime()
-        }
-        #[cfg(not(unix))]
-        {
-            mtime_secs
-        }
-    };
-
-    let mtime_ts = unix_to_touch_ts(mtime_secs);
-    let atime_ts = unix_to_touch_ts(atime_secs);
-    let path = if remote.path.starts_with('/') {
-        remote.path.clone()
-    } else {
-        format!("./{}", remote.path)
-    };
-    let cmd = format!(
-        "TZ=UTC touch -m -t '{}' '{}' && TZ=UTC touch -a -t '{}' '{}' && chmod {:o} '{}'",
-        mtime_ts,
-        shell_escape(&path),
-        atime_ts,
-        shell_escape(&path),
-        mode,
-        shell_escape(&path)
-    );
-    let attr_out = ssh_command(&remote.ssh_target()).arg(cmd).output().await?;
-    if !attr_out.status.success() {
-        let stderr = String::from_utf8_lossy(&attr_out.stderr);
-        return Err(BcmrError::InvalidInput(ssh_error_message(
-            &stderr,
-            &format!("Failed to set attributes on '{}'", remote),
-        )));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(PortableFileMetadata {
+            atime_seconds: meta.atime(),
+            atime_nanoseconds: meta.atime_nsec() as u32,
+            mtime_seconds: meta.mtime(),
+            mtime_nanoseconds: meta.mtime_nsec() as u32,
+            mode: meta.mode() & 0o777,
+        })
     }
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        let atime = filetime::FileTime::from_last_access_time(&meta);
+        let mtime = filetime::FileTime::from_last_modification_time(&meta);
+        Ok(PortableFileMetadata {
+            atime_seconds: atime.unix_seconds(),
+            atime_nanoseconds: atime.nanoseconds(),
+            mtime_seconds: mtime.unix_seconds(),
+            mtime_nanoseconds: mtime.nanoseconds(),
+            mode: if meta.is_dir() { 0o755 } else { 0o644 },
+        })
+    }
+}
+
+pub async fn preserve_remote_attrs(local_src: &Path, remote: &RemotePath) -> Result<(), BcmrError> {
+    set_remote_attrs(remote, local_attrs(local_src)?).await
 }
 
 pub(crate) async fn get_remote_attrs(
     remote: &RemotePath,
 ) -> Result<PortableFileMetadata, BcmrError> {
+    if super::backend::is_sftp(&remote.ssh_target()).await? {
+        if let Some(metadata) = super::sftp_ops::captured_metadata(remote) {
+            return Ok(metadata);
+        }
+        return super::sftp_ops::portable(&super::sftp_ops::attrs(remote, true).await?);
+    }
     let path = if remote.path.starts_with('/') {
         remote.path.clone()
     } else {
@@ -153,6 +116,40 @@ fn apply_local_attrs(
         std::fs::set_permissions(local_path, std::fs::Permissions::from_mode(_mode & 0o777))?;
     }
 
+    Ok(())
+}
+
+#[allow(dead_code)] // Used by the command binary composite transfer engine.
+pub(crate) async fn set_remote_attrs(
+    remote: &RemotePath,
+    metadata: PortableFileMetadata,
+) -> Result<(), BcmrError> {
+    if super::backend::is_sftp(&remote.ssh_target()).await? {
+        return super::backend::session(&remote.ssh_target())
+            .await?
+            .lock()
+            .await
+            .setstat(&remote.path, &super::sftp_ops::wire_attrs(metadata)?)
+            .await;
+    }
+    let path = if remote.path.starts_with('/') {
+        remote.path.clone()
+    } else {
+        format!("./{}", remote.path)
+    };
+    super::ssh_cmd::metadata_command(
+        &remote.ssh_target(),
+        format!(
+            "TZ=UTC touch -m -t '{}' '{}' && TZ=UTC touch -a -t '{}' '{}' && chmod {:o} '{}'",
+            unix_to_touch_ts(metadata.mtime_seconds),
+            shell_escape(&path),
+            unix_to_touch_ts(metadata.atime_seconds),
+            shell_escape(&path),
+            metadata.mode & 0o777,
+            shell_escape(&path)
+        ),
+    )
+    .await?;
     Ok(())
 }
 

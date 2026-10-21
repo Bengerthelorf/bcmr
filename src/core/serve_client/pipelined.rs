@@ -272,9 +272,12 @@ impl ServeClient {
                                 break 'files_loop;
                             }
                         };
-                        if let Err(e) = dst.write_all(&decoded) {
-                            recv_err = Some(BcmrError::InvalidInput(format!("write dst: {e}")));
-                            break 'files_loop;
+                        for chunk in decoded.chunks(crate::core::bandwidth::chunk_size()) {
+                            crate::core::bandwidth::acquire(chunk.len()).await;
+                            if let Err(e) = dst.write_all(chunk) {
+                                recv_err = Some(BcmrError::InvalidInput(format!("write dst: {e}")));
+                                break 'files_loop;
+                            }
                         }
                         received = next_received;
                         on_chunk(n_bytes);

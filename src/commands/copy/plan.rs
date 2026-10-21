@@ -58,7 +58,7 @@ fn scanned_symlink_kind(path: &Path, _metadata: &std::fs::Metadata) -> SymlinkKi
 }
 
 #[cfg(any(windows, test))]
-fn windows_symlink_kind_from_attributes(attributes: u32) -> SymlinkKind {
+pub(crate) fn windows_symlink_kind_from_attributes(attributes: u32) -> SymlinkKind {
     const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
     if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
         SymlinkKind::Directory

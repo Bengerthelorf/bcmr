@@ -139,13 +139,21 @@ async fn main() -> std::process::ExitCode {
                     eprintln!("bcmr: failed to emit JSON error: {write_error}");
                 }
             }
-            std::process::ExitCode::from(2)
+            std::process::ExitCode::from(if interrupted_error(&error) { 130 } else { 2 })
         }
         Err(error) => {
             eprintln!("Error: {error:#}");
-            std::process::ExitCode::FAILURE
+            if interrupted_error(&error) {
+                std::process::ExitCode::from(130)
+            } else {
+                std::process::ExitCode::FAILURE
+            }
         }
     }
+}
+
+fn interrupted_error(error: &anyhow::Error) -> bool {
+    matches!(error.downcast_ref::<core::error::BcmrError>(),Some(core::error::BcmrError::Io(error)) if error.kind()==std::io::ErrorKind::Interrupted)
 }
 
 async fn run() -> Result<()> {
@@ -155,27 +163,53 @@ async fn run() -> Result<()> {
     }
 
     let mut cli = cli::parse_args();
+    core::ssh_options::configure(core::ssh_options::SshOptions {
+        port: cli.ssh_port,
+        identities: cli.ssh_identity.clone(),
+        config: cli.ssh_config.clone(),
+        jump: cli.ssh_jump.clone(),
+    });
 
     if let Some(ref path) = cli.config {
         std::env::set_var("BCMR_CONFIG", path);
     }
 
+    core::remote::backend::configure(&cli.remote_backend);
+    core::bandwidth::configure(
+        cli.command
+            .copy_move_args()
+            .and_then(|args| args.bandwidth_limit),
+    );
     set_json_mode(cli.json || cli._bg.is_some());
+
+    let _interrupt_guard = if matches!(cli.command, Commands::Copy { .. } | Commands::Move { .. }) {
+        Some(core::interrupt::install().await?)
+    } else {
+        None
+    };
+    core::interrupt::check()?;
+
+    validate_explicit_endpoints(&cli.command)?;
+    expand_path_bookmarks(&mut cli.command)?;
+    validate_explicit_endpoints(&cli.command)?;
 
     if maybe_detach(&cli)? {
         return Ok(());
     }
 
-    expand_path_bookmarks(&mut cli.command)?;
     if is_json_mode() {
         validate_noninteractive_confirmation(&cli)?;
     }
     app::source_patterns::expand_copy_move_sources(&mut cli.command).await?;
+    core::interrupt::check()?;
 
     let update_rx = background_update_check(&cli.command);
 
     match &cli.command {
-        Commands::Copy { .. } => handle_copy_command(&cli.command).await?,
+        Commands::Copy { .. } => {
+            handle_copy_command(&cli.command).await?;
+            core::interrupt::check()?;
+        }
         Commands::Move { .. } => handle_move_command(&cli.command).await?,
         Commands::Remove { .. } => handle_remove_command(&cli.command).await?,
         Commands::Check { .. } => {
@@ -295,6 +329,34 @@ async fn run() -> Result<()> {
         show_update_hint(update_rx);
     }
 
+    Ok(())
+}
+
+fn validate_explicit_endpoints(command: &Commands) -> Result<()> {
+    let validate = |path: &std::path::Path| -> Result<()> {
+        core::remote::validate_explicit_remote_path(&path.to_string_lossy())?;
+        Ok(())
+    };
+    match command {
+        Commands::Copy { args, .. } | Commands::Move { args, .. } => {
+            for path in args.paths.iter().chain(args.to.iter()) {
+                validate(path)?;
+            }
+        }
+        Commands::Check { paths, .. } | Commands::Remove { paths, .. } => {
+            for path in paths {
+                validate(path)?;
+            }
+        }
+        Commands::Ls { path }
+        | Commands::Stat { path }
+        | Commands::Du { path }
+        | Commands::Hash { path } => validate(path)?,
+        Commands::CompleteRemote { partial } => {
+            core::remote::validate_explicit_remote_path(partial)?
+        }
+        _ => {}
+    }
     Ok(())
 }
 

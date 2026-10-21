@@ -87,6 +87,18 @@ fn source_basename(src: &std::path::Path) -> Option<String> {
 }
 
 fn check_basename_collisions(sources: &[std::path::PathBuf], force: bool) -> Result<()> {
+    check_source_collisions(sources, force, false)
+}
+
+fn check_move_collisions(sources: &[std::path::PathBuf]) -> Result<()> {
+    check_source_collisions(sources, false, true)
+}
+
+fn check_source_collisions(
+    sources: &[std::path::PathBuf],
+    force: bool,
+    moving: bool,
+) -> Result<()> {
     use std::collections::BTreeMap;
     if sources.len() < 2 {
         return Ok(());
@@ -115,7 +127,11 @@ fn check_basename_collisions(sources: &[std::path::PathBuf], force: bool) -> Res
         eprintln!("bcmr: -f set, proceeding (last writer wins).");
         return Ok(());
     }
-    msg.push_str("Pass -f/--force to allow the last-writer-wins overwrite, or copy each source to a distinct destination.");
+    if moving {
+        msg.push_str("Move sources must have distinct destination names, including with --force: cleanup cannot remove a source whose bytes were replaced by another source.");
+    } else {
+        msg.push_str("Pass -f/--force to allow the last-writer-wins overwrite, or copy each source to a distinct destination.");
+    }
     bail!("{}", msg);
 }
 
@@ -151,6 +167,7 @@ pub(crate) async fn handle_copy_command(args: &Commands) -> Result<()> {
             eprintln!("→ copying to {}", dest.display());
         }
         if let Err(e) = handle_copy_one(args, Some(dest)).await {
+            crate::core::interrupt::check()?;
             failures += 1;
             eprintln!("Error copying to {}: {}", dest.display(), e);
         }
@@ -181,6 +198,7 @@ fn select_transfer_sources(
 
 async fn handle_copy_one(args: &Commands, dest_override: Option<&std::path::Path>) -> Result<()> {
     use crate::core::remote::parse_remote_path;
+    crate::core::interrupt::check()?;
 
     let excludes = args.compile_excludes()?;
     let (sources, dest_buf): (&[std::path::PathBuf], std::path::PathBuf) = match dest_override {
@@ -306,6 +324,7 @@ async fn handle_copy_one(args: &Commands, dest_override: Option<&std::path::Path
             return Ok(());
         }
 
+        crate::core::interrupt::check()?;
         let runner = resume_or_new_runner(
             early,
             args,
@@ -384,6 +403,14 @@ async fn handle_copy_one(args: &Commands, dest_override: Option<&std::path::Path
 }
 
 pub(crate) async fn handle_move_command(args: &Commands) -> Result<()> {
+    let terminal = crate::ui::json::defer_move_result();
+    handle_move_command_inner(args).await?;
+    crate::core::interrupt::check()?;
+    terminal.finish_success()?;
+    Ok(())
+}
+
+async fn handle_move_command_inner(args: &Commands) -> Result<()> {
     let cm = args
         .copy_move_args()
         .ok_or_else(|| anyhow::anyhow!("move requires copy/move args"))?;
@@ -402,6 +429,7 @@ pub(crate) async fn handle_move_command(args: &Commands) -> Result<()> {
     if sources.is_empty() {
         return Ok(());
     }
+    check_move_collisions(&sources)?;
     let cleanup = if args.is_dry_run() {
         None
     } else {
@@ -414,6 +442,7 @@ pub(crate) async fn handle_move_command(args: &Commands) -> Result<()> {
             eprintln!("→ moving to {}", dest.display());
         }
         if let Err(e) = handle_copy_one(args, Some(dest)).await {
+            crate::core::interrupt::check()?;
             failures += 1;
             eprintln!("Error moving to {}: {}", dest.display(), e);
         }
@@ -447,6 +476,7 @@ async fn handle_move_one(args: &Commands) -> Result<()> {
     if sources.is_empty() {
         return Ok(());
     }
+    check_move_collisions(sources)?;
 
     for src in sources {
         validate_source_kind(src, true)?;
@@ -573,8 +603,6 @@ async fn handle_remote_move(
 ) -> Result<()> {
     use crate::ui::display::{print_dry_run, ActionType};
 
-    let remote_destination = crate::core::remote::parse_remote_path(&dest.to_string_lossy());
-    crate::commands::remote_copy::reject_remote_to_remote(sources, &remote_destination)?;
     let cleanup = if args.is_dry_run() {
         None
     } else {
@@ -683,6 +711,7 @@ pub(crate) async fn handle_remove_command(args: &Commands) -> Result<()> {
         let file_count = files_to_remove.iter().filter(|f| !f.is_dir).count();
         let dir_count = files_to_remove.iter().filter(|f| f.is_dir).count();
 
+        crate::core::interrupt::check()?;
         let runner = resume_or_new_runner(
             early,
             args,

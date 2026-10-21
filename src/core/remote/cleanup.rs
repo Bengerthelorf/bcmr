@@ -110,9 +110,11 @@ impl RemoteCleanupPlan {
         sources: &[RemotePath],
         excludes: &[regex::Regex],
     ) -> Result<Self, BcmrError> {
+        crate::core::interrupt::check()?;
         let mut selected = Vec::new();
         let mut seen = HashSet::new();
         for source in sources {
+            crate::core::interrupt::check()?;
             let mut source = source.clone();
             // Excluded roots are no-ops, including inaccessible ones.
             if crate::core::traversal::is_remote_entry_excluded(&source.path, "", excludes) {
@@ -148,6 +150,10 @@ impl RemoteCleanupPlan {
 
     /// Validate the entire captured selection before deleting any entry.
     pub async fn validate(&self) -> Result<(), BcmrError> {
+        crate::core::interrupt::read_only(self.validate_captured()).await
+    }
+
+    async fn validate_captured(&self) -> Result<(), BcmrError> {
         let sources = self
             .entries
             .iter()
@@ -155,6 +161,7 @@ impl RemoteCleanupPlan {
             .collect::<Vec<_>>();
         let observed = snapshots(&sources, "bcmr-cleanup-validate").await?;
         for (expected, actual) in self.entries.iter().zip(observed.iter()) {
+            crate::core::interrupt::check()?;
             if expected.kind != actual.kind
                 || expected.parent_identity != actual.parent_identity
                 || expected.comparison() != actual.comparison()
@@ -179,6 +186,7 @@ impl RemoteCleanupPlan {
             .rev()
             .filter(|(_, entry)| entry.kind != b'd')
         {
+            crate::core::interrupt::check()?;
             let key = (entry.source.ssh_target(), entry.inode_identity());
             if let Some(next) = next_by_inode.insert(key, index) {
                 let alias = &self.entries[next];
@@ -211,8 +219,10 @@ impl RemoteCleanupPlan {
             }
         }
         for entry in self.entries.iter().rev().filter(|entry| entry.kind == b'd') {
+            crate::core::interrupt::check()?;
             remove_directory(entry).await?;
         }
+        crate::core::interrupt::check()?;
         Ok(())
     }
 }
@@ -270,6 +280,7 @@ async fn snapshots(sources: &[RemotePath], label: &str) -> Result<Vec<Snapshot>,
     let script = format!("{STAT_FUNCTIONS}\n{SNAPSHOT}");
     let mut start = 0;
     while start < sources.len() {
+        crate::core::interrupt::check()?;
         let target = sources[start].ssh_target();
         let mut end = start + 1;
         while end < sources.len() && end - start < 64 && sources[end].ssh_target() == target {
@@ -281,6 +292,7 @@ async fn snapshots(sources: &[RemotePath], label: &str) -> Result<Vec<Snapshot>,
             .map(|source| source.path.as_str())
             .collect::<Vec<_>>();
         let output = ssh_command(&target)
+            .kill_on_drop(true)
             .arg(shell_command(&script, label, &arguments))
             .stdin(std::process::Stdio::null())
             .output()
@@ -362,6 +374,19 @@ quarantine_id=$(entry_id "./$quarantine") || exit 1
 printf 'quarantine\000%s\000' "$quarantine"
 payload="./$quarantine/$name"
 [ ! -L "./$quarantine" ] && [ -d "./$quarantine" ] && [ "$(entry_id "./$quarantine")" = "$quarantine_id" ] || exit 1
+restore_or_retain() {
+    # Restore a regular replacement using exact no-replace link(2). If its
+    # namespace is occupied, or this is a directory/link with uncertain portable
+    # restore semantics, retain the quarantine and report the recovery location.
+    if [ ! -L "./$quarantine" ] && [ -d "./$quarantine" ] && [ "$(entry_id "./$quarantine")" = "$quarantine_id" ] && [ ! -L "$payload" ] && [ -f "$payload" ] && link "$payload" "./$name" 2>/dev/null; then
+        rm -f "$payload" || exit 1
+        rmdir "./$quarantine" || exit 1
+        printf 'restored\000'
+    else
+        printf 'retained\000'
+    fi
+}
+trap 'trap - HUP INT TERM PIPE; restore_or_retain; exit 1' HUP INT TERM PIPE
 # The final operand is a new private directory, never a user-controlled target
 # that mv can reinterpret as a container. The original parent is our pinned cwd.
 if ! mv "./$name" "./$quarantine/"; then
@@ -373,20 +398,25 @@ current_kind=$(kind_of "$payload") || current_kind=unknown
 current_metadata=$(fingerprint "$payload") || current_metadata=
 current_stable=${current_metadata%|*}
 if [ "$current_kind" != "$expected_kind" ] || [ "$current_stable" != "$expected_stable" ]; then
-    # Restore a regular replacement using exact no-replace link(2). If its
-    # namespace is occupied, or this is a directory/link with uncertain portable
-    # restore semantics, retain the quarantine and report the recovery location.
-    if [ ! -L "$payload" ] && [ -f "$payload" ] && link "$payload" "./$name" 2>/dev/null; then
-        rm -f "$payload" || exit 1
-        rmdir "./$quarantine" || exit 1
-        printf 'restored\000'
-    else
-        printf 'retained\000'
-    fi
+    restore_or_retain
     printf '%s\n' 'source changed during quarantine; uncopied data was preserved' >&2
     exit 1
 fi
+printf 'ready\000'
+IFS= read -r decision || decision=abort
+if [ "$decision" != commit ]; then
+    restore_or_retain
+    printf '%s\n' 'source cleanup was not committed; uncopied data was preserved' >&2
+    exit 1
+fi
 [ ! -L "./$quarantine" ] && [ -d "./$quarantine" ] && [ "$(entry_id "./$quarantine")" = "$quarantine_id" ] || exit 1
+current_kind=$(kind_of "$payload") || current_kind=unknown
+current_metadata=$(fingerprint "$payload") || current_metadata=
+if [ "$current_kind" != "$expected_kind" ] || [ "${current_metadata%|*}" != "$expected_stable" ]; then
+    restore_or_retain
+    printf '%s\n' 'source changed while awaiting cleanup commit; uncopied data was preserved' >&2
+    exit 1
+fi
 rm -f "$payload" || exit 1
 rmdir "./$quarantine" || exit 1
 printf 'removed\000'
@@ -414,6 +444,7 @@ async fn remove_leaf(
     expected_metadata: &str,
     next: Option<&Snapshot>,
 ) -> Result<Option<String>, BcmrError> {
+    crate::core::interrupt::check()?;
     let (parent, name) = entry.parent_and_name();
     let script = format!("{STAT_FUNCTIONS}\n{REMOVE_LEAF}");
     let kind = (entry.kind as char).to_string();
@@ -436,14 +467,10 @@ async fn remove_leaf(
             next.stable_after_rename(),
         ]);
     }
-    let output = ssh_command(&entry.source.ssh_target())
-        .arg(shell_command(&script, "bcmr-cleanup-leaf", &arguments))
-        .stdin(std::process::Stdio::null())
-        .output()
-        .await?;
+    let (output, decision_error) = guarded_leaf_command(entry, &script, &arguments).await?;
     let fields = output.stdout.split(|byte| *byte == 0).collect::<Vec<_>>();
     let removed = fields.len() >= 3 && fields[0] == b"quarantine" && fields[2] == b"removed";
-    if output.status.success() && removed {
+    if output.status.success() && removed && decision_error.is_none() {
         match next {
             None if fields.len() == 4 && fields[3].is_empty() => return Ok(None),
             Some(next)
@@ -483,12 +510,110 @@ async fn remove_leaf(
     } else {
         format!("The source was preserved, or recovery data may remain under {:?}/.bcmr.move.* if the SSH response was interrupted.", entry.physical_parent)
     };
-    Err(BcmrError::InvalidInput(format!(
-        "Remote move cleanup failed for '{}': {}. {}",
+    let message = format!(
+        "Remote move cleanup failed for '{}': {}. {} {}",
         entry.source,
         String::from_utf8_lossy(&output.stderr).trim(),
+        decision_error
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
         recovery_message,
-    )))
+    );
+    if matches!(decision_error, Some(BcmrError::Io(ref error)) if error.kind() == std::io::ErrorKind::Interrupted)
+    {
+        Err(BcmrError::Io(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            message,
+        )))
+    } else {
+        Err(BcmrError::InvalidInput(message))
+    }
+}
+
+async fn guarded_leaf_command(
+    entry: &Snapshot,
+    script: &str,
+    arguments: &[&str],
+) -> Result<(std::process::Output, Option<BcmrError>), BcmrError> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Keep the source shell alive through its restore/retain decision. Only
+    // witness reads are cancellable while the shell waits at the commit gate.
+    let mut child = ssh_command(&entry.source.ssh_target())
+        .arg(shell_command(script, "bcmr-cleanup-leaf", arguments))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    let mut stdin = child.stdin.take().expect("piped cleanup stdin");
+    let mut stdout = child.stdout.take().expect("piped cleanup stdout");
+    let stderr = child.stderr.take().expect("piped cleanup stderr");
+    let stderr_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        let _ = stderr.take(64 * 1024).read_to_end(&mut bytes).await;
+        bytes
+    });
+    let mut prefix = Vec::new();
+    let mut fields = 0;
+    let prefix_result: Result<(), std::io::Error> = async {
+        while fields < 3 && prefix.len() <= 256 {
+            let mut byte = [0];
+            if stdout.read(&mut byte).await? == 0 {
+                break;
+            }
+            prefix.push(byte[0]);
+            fields += usize::from(byte[0] == 0);
+        }
+        Ok(())
+    }
+    .await;
+    let ready = prefix_result.is_ok()
+        && prefix.starts_with(b"quarantine\0")
+        && prefix.ends_with(b"\0ready\0")
+        && prefix.len() <= 256;
+    let mut decision_error = if ready {
+        prefix.truncate(prefix.len() - b"ready\0".len());
+        crate::core::interrupt::read_only(super::move_delivery::validate_ssh(&entry.source))
+            .await
+            .err()
+    } else {
+        Some(BcmrError::InvalidInput(
+            "remote cleanup did not reach its bounded commit gate".into(),
+        ))
+    };
+    if decision_error.is_none() {
+        decision_error = crate::core::interrupt::check().err();
+    }
+    let decision: &[u8] = if decision_error.is_none() {
+        b"commit\n"
+    } else {
+        b"abort\n"
+    };
+    if let Err(error) = stdin.write_all(decision).await {
+        if decision_error.is_none() {
+            decision_error = Some(error.into());
+        }
+    }
+    drop(stdin); // EOF is an abort if no complete decision reached the shell.
+    let mut remainder = Vec::new();
+    let read_result = stdout.take(64 * 1024 + 1).read_to_end(&mut remainder).await;
+    if (read_result.is_err() || remainder.len() > 64 * 1024) && decision_error.is_none() {
+        decision_error = Some(BcmrError::InvalidInput(
+            "invalid cleanup response after decision".into(),
+        ));
+    }
+    prefix.extend_from_slice(&remainder);
+    let status = child.wait().await?;
+    let stderr = stderr_task.await.unwrap_or_default();
+    Ok((
+        std::process::Output {
+            status,
+            stdout: prefix,
+            stderr,
+        },
+        decision_error,
+    ))
 }
 
 const REMOVE_DIRECTORY: &str = r#"
@@ -513,6 +638,7 @@ fi
 "#;
 
 async fn remove_directory(entry: &Snapshot) -> Result<(), BcmrError> {
+    crate::core::interrupt::check()?;
     let (parent, name) = entry.parent_and_name();
     let script = format!("{STAT_FUNCTIONS}\n{REMOVE_DIRECTORY}");
     let arguments = [parent, name, &entry.parent_identity, entry.comparison()];

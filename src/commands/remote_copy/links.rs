@@ -3,9 +3,12 @@
 use super::{preserve_directories, progress_mode, transfer_options_from_cli, DirectoryTransfer};
 use crate::cli::Commands;
 use crate::commands::copy::{create_symlink_replacing, SymlinkKind};
+use crate::core::error::BcmrError;
+use crate::core::interrupt;
+use crate::core::remote::move_delivery::{self, Content, Target};
 use crate::core::remote::{self, parse_remote_path, RemotePath};
 use crate::core::traversal;
-use crate::ui::runner::ProgressRunner;
+use crate::ui::runner::{ProgressCancellation, ProgressRunner};
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 
@@ -21,6 +24,67 @@ enum Leaf {
         target: String,
         kind: SymlinkKind,
     },
+}
+
+struct UiInterruptTask(tokio::task::JoinHandle<()>);
+
+impl Drop for UiInterruptTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn check_cancel(cancel: &ProgressCancellation) -> Result<()> {
+    if cancel.is_cancelled() {
+        interrupt::request();
+    }
+    interrupt::check()?;
+    Ok(())
+}
+
+/// Fingerprint the actual completed file, including a destination reused by
+/// resume. Preserve -p access time through the same descriptor used for hashing.
+async fn local_delivery_hash(path: &Path, preserve_atime: bool) -> Result<String, BcmrError> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+
+        interrupt::check()?;
+        let mut file = move_delivery::open_local_witness(&path, preserve_atime)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(BcmrError::InvalidInput(format!(
+                "delivered move payload '{}' is not a regular file",
+                path.display()
+            )));
+        }
+        let result = (|| {
+            let mut hasher = blake3::Hasher::new();
+            let mut buffer = [0; 64 * 1024];
+            loop {
+                interrupt::check()?;
+                let count = file.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..count]);
+            }
+            Ok::<_, BcmrError>(hasher.finalize().to_hex().to_string())
+        })();
+        let restore = if preserve_atime {
+            filetime::set_file_handle_times(
+                &file,
+                Some(filetime::FileTime::from_last_access_time(&metadata)),
+                None,
+            )
+        } else {
+            Ok(())
+        };
+        let hash = result?;
+        restore?;
+        Ok(hash)
+    })
+    .await?
 }
 
 fn remote_child(root: &RemotePath, relative: &str) -> RemotePath {
@@ -53,17 +117,13 @@ fn source_relative(root: &Path, path: &Path) -> Result<String> {
 }
 
 #[cfg(windows)]
-fn local_link_kind(metadata: &std::fs::Metadata) -> SymlinkKind {
+pub(super) fn local_link_kind(metadata: &std::fs::Metadata) -> SymlinkKind {
     use std::os::windows::fs::MetadataExt;
-    if metadata.file_attributes() & 0x10 != 0 {
-        SymlinkKind::Directory
-    } else {
-        SymlinkKind::File
-    }
+    crate::commands::copy::windows_symlink_kind_from_attributes(metadata.file_attributes())
 }
 
 #[cfg(not(windows))]
-fn local_link_kind(_metadata: &std::fs::Metadata) -> SymlinkKind {
+pub(super) fn local_link_kind(_metadata: &std::fs::Metadata) -> SymlinkKind {
     SymlinkKind::File
 }
 
@@ -75,8 +135,10 @@ pub(super) async fn handle_link_copy(
     dest: &Path,
     excludes: &[regex::Regex],
 ) -> Result<()> {
+    interrupt::check()?;
     let remote_dest = parse_remote_path(&dest.to_string_lossy());
     let upload = remote_dest.is_some();
+    let moving = matches!(args, Commands::Move { .. });
     let mut directories = Vec::<DirectoryTransfer>::new();
     let mut leaves = Vec::<Leaf>::new();
 
@@ -87,11 +149,13 @@ pub(super) async fn handle_link_copy(
             .collect::<Vec<_>>();
         let multi = selected.len() > 1;
         for source in selected {
+            interrupt::check()?;
             if parse_remote_path(&source.to_string_lossy()).is_some() {
                 bail!("remote-to-remote transfers are not supported");
             }
             let target = super::resolve_upload_remote(source, destination, multi);
             for entry in traversal::copy_walk(source, args.is_recursive(), 0, true, excludes) {
+                interrupt::check()?;
                 let entry = entry?;
                 let path = entry.path();
                 let relative = source_relative(source, path)?;
@@ -135,9 +199,11 @@ pub(super) async fn handle_link_copy(
         }
     } else {
         for source in sources {
+            interrupt::check()?;
             let remote = parse_remote_path(&source.to_string_lossy())
                 .ok_or_else(|| anyhow::anyhow!("mixed local/remote sources are not supported"))?;
-            let inventory = remote::inventory_remote(&remote, true, excludes).await?;
+            let inventory =
+                interrupt::read_only(remote::inventory_remote(&remote, true, excludes)).await?;
             let Some(root) = inventory.first() else {
                 continue;
             };
@@ -149,6 +215,7 @@ pub(super) async fn handle_link_copy(
             }
             let target = super::resolve_download_local(&remote, dest)?;
             for entry in inventory {
+                interrupt::check()?;
                 let local = local_child(&target, &entry.path)?;
                 let remote = remote_child(&remote, &entry.path);
                 if let Some(link_target) = entry.link_target {
@@ -181,6 +248,60 @@ pub(super) async fn handle_link_copy(
         }
     }
 
+    if moving && args.is_preserve() {
+        use super::endpoint::Endpoint;
+        for directory in &directories {
+            let source = if upload {
+                Endpoint::Local(directory.local_path.clone())
+            } else {
+                Endpoint::Ssh(directory.remote.clone())
+            };
+            let mode = source.metadata().await?.mode;
+            if mode & 0o100 == 0 {
+                bail!("cannot validate final move destination with preserved directory permissions {mode:o} for '{}'; use copy -p and review source removal separately",source.display());
+            }
+        }
+        for leaf in &leaves {
+            if let Leaf::File { local, remote, .. } = leaf {
+                let source = if upload {
+                    Endpoint::Local(local.clone())
+                } else {
+                    Endpoint::Ssh(remote.clone())
+                };
+                let mode = source.metadata().await?.mode;
+                if mode & 0o400 == 0 {
+                    bail!("cannot validate final move destination with preserved permissions {mode:o} for '{}'; use copy -p and review source removal separately",source.display());
+                }
+            }
+        }
+    }
+    for leaf in &leaves {
+        if let Leaf::Link {
+            local,
+            remote,
+            target,
+            kind,
+        } = leaf
+        {
+            use super::endpoint::Endpoint;
+            let local = Endpoint::Local(local.clone());
+            let remote = Endpoint::Ssh(remote.clone());
+            let (source, destination) = if upload {
+                (local, remote)
+            } else {
+                (remote, local)
+            };
+            super::composite::validate_link_plan(
+                source,
+                destination,
+                target.clone(),
+                *kind,
+                moving,
+            )
+            .await?;
+        }
+    }
+    interrupt::check()?;
     if args.is_dry_run() {
         for directory in &directories {
             println!(
@@ -246,16 +367,22 @@ pub(super) async fn handle_link_copy(
             .ok_or_else(|| anyhow::anyhow!("selected source size exceeds u64")),
         Leaf::Link { .. } => Ok(total),
     })?;
-    let runner = ProgressRunner::new(
+    let runner = ProgressRunner::new_without_signal_handler(
         total,
         progress_mode(args),
         args.is_quiet(),
         crate::config::is_json_mode(),
-        crate::core::cleanup::cleanup_partial_files,
     )?;
     runner.set_operation_type(if upload { "Uploading" } else { "Downloading" });
     runner.set_verify_mode(args.is_verify());
+    let cancel = runner.cancellation_handle();
+    let ui_cancel = cancel.clone();
+    let _ui_interrupt = UiInterruptTask(tokio::spawn(async move {
+        ui_cancel.cancelled().await;
+        interrupt::request();
+    }));
     let result = async {
+        check_cancel(&cancel)?;
         if upload {
             remote::ensure_remote_directories(
                 &directories
@@ -266,6 +393,7 @@ pub(super) async fn handle_link_copy(
             .await?;
         } else {
             for directory in &directories {
+                check_cancel(&cancel)?;
                 if args.is_sync() {
                     crate::core::io::create_dir_all_durable_async(&directory.local_path).await?;
                 } else {
@@ -275,6 +403,7 @@ pub(super) async fn handle_link_copy(
         }
         let options = transfer_options_from_cli(args);
         for leaf in leaves {
+            check_cancel(&cancel)?;
             if !upload && args.is_sync() {
                 let local = match &leaf {
                     Leaf::File { local, .. } | Leaf::Link { local, .. } => local,
@@ -302,8 +431,29 @@ pub(super) async fn handle_link_copy(
                     };
                     if upload {
                         remote::upload_file(&local, &remote, callbacks, &options).await?;
+                        if moving {
+                            // Source ctime/identity remains guarded by the
+                            // captured local manifest. Validate these expected
+                            // bytes at the remote destination after quarantine.
+                            let hash = local_delivery_hash(&local, false).await?;
+                            move_delivery::remember_local(
+                                &local,
+                                Target::Remote(remote),
+                                Content::File(hash),
+                                args.is_preserve(),
+                            )?;
+                        }
                     } else {
                         remote::download_file(&remote, &local, callbacks, size, &options).await?;
+                        if moving {
+                            let hash = local_delivery_hash(&local, args.is_preserve()).await?;
+                            move_delivery::remember(
+                                &remote,
+                                Target::Local(local),
+                                Content::File(hash),
+                                args.is_preserve(),
+                            );
+                        }
                     }
                 }
                 Leaf::Link {
@@ -323,6 +473,14 @@ pub(super) async fn handle_link_copy(
                             }
                         }
                         remote::create_remote_symlink(&remote, &target, args.is_force()).await?;
+                        if moving {
+                            move_delivery::remember_local(
+                                &local,
+                                Target::Remote(remote),
+                                Content::Link(target.into_bytes()),
+                                args.is_preserve(),
+                            )?;
+                        }
                     } else {
                         if !args.is_sync() {
                             if let Some(parent) = local.parent() {
@@ -338,18 +496,37 @@ pub(super) async fn handle_link_copy(
                             &args.get_test_mode(),
                         )
                         .await?;
+                        if moving {
+                            let target = tokio::fs::read_link(&local).await?;
+                            move_delivery::remember(
+                                &remote,
+                                Target::Local(local),
+                                Content::Link(target.as_os_str().as_encoded_bytes().to_vec()),
+                                args.is_preserve(),
+                            );
+                        }
                     }
                 }
             }
+            check_cancel(&cancel)?;
         }
         if args.is_preserve() {
+            check_cancel(&cancel)?;
             preserve_directories(&directories, upload, args.is_sync()).await?;
         }
+        check_cancel(&cancel)?;
         Ok::<(), anyhow::Error>(())
     }
     .await;
     match result {
-        Ok(()) => runner.finish_ok(),
-        Err(error) => runner.finish_err(error.to_string()),
+        Ok(()) => {
+            runner.finish_ok()?;
+            check_cancel(&cancel)
+        }
+        Err(error) => {
+            let error = check_cancel(&cancel).err().unwrap_or(error);
+            runner.finish_with_error(&error.to_string());
+            Err(error)
+        }
     }
 }

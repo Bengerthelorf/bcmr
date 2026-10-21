@@ -227,10 +227,10 @@ async fn install_binary(
     );
     if sudo && interactive {
         eprintln!("  Installing with sudo on {target}; enter its password in the SSH terminal if requested.");
-        let status = ssh_command()
+        let status = ssh_command(target)
             .arg("-t")
             .arg("--")
-            .arg(target)
+            .arg(crate::core::ssh_options::destination_arg(target))
             .arg(command)
             .stdin(Stdio::inherit())
             // SSH merges the remote PTY's output (including sudo prompts)
@@ -310,18 +310,19 @@ async fn download_release(target: &str, os: &str, arch: &str, staging: &str) -> 
     scp_to(target, &temporary.path().join("bcmr"), staging).await
 }
 
-fn ssh_command() -> Command {
+fn ssh_command(target: &str) -> Command {
     let mut command = Command::new("ssh");
     command.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]);
     command.args(crate::core::transport::ssh::SSH_LIVENESS_ARGS);
+    command.args(crate::core::ssh_options::extra_args(target));
     command
 }
 
 async fn ssh(target: &str, cmd: &str) -> Result<String> {
-    let output = ssh_command()
+    let output = ssh_command(target)
         .arg("-T")
         .arg("--")
-        .arg(target)
+        .arg(crate::core::ssh_options::destination_arg(target))
         .arg(cmd)
         .stdin(Stdio::null())
         .output()
@@ -339,7 +340,9 @@ async fn scp_to(target: &str, local: &std::path::Path, remote_path: &str) -> Res
     let mut child = Command::new("sftp")
         .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
         .args(crate::core::transport::ssh::SSH_LIVENESS_ARGS)
-        .args(["-b", "-", "--", target])
+        .args(crate::core::ssh_options::sftp_args(target))
+        .args(["-b", "-", "--"])
+        .arg(crate::core::ssh_options::destination_arg(target))
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .spawn()?;

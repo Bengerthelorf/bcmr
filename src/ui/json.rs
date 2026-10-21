@@ -5,7 +5,112 @@ use serde::Serialize;
 use std::fs;
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
+
+struct PendingMoveResult {
+    started: Instant,
+    line: Option<serde_json::Value>,
+}
+static MOVE_RESULT: OnceLock<Mutex<Option<PendingMoveResult>>> = OnceLock::new();
+
+/// Copy completion is not move completion: source cleanup can still fail.
+pub(crate) struct MoveResultGuard {
+    active: bool,
+}
+pub(crate) fn defer_move_result() -> MoveResultGuard {
+    let active = crate::config::is_json_mode();
+    if active {
+        *MOVE_RESULT
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(PendingMoveResult {
+            started: Instant::now(),
+            line: None,
+        });
+    }
+    MoveResultGuard { active }
+}
+
+fn defer_result(value: &impl Serialize) -> io::Result<bool> {
+    let mut pending = MOVE_RESULT
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let Some(pending) = pending.as_mut() else {
+        return Ok(false);
+    };
+    let mut line = serde_json::to_value(value).map_err(io::Error::other)?;
+    if let Some(previous) = pending.line.take() {
+        for field in ["bytes_total", "bytes_skipped", "reflink_count"] {
+            let total = previous
+                .get(field)
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0)
+                .saturating_add(line.get(field).and_then(|n| n.as_u64()).unwrap_or(0));
+            if total > 0 || field == "bytes_total" {
+                line[field] = total.into();
+            }
+        }
+        line["verified"] = (previous["verified"].as_bool().unwrap_or(false)
+            && line["verified"].as_bool().unwrap_or(false))
+        .into();
+    }
+    pending.line = Some(line);
+    Ok(true)
+}
+
+impl MoveResultGuard {
+    pub(crate) fn finish_success(mut self) -> io::Result<()> {
+        if !self.active {
+            return Ok(());
+        }
+        self.active = false;
+        let pending = MOVE_RESULT
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+        let Some(pending) = pending else {
+            return Ok(());
+        };
+        let mut line=pending.line.unwrap_or_else(||serde_json::json!({"type":"result","status":"success","operation":"Moving","bytes_total":0,"verified":false}));
+        line["status"] = "success".into();
+        line["operation"] = "Moving".into();
+        let duration = pending.started.elapsed().as_secs_f64();
+        line["duration_secs"] = duration.into();
+        if duration > 0.0 {
+            let delivered = line["bytes_total"]
+                .as_u64()
+                .unwrap_or(0)
+                .saturating_sub(line["bytes_skipped"].as_u64().unwrap_or(0));
+            line["avg_speed_bps"] = ((delivered as f64 / duration) as u64).into();
+        }
+        let mut writer = match crate::config::log_file() {
+            Some(path) => JsonWriter::File(BufWriter::new(
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)?,
+            )),
+            None => JsonWriter::Stdout,
+        };
+        writer.write_line_strict(&line)?;
+        crate::config::mark_json_terminal_emitted();
+        Ok(())
+    }
+}
+impl Drop for MoveResultGuard {
+    fn drop(&mut self) {
+        if self.active {
+            MOVE_RESULT
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take();
+        }
+    }
+}
 
 pub struct JsonProgress {
     data: ProgressData,
@@ -273,8 +378,10 @@ impl ProgressRenderer for JsonProgress {
             error_kind: None,
         };
 
-        self.writer.write_line_strict(&line)?;
-        crate::config::mark_json_terminal_emitted();
+        if !defer_result(&line)? {
+            self.writer.write_line_strict(&line)?;
+            crate::config::mark_json_terminal_emitted();
+        }
         Ok(())
     }
 
@@ -299,8 +406,10 @@ impl ProgressRenderer for JsonProgress {
             error_kind: Some(crate::output::kind_from_message(msg)),
         };
 
-        self.writer.write_line_strict(&line)?;
-        crate::config::mark_json_terminal_emitted();
+        if !defer_result(&line)? {
+            self.writer.write_line_strict(&line)?;
+            crate::config::mark_json_terminal_emitted();
+        }
         Ok(())
     }
 

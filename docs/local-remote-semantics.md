@@ -54,4 +54,6 @@ copy. Source stars resolve once, before destination planning.
 - An explicit serve `--root` remains an access boundary for followed links. Linux/macOS LIST binds checked targets through directory handles; other platforms retain path-based checks and do not promise immunity to hostile concurrent ancestor replacement.
 - Link-preserving remote operations use SSH auxiliary operations and exact-path ordinary payloads for compatibility. Their throughput and durability capabilities differ from serve.
 
-Unsupported `--sync` combinations refuse before writes; see the remote-copy guide. The remaining SSH CLI, relay and SFTP-only capabilities are assessed in [scp compatibility](./scp-compatibility.md).
+Unsupported `--sync` combinations refuse before writes; see the remote-copy guide. SSH CLI, relay and SFTP capabilities and their protocol limits are documented in [transfer backends](./transfer-backends.md).
+
+SFTP move cleanup uses content hashes and exposed metadata rather than inode/ctime; SFTP replacement and namespace durability have explicit limits. See [transfer backends](./transfer-backends.md).

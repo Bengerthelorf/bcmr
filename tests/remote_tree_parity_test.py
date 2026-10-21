@@ -40,6 +40,26 @@ class RemoteTreeParityTests(unittest.TestCase):
             if path.is_dir() and not path.is_symlink():
                 path.chmod(0o700)
 
+    def test_preserve_file_times_before_hashing_or_payload_reads(self):
+        for mode, parallel in self.CASES:
+            src, out, source, target = self.route_case(mode, parallel)
+            for resume in (False, True):
+                with self.subTest(mode=mode, parallel=parallel, resume=resume):
+                    name = 'resume' if resume else 'fresh'
+                    original = self.put(src, name, 'original payload for timestamp preservation')
+                    landed = out / name
+                    if resume:
+                        landed.write_text('original payload ')
+                    os.utime(original, (1_500_000_001, 1_500_000_002))
+                    options = ['copy', '-p', '-V', '-P', parallel]
+                    if resume:
+                        options.append('-C')
+                    self.assert_ok(self.run_bcmr(*options, source(original), target(landed)))
+                    attrs = landed.stat()
+                    self.assertEqual((int(attrs.st_atime), int(attrs.st_mtime)),
+                                     (1_500_000_001, 1_500_000_002))
+                    self.assertEqual(landed.read_text(), 'original payload for timestamp preservation')
+
     # Missing directory finalization loses root, nested and empty metadata;
     # early chmod or utime prevents writes or changes the final directory mtime.
     def test_preserve_directory_modes_and_mtimes_after_content(self):

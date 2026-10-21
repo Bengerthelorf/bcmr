@@ -189,6 +189,9 @@ pub async fn inventory_remote(
     no_deref: bool,
     excludes: &[regex::Regex],
 ) -> Result<Vec<RemoteTreeEntry>, BcmrError> {
+    if super::backend::is_sftp(&root.ssh_target()).await? {
+        return super::sftp_ops::inventory(root, no_deref, excludes).await;
+    }
     if is_remote_entry_excluded(&root.path, "", excludes) {
         return Ok(Vec::new());
     }

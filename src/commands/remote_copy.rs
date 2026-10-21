@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
+mod composite;
+mod endpoint;
 mod legacy;
 mod links;
 mod preflight;
@@ -390,29 +392,6 @@ pub(super) async fn preserve_directories(
     Ok(())
 }
 
-pub(crate) fn reject_remote_to_remote(
-    sources: &[PathBuf],
-    remote_dest: &Option<RemotePath>,
-) -> Result<()> {
-    let Some(rdest) = remote_dest else {
-        return Ok(());
-    };
-    let Some(first_remote) = sources
-        .iter()
-        .find(|s| parse_remote_path(&s.to_string_lossy()).is_some())
-    else {
-        return Ok(());
-    };
-    anyhow::bail!(
-        "bcmr does not support remote-to-remote transfers ({} -> {}).\n\
-         Copy via a local intermediate: \
-         bcmr copy <src-host>:src /tmp/staging/ && \
-         bcmr copy /tmp/staging/<basename> <dst-host>:dst/",
-        first_remote.display(),
-        rdest.display(),
-    );
-}
-
 pub(super) fn resolve_upload_remote(
     src: &std::path::Path,
     rdest: &RemotePath,
@@ -454,7 +433,9 @@ pub async fn handle_remote_copy(
     let remote_dest_initial = parse_remote_path(&dest_str);
     let is_upload = remote_dest_initial.is_some();
 
-    reject_remote_to_remote(sources, &remote_dest_initial)?;
+    if composite::required(sources, dest).await? {
+        return composite::copy(args, sources, dest, excludes).await;
+    }
 
     if !is_upload {
         if sources
@@ -536,6 +517,7 @@ pub async fn handle_remote_copy(
     }
 
     preflight::confirm_remote_overwrites(args, sources, dest, excludes).await?;
+    crate::core::interrupt::check()?;
     if args.is_no_deref() || matches!(args, Commands::Move { .. }) {
         return links::handle_link_copy(args, sources, dest, excludes).await;
     }
@@ -558,6 +540,7 @@ pub async fn handle_remote_copy(
                             remote: RemotePath {
                                 user: None,
                                 host: String::new(),
+                                port: None,
                                 path: String::new(),
                             },
                             size,

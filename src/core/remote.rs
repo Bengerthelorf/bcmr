@@ -1,17 +1,24 @@
 mod attrs;
+pub mod backend;
 mod cleanup;
+#[allow(dead_code)] // Shared with the command binary composite move engine.
+pub(crate) mod move_delivery;
 mod ops;
 mod patterns;
 mod resume;
+pub(crate) mod sftp_cleanup;
+pub(crate) mod sftp_ops;
+#[allow(dead_code)] // Used by the command binary composite transfer engine.
+pub(crate) mod sftp_stage;
 mod ssh_cmd;
 pub mod staged_upload;
 mod transfer;
 mod tree;
 
 #[allow(unused_imports)]
-pub(crate) use attrs::get_remote_attrs;
-#[allow(unused_imports)]
 pub use attrs::{apply_remote_attrs_locally, preserve_remote_attrs, verify_remote_file};
+#[allow(unused_imports)]
+pub(crate) use attrs::{get_remote_attrs, set_remote_attrs};
 pub use cleanup::RemoteCleanupPlan;
 #[allow(unused_imports)]
 pub use ops::{
@@ -21,8 +28,11 @@ pub use ops::{
 };
 pub use patterns::expand_remote_star;
 pub use resume::{check_resume_state, ResumeDecision};
+pub use sftp_cleanup::SftpCleanupPlan;
 #[allow(unused_imports)]
 pub(crate) use ssh_cmd::metadata_command;
+#[allow(unused_imports)] // Command binary relay streams.
+pub(crate) use ssh_cmd::ssh_command;
 #[allow(unused_imports)]
 pub(crate) use ssh_cmd::ssh_error_message;
 #[allow(unused_imports)]
@@ -41,11 +51,15 @@ pub fn set_ssh_compression(enabled: bool) {
 pub struct RemotePath {
     pub user: Option<String>,
     pub host: String,
+    pub port: Option<u16>,
     pub path: String,
 }
 
 impl RemotePath {
     pub fn ssh_target(&self) -> String {
+        if self.requires_uri_authority() {
+            return format!("ssh://{}", self.uri_authority());
+        }
         match &self.user {
             Some(user) => format!("{}@{}", user, self.host),
             None => self.host.clone(),
@@ -53,6 +67,14 @@ impl RemotePath {
     }
 
     pub fn display(&self) -> String {
+        if self.requires_uri_authority()
+            || (self.user.is_none()
+                && self.host.len() == 1
+                && self.host.as_bytes()[0].is_ascii_alphabetic()
+                && self.path.starts_with('/'))
+        {
+            return self.uri_display();
+        }
         let host_display = if self.host.contains(':') {
             format!("[{}]", self.host)
         } else {
@@ -63,6 +85,38 @@ impl RemotePath {
             None => host_display,
         };
         format!("{}:{}", target, self.path)
+    }
+
+    fn requires_uri_authority(&self) -> bool {
+        self.port.is_some()
+            || self.user.as_ref().is_some_and(|user| {
+                user.starts_with('-') || user.contains(['@', '/', ':', '[', ']'])
+            })
+    }
+
+    fn uri_authority(&self) -> String {
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host.replace('%', "%25"))
+        } else {
+            uri_encode(&self.host, false)
+        };
+        let user = self
+            .user
+            .as_ref()
+            .map_or_else(String::new, |user| format!("{}@", uri_encode(user, false)));
+        let port = self
+            .port
+            .map_or_else(String::new, |port| format!(":{port}"));
+        format!("{user}{host}{port}")
+    }
+
+    /// Render an absolute URI while retaining decoded filename semantics.
+    pub fn uri_display(&self) -> String {
+        format!(
+            "scp://{}{}",
+            self.uri_authority(),
+            uri_encode(&self.path, true)
+        )
     }
 
     pub fn file_name(&self) -> &str {
@@ -82,6 +136,7 @@ impl RemotePath {
         Self {
             user: self.user.clone(),
             host: self.host.clone(),
+            port: self.port,
             path,
         }
     }
@@ -134,6 +189,12 @@ impl std::fmt::Display for RemotePath {
 }
 
 pub fn parse_remote_path(s: &str) -> Option<RemotePath> {
+    // Never reinterpret a malformed explicit URI as a legacy `scp:path` host.
+    if s.get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("scp://"))
+    {
+        return parse_scp_uri(s).ok();
+    }
     if s.starts_with('/')
         || s.starts_with("./")
         || s.starts_with("../")
@@ -162,7 +223,11 @@ pub fn parse_remote_path(s: &str) -> Option<RemotePath> {
 
     let (user, rest) = if let Some(at_pos) = userinfo_split {
         let user_part = &s[..at_pos];
-        if user_part.is_empty() || user_part.contains('/') || user_part.contains(' ') {
+        if user_part.is_empty()
+            || user_part.starts_with('-')
+            || user_part.contains('/')
+            || user_part.contains(' ')
+        {
             return None;
         }
         (Some(user_part.to_string()), &s[at_pos + 1..])
@@ -173,7 +238,12 @@ pub fn parse_remote_path(s: &str) -> Option<RemotePath> {
     if let Some(stripped) = rest.strip_prefix('[') {
         let bracket_close = stripped.find(']')?;
         let host = &stripped[..bracket_close];
-        if host.is_empty() {
+        if host.is_empty()
+            || host.starts_with('-')
+            || host.chars().any(char::is_control)
+            || host.chars().any(char::is_whitespace)
+            || host.contains(['/', '@'])
+        {
             return None;
         }
         let after = &stripped[bracket_close + 1..];
@@ -186,6 +256,7 @@ pub fn parse_remote_path(s: &str) -> Option<RemotePath> {
         return Some(RemotePath {
             user,
             host: host.to_string(),
+            port: None,
             path,
         });
     }
@@ -198,7 +269,11 @@ pub fn parse_remote_path(s: &str) -> Option<RemotePath> {
     let host_part = &rest[..colon_pos];
     let path_part = &rest[colon_pos + 1..];
 
-    if host_part.contains('/') || host_part.contains(' ') || host_part.contains('@') {
+    if host_part.contains('/')
+        || host_part.contains(' ')
+        || host_part.contains('@')
+        || host_part.starts_with('-')
+    {
         return None;
     }
 
@@ -211,8 +286,150 @@ pub fn parse_remote_path(s: &str) -> Option<RemotePath> {
     Some(RemotePath {
         user,
         host: host_part.to_string(),
+        port: None,
         path,
     })
+}
+
+fn uri_decode(value: &str) -> Result<String, &'static str> {
+    let mut decoded = Vec::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut position = 0;
+    while position < bytes.len() {
+        if bytes[position] == b'%' {
+            let pair = bytes
+                .get(position + 1..position + 3)
+                .ok_or("incomplete percent escape")?;
+            let high = (pair[0] as char)
+                .to_digit(16)
+                .ok_or("invalid percent escape")?;
+            let low = (pair[1] as char)
+                .to_digit(16)
+                .ok_or("invalid percent escape")?;
+            decoded.push(((high << 4) | low) as u8);
+            position += 3;
+        } else {
+            decoded.push(bytes[position]);
+            position += 1;
+        }
+    }
+    if decoded.contains(&0) {
+        return Err("NUL is not permitted");
+    }
+    String::from_utf8(decoded).map_err(|_| "percent escapes must contain valid UTF-8")
+}
+
+fn uri_encode(value: &str, path: bool) -> String {
+    use std::fmt::Write;
+    let mut encoded = String::new();
+    for byte in value.as_bytes() {
+        if byte.is_ascii_alphanumeric()
+            || matches!(byte, b'-' | b'_' | b'.' | b'~')
+            || (path && *byte == b'/')
+        {
+            encoded.push(*byte as char);
+        } else {
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+fn parse_scp_uri(input: &str) -> Result<RemotePath, &'static str> {
+    let body = input.get(6..).ok_or("missing authority")?;
+    if body.contains(['?', '#']) {
+        return Err("query and fragment delimiters must be percent escaped");
+    }
+    let slash = body.find('/').ok_or("an absolute path is required")?;
+    let authority = &body[..slash];
+    let path = uri_decode(&body[slash..])?;
+    let (user, host_port) = if let Some((user, host_port)) = authority.split_once('@') {
+        if user.is_empty() || user.contains(':') || host_port.contains('@') {
+            return Err("invalid username or unsupported password");
+        }
+        let user = uri_decode(user)?;
+        if user.chars().any(char::is_control) || user.chars().any(char::is_whitespace) {
+            return Err("invalid username");
+        }
+        (Some(user), host_port)
+    } else {
+        (None, authority)
+    };
+    let (host, port_text) = if let Some(bracketed) = host_port.strip_prefix('[') {
+        let close = bracketed.find(']').ok_or("unclosed IPv6 address")?;
+        let host = uri_decode(&bracketed[..close])?;
+        let address = host
+            .split_once('%')
+            .map_or(host.as_str(), |(address, _)| address);
+        if address.parse::<std::net::Ipv6Addr>().is_err() || host.ends_with('%') {
+            return Err("invalid bracketed IPv6 address");
+        }
+        let suffix = &bracketed[close + 1..];
+        let port = if suffix.is_empty() {
+            None
+        } else {
+            Some(
+                suffix
+                    .strip_prefix(':')
+                    .ok_or("invalid IPv6 authority suffix")?,
+            )
+        };
+        (host, port)
+    } else {
+        if host_port.matches(':').count() > 1 || host_port.contains(['[', ']']) {
+            return Err("IPv6 addresses must be bracketed");
+        }
+        let (host, port) = host_port
+            .split_once(':')
+            .map_or((host_port, None), |(host, port)| (host, Some(port)));
+        (uri_decode(host)?, port)
+    };
+    if host.is_empty()
+        || host.starts_with('-')
+        || host.chars().any(char::is_whitespace)
+        || host.chars().any(char::is_control)
+        || host.contains(['/', '@', '?', '#', '[', ']'])
+    {
+        return Err("invalid host");
+    }
+    // Only the bracketed branch may produce an IPv6 host.
+    if !host_port.starts_with('[') && host.contains(':') {
+        return Err("IPv6 addresses must be bracketed");
+    }
+    let port = if let Some(text) = port_text {
+        if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err("port must be an integer from 1 to 65535");
+        }
+        Some(
+            text.parse::<u16>()
+                .ok()
+                .filter(|port| *port != 0)
+                .ok_or("port must be an integer from 1 to 65535")?,
+        )
+    } else {
+        None
+    };
+    Ok(RemotePath {
+        user,
+        host,
+        port,
+        path,
+    })
+}
+
+/// Validate all explicit endpoints before any source is expanded or contacted.
+pub fn validate_explicit_remote_path(input: &str) -> Result<(), crate::core::error::BcmrError> {
+    if input
+        .get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("scp://"))
+    {
+        parse_scp_uri(input).map_err(|reason| {
+            crate::core::error::BcmrError::InvalidInput(format!(
+                "invalid scp URI '{input}': {reason}"
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -241,6 +458,91 @@ pub struct TransferCallbacks<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scp_uri_decodes_utf8_and_preserves_connection_across_render_and_join() {
+        let endpoint =
+            parse_remote_path("scp://ali%40ce@[fe80::1%25en0]:2244/a%20b/%E9%9B%AA%25%23.txt")
+                .unwrap();
+        assert_eq!(endpoint.user.as_deref(), Some("ali@ce"));
+        assert_eq!(endpoint.host, "fe80::1%en0");
+        assert_eq!(endpoint.port, Some(2244));
+        assert_eq!(endpoint.path, "/a b/雪%#.txt");
+        let rendered = endpoint.display();
+        assert_eq!(
+            rendered,
+            "scp://ali%40ce@[fe80::1%25en0]:2244/a%20b/%E9%9B%AA%25%23.txt"
+        );
+        let reparsed = parse_remote_path(&rendered).unwrap();
+        assert_eq!(reparsed.ssh_target(), endpoint.ssh_target());
+        assert_eq!(reparsed.path, endpoint.path);
+        let child = endpoint.join("child #%.txt");
+        assert_eq!(child.port, Some(2244));
+        assert_eq!(child.ssh_target(), endpoint.ssh_target());
+        assert_eq!(
+            parse_remote_path(&child.display()).unwrap().path,
+            "/a b/雪%#.txt/child #%.txt"
+        );
+    }
+
+    #[test]
+    fn scp_uri_without_port_is_absolute_and_legacy_absolute_spelling_is_retained() {
+        let endpoint = parse_remote_path("scp://fixture/absolute%20path").unwrap();
+        assert_eq!(endpoint.port, None);
+        assert_eq!(endpoint.path, "/absolute path");
+        let short_host = parse_remote_path("scp://h/absolute%20path").unwrap();
+        assert_eq!(
+            parse_remote_path(&short_host.display()).unwrap().path,
+            "/absolute path"
+        );
+        let unusual_user = parse_remote_path("scp://ali%2Fce@fixture/path").unwrap();
+        assert_eq!(
+            parse_remote_path(&unusual_user.display())
+                .unwrap()
+                .user
+                .as_deref(),
+            Some("ali/ce")
+        );
+        assert_eq!(
+            parse_remote_path("fixture://absolute/path").unwrap().path,
+            "//absolute/path"
+        );
+    }
+
+    #[test]
+    fn explicit_malformed_scp_uris_never_become_legacy_endpoints() {
+        for input in [
+            "scp://",
+            "scp:///file",
+            "scp://fixture",
+            "scp://fixture:0/file",
+            "scp://fixture:65536/file",
+            "scp://fixture:abc/file",
+            "scp://[::1/file",
+            "scp://::1/file",
+            "scp://fixture/%",
+            "scp://fixture/%GG",
+            "scp://fixture/%FF",
+            "scp://fixture/%00",
+            "scp://fixture/path?query",
+            "scp://fixture/path#fragment",
+            "scp://-oProxyCommand=bad/file",
+            "scp://user:password@fixture/file",
+        ] {
+            assert!(parse_remote_path(input).is_none(), "must reject {input:?}");
+            assert!(
+                validate_explicit_remote_path(input).is_err(),
+                "must reject explicitly before I/O: {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_uri_ports_separate_connection_identities() {
+        let first = parse_remote_path("scp://fixture:2222/file").unwrap();
+        let second = parse_remote_path("scp://fixture:2223/file").unwrap();
+        assert_ne!(first.ssh_target(), second.ssh_target());
+    }
 
     #[test]
     fn test_parse_remote_path() {
@@ -317,6 +619,7 @@ mod tests {
         let r = RemotePath {
             user: None,
             host: "::1".into(),
+            port: None,
             path: "/foo".into(),
         };
         assert_eq!(r.display(), "[::1]:/foo");
@@ -324,6 +627,7 @@ mod tests {
         let r2 = RemotePath {
             user: Some("me".into()),
             host: "fe80::1%eth0".into(),
+            port: None,
             path: "/foo".into(),
         };
         assert_eq!(r2.display(), "me@[fe80::1%eth0]:/foo");
@@ -342,6 +646,7 @@ mod tests {
         let r = RemotePath {
             user: Some("alice".to_string()),
             host: "example.com".to_string(),
+            port: None,
             path: "/data".to_string(),
         };
         assert_eq!(r.ssh_target(), "alice@example.com");
@@ -349,6 +654,7 @@ mod tests {
         let r2 = RemotePath {
             user: None,
             host: "example.com".to_string(),
+            port: None,
             path: "/data".to_string(),
         };
         assert_eq!(r2.ssh_target(), "example.com");
@@ -359,6 +665,7 @@ mod tests {
         let r = RemotePath {
             user: Some("bob".to_string()),
             host: "srv".to_string(),
+            port: None,
             path: "/tmp/f".to_string(),
         };
         assert_eq!(r.display(), "bob@srv:/tmp/f");
@@ -369,6 +676,7 @@ mod tests {
         let r = RemotePath {
             user: None,
             host: "h".to_string(),
+            port: None,
             path: "/base".to_string(),
         };
         let joined = r.join("sub/file.txt");
@@ -381,6 +689,7 @@ mod tests {
         let r = RemotePath {
             user: None,
             host: "h".to_string(),
+            port: None,
             path: "dst/".to_string(),
         };
         assert_eq!(r.join("file.txt").path, "dst/file.txt");
@@ -400,6 +709,7 @@ mod tests {
         RemotePath {
             user: None,
             host: "h".into(),
+            port: None,
             path: path.into(),
         }
     }

@@ -303,9 +303,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-      - name: Install Zsh (Linux)
+      - name: Install POSIX test dependencies (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y zsh
+        run: sudo apt-get update && sudo apt-get install -y zsh openssh-sftp-server
       - name: Install and exercise released binary
         shell: bash
         env:
@@ -333,6 +333,14 @@ jobs:
           python3 tests/transfer_cleanup_test.py
           python3 tests/remote_cleanup_test.py
           python3 tests/remote_sync_contract_test.py
+          python3 tests/ssh_options_test.py
+          python3 tests/bandwidth_test.py
+          python3 tests/composite_transfer_test.py
+          python3 tests/serve_stream_lifecycle_test.py
+          python3 tests/composite_safety_test.py
+          python3 tests/relay_identity_test.py
+          python3 tests/sftp_stage_test.py
+          python3 tests/cleanup_interrupt_test.py
 
   publish-crate:
     name: Publish to crates.io
@@ -427,3 +435,11 @@ jobs:
           python3 tests/destination_semantics_test.py
           python3 tests/remote_listing_test.py
           python3 tests/remote_overwrite_test.py
+          python3 tests/ssh_options_test.py
+          python3 tests/bandwidth_test.py
+          python3 tests/composite_transfer_test.py
+          python3 tests/serve_stream_lifecycle_test.py
+          python3 tests/composite_safety_test.py
+          python3 tests/relay_identity_test.py
+          python3 tests/sftp_stage_test.py
+          python3 tests/cleanup_interrupt_test.py

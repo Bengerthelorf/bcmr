@@ -53,6 +53,9 @@ if target == 'bad-auth':
     sys.stderr.write('Permission denied (publickey).\\n')
     sys.exit(255)
 if target == 'denied-directory':
+    if command == 'printf BCMR_EXEC_AVAILABLE':
+        sys.stdout.write('BCMR_EXEC_AVAILABLE')
+        sys.exit(0)
     if not command.startswith("LC_ALL=C ls -1ap -- "):
         sys.exit('expected a directory listing')
     sys.stderr.write('ls: /private: Permission denied\\n')

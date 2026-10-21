@@ -45,6 +45,12 @@ pub async fn download_file(
     if existing_size.is_some() && !allow_overwrite {
         return Err(BcmrError::TargetExists(local_dst.to_path_buf()));
     }
+    let metadata = if opts.preserve {
+        Some(get_remote_attrs(remote).await?)
+    } else {
+        None
+    };
+
     let local_path_for_hash = local_dst.to_path_buf();
     let remote_for_hash = remote.clone();
     let remote_for_partial = remote.clone();
@@ -81,20 +87,25 @@ pub async fn download_file(
         )));
     }
 
-    let metadata = if opts.preserve {
-        Some(get_remote_attrs(remote).await?)
-    } else {
-        None
-    };
-
     let ssh_cmd = if decision.use_append_mode {
         format!(
             "tail -c +{} '{}'",
             decision.skip_bytes + 1,
-            shell_escape(&remote.path)
+            shell_escape(&if remote.path.starts_with('/') {
+                remote.path.clone()
+            } else {
+                format!("./{}", remote.path)
+            })
         )
     } else {
-        format!("cat '{}'", shell_escape(&remote.path))
+        format!(
+            "cat '{}'",
+            shell_escape(&if remote.path.starts_with('/') {
+                remote.path.clone()
+            } else {
+                format!("./{}", remote.path)
+            })
+        )
     };
 
     let staging = if decision.use_append_mode {
@@ -177,6 +188,7 @@ pub async fn download_file(
         }
     }
 
+    crate::core::interrupt::check()?;
     if let Some(stage) = staging {
         drop(dst_file);
         if let Some(metadata) = metadata {
@@ -213,14 +225,21 @@ where
     }
 
     let mut transferred = skip_bytes;
-    let mut buffer = vec![0u8; 4 * 1024 * 1024];
+    let mut buffer = vec![0u8; (4 * 1024 * 1024).min(crate::core::bandwidth::chunk_size())];
     loop {
-        let n = reader.read(&mut buffer).await?;
+        let n = crate::core::interrupt::read_only(async { Ok(reader.read(&mut buffer).await?) })
+            .await?;
         if n == 0 {
             break;
         }
         let next = crate::core::protocol::checked_transfer_total(transferred, n, file_size)?;
+        crate::core::interrupt::read_only(async {
+            crate::core::bandwidth::acquire(n).await;
+            Ok(())
+        })
+        .await?;
         writer.write_all(&buffer[..n]).await?;
+        crate::core::interrupt::check()?;
         transferred = next;
         on_progress(n as u64);
     }
@@ -243,6 +262,12 @@ pub async fn upload_file(
             "--sync requires native serve publication; legacy SSH uploads cannot guarantee durable namespace publication".into(),
         ));
     }
+    // Freeze -p before source reads, including resume/verification hashing.
+    let metadata = if opts.preserve {
+        Some(super::attrs::local_attrs(local_src)?)
+    } else {
+        None
+    };
     let file_size = local_src.metadata()?.len();
     let file_name = local_src
         .file_name()
@@ -376,6 +401,7 @@ pub async fn upload_file(
                 &format!("Upload failed for '{}' -> {}", local_src.display(), remote),
             )));
         }
+        crate::core::interrupt::check()?;
         if let Some(stage) = staging.as_mut() {
             stage.prepare().await?;
         }
@@ -386,9 +412,10 @@ pub async fn upload_file(
                 remote
             )));
         }
-        if opts.preserve {
-            preserve_remote_attrs(local_src, &transfer_remote).await?;
+        if let Some(metadata) = metadata {
+            super::attrs::set_remote_attrs(&transfer_remote, metadata).await?;
         }
+        crate::core::interrupt::check()?;
         if let Some(stage) = staging.as_mut() {
             stage.commit().await?;
         }
@@ -418,14 +445,21 @@ where
         ));
     }
     let mut transferred = skip_bytes;
-    let mut buffer = vec![0u8; 4 * 1024 * 1024];
+    let mut buffer = vec![0u8; (4 * 1024 * 1024).min(crate::core::bandwidth::chunk_size())];
     loop {
-        let n = reader.read(&mut buffer).await?;
+        let n = crate::core::interrupt::read_only(async { Ok(reader.read(&mut buffer).await?) })
+            .await?;
         if n == 0 {
             break;
         }
         let next = crate::core::protocol::checked_transfer_total(transferred, n, file_size)?;
+        crate::core::interrupt::read_only(async {
+            crate::core::bandwidth::acquire(n).await;
+            Ok(())
+        })
+        .await?;
         writer.write_all(&buffer[..n]).await?;
+        crate::core::interrupt::check()?;
         transferred = next;
         on_progress(n as u64);
     }

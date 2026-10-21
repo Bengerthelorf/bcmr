@@ -15,6 +15,10 @@ export default {
         'configuration',
         'progress-display',
         'remote-copy',
+        'ssh-options',
+        'transfer-backends',
+        'scp-compatibility',
+        'local-remote-semantics',
       ],
     },
     {

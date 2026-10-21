@@ -61,3 +61,5 @@ bcp -r project new/                     # new/project/下放原内容
 `--sync` 的具体可用组合和持久化限制见远程复制说明；无法兑现 fsync 保证的通道会在写入前明确拒绝。
 
 SSH 临时参数、远程中转和 SFTP-only 等属于独立能力建设，见 [scp 功能对照](./scp-compatibility.md)。
+
+SFTP 移动以内容哈希和协议提供的属性保护源，无法提供 inode/ctime 身份；SFTP 覆盖与目录持久化的边界见 [传输后端](./transfer-backends.md)。

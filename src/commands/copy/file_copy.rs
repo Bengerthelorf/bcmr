@@ -1089,6 +1089,14 @@ impl CopyFileOptions {
             }
             return Ok((false, false));
         }
+        if crate::core::bandwidth::is_enabled() && try_reflink {
+            if fail_on_error {
+                return Err(BcmrError::InvalidInput(
+                    "--reflink=force is incompatible with --bandwidth-limit".into(),
+                ));
+            }
+            return Ok((false, false));
+        }
         Ok((try_reflink, fail_on_error))
     }
 
@@ -1210,7 +1218,14 @@ where
         sync,
     } = transfer;
 
-    let file_size = src.metadata()?.len();
+    let source_metadata = src.metadata()?;
+    let file_size = source_metadata.len();
+    let source_times = preserve.then(|| {
+        (
+            filetime::FileTime::from_last_access_time(&source_metadata),
+            filetime::FileTime::from_last_modification_time(&source_metadata),
+        )
+    });
     #[cfg(feature = "test-support")]
     if truncate_source_after_snapshot {
         let truncated = fs::OpenOptions::new().write(true).open(src).await?;
@@ -1372,6 +1387,7 @@ where
             commit_policy: &commit_policy,
             sync,
             preserve,
+            source_times,
             verify,
             inline_src_hash: None,
             corrupt_before_verify,
@@ -1381,6 +1397,7 @@ where
 
     #[cfg(target_os = "linux")]
     if !direct_mode
+        && !crate::core::bandwidth::is_enabled()
         && matches!(test_mode, TestMode::None)
         && matches!(sparse_mode, SparseMode::Never)
     {
@@ -1395,6 +1412,7 @@ where
                     commit_policy: &commit_policy,
                     sync,
                     preserve,
+                    source_times,
                     verify,
                     inline_src_hash: None,
                     corrupt_before_verify,
@@ -1459,7 +1477,11 @@ where
 
     let inline_src_hash = match test_mode {
         TestMode::Delay(ms) => {
-            let mut buffer = vec![0u8; crate::core::session::COPY_BLOCK_SIZE as usize];
+            let mut buffer = vec![
+                0u8;
+                (crate::core::session::COPY_BLOCK_SIZE as usize)
+                    .min(crate::core::bandwidth::chunk_size())
+            ];
             let mut remaining = expected_remaining;
             while remaining > 0 {
                 let read_limit = remaining.min(buffer.len() as u64) as usize;
@@ -1471,6 +1493,7 @@ where
                     )));
                 }
                 remaining -= n as u64;
+                crate::core::bandwidth::acquire(n).await;
                 dst_file.write_all(&buffer[..n]).await?;
                 (callback.callback)(n as u64);
                 tokio::time::sleep(Duration::from_millis(ms)).await;
@@ -1478,7 +1501,11 @@ where
             None
         }
         TestMode::SpeedLimit(bps) => {
-            let mut buffer = vec![0u8; crate::core::session::COPY_BLOCK_SIZE as usize];
+            let mut buffer = vec![
+                0u8;
+                (crate::core::session::COPY_BLOCK_SIZE as usize)
+                    .min(crate::core::bandwidth::chunk_size())
+            ];
             let chunk_size = bps.min(buffer.len() as u64);
             let mut start_time = Instant::now();
             let mut remaining = expected_remaining;
@@ -1492,6 +1519,7 @@ where
                     )));
                 }
                 remaining -= n as u64;
+                crate::core::bandwidth::acquire(n).await;
                 dst_file.write_all(&buffer[..n]).await?;
                 let elapsed = start_time.elapsed();
                 let target = Duration::from_secs_f64(n as f64 / bps as f64);
@@ -1521,7 +1549,11 @@ where
         }
         #[cfg(feature = "test-support")]
         TestMode::TruncateSourceAfterStageWrite => {
-            let mut buffer = vec![0u8; crate::core::session::COPY_BLOCK_SIZE as usize];
+            let mut buffer = vec![
+                0u8;
+                (crate::core::session::COPY_BLOCK_SIZE as usize)
+                    .min(crate::core::bandwidth::chunk_size())
+            ];
             let mut remaining = expected_remaining;
             let mut injected = false;
             while remaining > 0 {
@@ -1534,6 +1566,7 @@ where
                     )));
                 }
                 remaining -= n as u64;
+                crate::core::bandwidth::acquire(n).await;
                 dst_file.write_all(&buffer[..n]).await?;
                 (callback.callback)(n as u64);
 
@@ -1599,6 +1632,7 @@ where
         commit_policy: &commit_policy,
         sync,
         preserve,
+        source_times,
         verify,
         inline_src_hash,
         corrupt_before_verify,

@@ -274,7 +274,7 @@ server-side integrity verification.
 - Supports both upload and download directions
 
 :::callout[Limitations]{kind="warn"}
-- Cannot copy between two remote hosts directly — use a local intermediary
+- Remote-to-remote transfers stream through this client; see [transfer backends](./transfer-backends.md).
 - Resume (`-C`) on serve fast path: single-file uploads are supported natively. Recursive directory uploads and downloads with `--resume/--strict/--append` fall back to legacy mode automatically.
 - A killed upload in a shared writable destination directory may
   retain an empty private `.bcmr.receive.*` recovery directory.
@@ -291,3 +291,5 @@ BCMR detects remote paths by the `[user@]host:path` format. These patterns are r
 - Windows drive letters (`C:\file`)
 
 See [local/remote behavior](./local-remote-semantics.md) for destination rules and remaining differences.
+
+See [transfer backends](./transfer-backends.md) for mixed sources, aggregate bandwidth limits and SFTP-only accounts.

@@ -13,7 +13,8 @@ fn control_path_for(temp_dir: &std::path::Path, target: &str) -> String {
     // 16 hex (64 bits) — enough to keep `a@b` vs `a:b` distinct, short
     // enough that $TMPDIR + `bcmr-ssh/` + name + `.sock` + OpenSSH's
     // `.XXXXXXXXXXXXXXXX` MUX suffix fits macOS's 104-byte sun_path.
-    let digest = blake3::hash(target.as_bytes());
+    let identity = crate::core::ssh_options::connection_identity(target);
+    let digest = blake3::hash(identity.as_bytes());
     let short = &digest.to_hex()[..16];
     dir.join(format!("{}.sock", short))
         .to_string_lossy()
@@ -84,6 +85,7 @@ fn ssh_base_args_for(
     if SSH_COMPRESS.load(Ordering::Relaxed) {
         args.extend(["-o".into(), "Compression=yes".into()]);
     }
+    args.extend(crate::core::ssh_options::extra_args(target));
     args
 }
 
@@ -95,13 +97,13 @@ pub(super) fn ssh_base_args(target: &str) -> Vec<String> {
     )
 }
 
-pub(super) fn ssh_command(target: &str) -> Command {
+pub(crate) fn ssh_command(target: &str) -> Command {
     let args = ssh_base_args(target);
     let mut cmd = Command::new("ssh");
     for arg in &args {
         cmd.arg(arg);
     }
-    cmd.arg(target);
+    cmd.arg(crate::core::ssh_options::destination_arg(target));
     cmd
 }
 

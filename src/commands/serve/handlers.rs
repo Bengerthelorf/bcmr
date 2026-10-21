@@ -424,7 +424,7 @@ where
             Some(m) => m,
             None => match framing.read_message(reader).await? {
                 Some(m) => m,
-                None => break,
+                None => bail!("put: client closed connection before Done"),
             },
         };
         match m {
@@ -579,9 +579,8 @@ where
 
     let mut written: u64 = 0;
     loop {
-        if written == length {
-            break;
-        }
+        // The byte count does not terminate a framed PUT. Consume Done even
+        // for empty ranges so it cannot become the next session command.
         match framing.read_message(reader).await? {
             Some(message @ (Message::Data { .. } | Message::DataCompressed { .. })) => {
                 let decoded = compress::decode_data_block(message)?;
@@ -602,6 +601,9 @@ where
             written
         );
     }
+    // Acknowledgement also orders a following GET on this connection after
+    // Tokio's pending file write, including the final short payload block.
+    file.flush().await?;
     if sync {
         file.sync_all().await?;
     }

@@ -303,7 +303,10 @@ async fn ssh_probe(host: &str) -> std::result::Result<RemoteProbe, String> {
                echo '---version---'; \
                bcmr --version 2>/dev/null || bash -lc 'bcmr --version 2>/dev/null' 2>/dev/null || true";
     let output = Command::new("ssh")
-        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, cmd])
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
+        .args(crate::core::ssh_options::extra_args(host))
+        .arg(crate::core::ssh_options::destination_arg(host))
+        .arg(cmd)
         .output()
         .await
         .map_err(|e| e.to_string())?;

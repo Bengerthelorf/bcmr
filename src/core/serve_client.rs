@@ -232,12 +232,13 @@ where
     if offset > 0 {
         file.seek(std::io::SeekFrom::Start(offset)).await?;
     }
-    let mut buf = vec![0u8; DEDUP_BLOCK_SIZE];
+    let mut buf = vec![0u8; DEDUP_BLOCK_SIZE.min(crate::core::bandwidth::chunk_size())];
     loop {
         let n = file.read(&mut buf).await?;
         if n == 0 {
             break;
         }
+        crate::core::bandwidth::acquire(n).await;
         let frame = compress::encode_block(algo, buf[..n].to_vec())?;
         tx.write_message(writer, &frame).await?;
         on_chunk(n as u64);

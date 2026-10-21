@@ -16,6 +16,7 @@ pub struct FinalizeParams<'a> {
     pub commit_policy: &'a CommitPolicy,
     pub sync: bool,
     pub preserve: bool,
+    pub source_times: Option<(filetime::FileTime, filetime::FileTime)>,
     pub verify: bool,
     pub inline_src_hash: Option<blake3::Hash>,
     pub corrupt_before_verify: bool,
@@ -78,6 +79,9 @@ pub async fn finalize(
         if p.preserve {
             preserved_readonly =
                 super::copy::preserve_staging_attributes(p.src, p.write_target).await?;
+            if let Some((atime, mtime)) = p.source_times {
+                filetime::set_file_times(p.write_target, atime, mtime)?;
+            }
         }
         if p.sync {
             if let Some(ref stage_file) = stage_file {
@@ -273,7 +277,8 @@ where
         need_src_hash,
     } = params;
 
-    let mut buffer = vec![0u8; COPY_BLOCK_SIZE as usize];
+    let mut buffer =
+        vec![0u8; (COPY_BLOCK_SIZE as usize).min(crate::core::bandwidth::chunk_size())];
     let mut pending_hole = 0u64;
     let mut src_hasher = need_src_hash.then(blake3::Hasher::new);
     let mut block_hasher = session.as_ref().map(|_| blake3::Hasher::new());
@@ -319,6 +324,7 @@ where
         }
         source_bytes_read += n as u64;
 
+        crate::core::bandwidth::acquire_blocking(n);
         match &sparse_mode {
             SparseMode::Never => {
                 dst_file.write_all(&buffer[..n])?;
@@ -740,6 +746,7 @@ mod checkpoint_tests {
                 commit_policy: &commit_policy,
                 sync: false,
                 preserve: false,
+                source_times: None,
                 verify: false,
                 inline_src_hash: None,
                 corrupt_before_verify: false,
@@ -787,6 +794,7 @@ mod checkpoint_tests {
                 commit_policy: &commit_policy,
                 sync: false,
                 preserve: false,
+                source_times: None,
                 verify: false,
                 inline_src_hash: None,
                 corrupt_before_verify: false,

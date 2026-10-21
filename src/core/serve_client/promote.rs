@@ -20,7 +20,9 @@ async fn ssh_target_uses_proxyjump(target: &str) -> bool {
     let target = target.to_owned();
     tokio::task::spawn_blocking(move || {
         let Ok(out) = std::process::Command::new("ssh")
-            .args(["-G", &target])
+            .arg("-G")
+            .args(crate::core::ssh_options::extra_args(&target))
+            .arg(crate::core::ssh_options::destination_arg(&target))
             .output()
         else {
             return false;
