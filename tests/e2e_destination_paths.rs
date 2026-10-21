@@ -142,10 +142,27 @@ fn existing_file_with_trailing_slash_is_never_replaced_or_removed() {
     let root = temp.path();
     fs::write(root.join("source.txt"), b"source").unwrap();
     fs::write(root.join("blocker"), b"existing").unwrap();
-    for operation in ["copy", "move"] {
-        let output = run(root, &[operation, "-f", "-y", "source.txt", "blocker/"]);
-        assert!(!output.status.success());
-        assert_eq!(fs::read(root.join("blocker")).unwrap(), b"existing");
-        assert_eq!(fs::read(root.join("source.txt")).unwrap(), b"source");
+    let mut destinations = vec!["blocker/"];
+    if cfg!(windows) {
+        destinations.push(r"blocker\");
+    }
+    for destination in destinations {
+        for operation in ["copy", "move"] {
+            for dry_run in [false, true] {
+                let mut args = vec![operation, "-f", "-y", "source.txt", destination];
+                if dry_run {
+                    args.push("--dry-run");
+                }
+                let output = run(root, &args);
+                assert!(
+                    !output.status.success(),
+                    "{args:?} accepted a file as a directory: {}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert_eq!(fs::read(root.join("blocker")).unwrap(), b"existing");
+                assert_eq!(fs::read(root.join("source.txt")).unwrap(), b"source");
+            }
+        }
     }
 }

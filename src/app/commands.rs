@@ -222,7 +222,7 @@ async fn handle_copy_one(args: &Commands, dest_override: Option<&std::path::Path
         }
     }
 
-    if sources.len() > 1 && !crate::core::destination::local_is_directory(dest) {
+    if sources.len() > 1 && !crate::core::destination::local_is_directory(dest)? {
         bail!(
             "When copying multiple sources, destination '{}' must be an existing directory or end with a directory separator",
             dest.display()
@@ -460,7 +460,7 @@ async fn handle_move_one(args: &Commands) -> Result<()> {
         return handle_remote_move(args, sources, dest, &excludes).await;
     }
 
-    if sources.len() > 1 && !crate::core::destination::local_is_directory(dest) {
+    if sources.len() > 1 && !crate::core::destination::local_is_directory(dest)? {
         bail!(
             "When moving multiple sources, destination '{}' must be an existing directory or end with a directory separator",
             dest.display()

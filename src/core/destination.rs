@@ -50,19 +50,24 @@ pub fn has_trailing_separator(path: &Path) -> bool {
 
 /// Existing directories and explicitly requested missing directories are parents.
 /// An existing non-directory with a final separator remains an invalid target.
-pub fn local_is_directory(path: &Path) -> bool {
+pub fn local_is_directory(path: &Path) -> Result<bool, BcmrError> {
     if path.is_dir() {
-        return true;
+        return Ok(true);
     }
     if !has_trailing_separator(path) {
-        return false;
+        return Ok(false);
     }
     // A trailing slash on a regular file can make metadata(path) report ENOTDIR.
     // Normalize components only for this probe, retaining the original CLI path.
     let without_trailing_separator: PathBuf = path.components().collect();
     match without_trailing_separator.metadata() {
-        Ok(metadata) => metadata.is_dir(),
-        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        Ok(metadata) if metadata.is_dir() => Ok(true),
+        Ok(_) => Err(BcmrError::InvalidInput(format!(
+            "Destination '{}' ends with a directory separator but is not a directory",
+            path.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(BcmrError::Io(error)),
     }
 }
 

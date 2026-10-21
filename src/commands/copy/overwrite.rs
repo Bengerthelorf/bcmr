@@ -22,7 +22,7 @@ pub async fn check_overwrites(
 ) -> std::result::Result<Vec<FileToOverwrite>, BcmrError> {
     let mut files_to_overwrite = Vec::new();
 
-    let dst_is_dir = crate::core::destination::local_is_directory(dst);
+    let dst_is_dir = crate::core::destination::local_is_directory(dst)?;
 
     for src in sources {
         if traversal::is_excluded(src, excludes) {

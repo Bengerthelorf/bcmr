@@ -149,7 +149,7 @@ fn parse_remote_listing(raw: &[u8]) -> Result<Vec<(String, u64, bool)>, &'static
         return Err("listing contains an incomplete entry");
     }
     let mut entries = Vec::with_capacity(fields.len() / 3);
-    for entry in fields.chunks_exact(3) {
+    for entry in fields.as_chunks::<3>().0 {
         let path = std::str::from_utf8(entry[0]).map_err(|_| "listing path is not UTF-8")?;
         // Remote names use '/' even when the client runs on Windows. Native
         // Path components would mistake valid remote backslashes/colons for

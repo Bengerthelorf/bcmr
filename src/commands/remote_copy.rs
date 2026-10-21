@@ -251,7 +251,7 @@ pub(super) fn resolve_download_local(
     source: &RemotePath,
     dest: &std::path::Path,
 ) -> Result<PathBuf> {
-    if crate::core::destination::local_is_directory(dest) {
+    if crate::core::destination::local_is_directory(dest)? {
         if source.file_name() == "." {
             // An explicit source login-directory shorthand retains its
             // existing contents semantics; listing entries are still checked.
@@ -287,7 +287,7 @@ pub async fn handle_remote_copy(
                 "Mixed local/remote sources to a local destination are not supported. Copy them in separate commands."
             );
         }
-        if sources.len() > 1 && !crate::core::destination::local_is_directory(dest) {
+        if sources.len() > 1 && !crate::core::destination::local_is_directory(dest)? {
             anyhow::bail!(
                 "When downloading multiple sources, destination '{}' must be a directory (existing or ending in '/')",
                 dest.display()

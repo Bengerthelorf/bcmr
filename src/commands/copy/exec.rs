@@ -142,7 +142,7 @@ where
     }
 
     if src.is_file() {
-        let dst_path = if crate::core::destination::local_is_directory(dst) {
+        let dst_path = if crate::core::destination::local_is_directory(dst)? {
             dst.join(
                 src.file_name()
                     .ok_or_else(BcmrError::invalid_source_file_name)?,
@@ -180,7 +180,7 @@ where
         let src_dir_name = src
             .file_name()
             .ok_or_else(BcmrError::invalid_source_dir_name)?;
-        let new_dst = if crate::core::destination::local_is_directory(dst) {
+        let new_dst = if crate::core::destination::local_is_directory(dst)? {
             dst.join(src_dir_name)
         } else {
             dst.to_path_buf()
