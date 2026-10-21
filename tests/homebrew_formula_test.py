@@ -49,14 +49,21 @@ class HomebrewFormulaTests(unittest.TestCase):
         shutil.copy2(BCMR, stage / "bcmr")
         prefix = self.work / "installed"
         env = {**os.environ, "HOMEBREW_NO_AUTO_UPDATE": "1", "HOMEBREW_DEVELOPER": "1"}
+        # Installing shell scripts must also work when an existing user config
+        # needs repair; Homebrew executes this binary to generate completions.
+        invalid_config = self.work / "broken.toml"
+        invalid_config.write_text("[unterminated\n")
         ruby = """
 require 'formula'
 require 'formulary'
+# Homebrew filters custom environment variables at startup. Set the fixture
+# inside Ruby so the actual completion-generation subprocess receives it.
+ENV['BCMR_CONFIG'] = ARGV.fetch(3)
 f = Formulary.factory(ARGV.fetch(0))
 f.define_singleton_method(:prefix) { Pathname(ARGV.fetch(1)) }
 Dir.chdir(ARGV.fetch(2)) { f.install }
 """
-        result = subprocess.run(["brew", "ruby", "-e", ruby, "--", str(formula), str(prefix), str(stage)], env=env,
+        result = subprocess.run(["brew", "ruby", "-e", ruby, "--", str(formula), str(prefix), str(stage), str(invalid_config)], env=env,
                                 text=True, capture_output=True, timeout=90)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         for rel in ["bin/bcmr", "share/zsh/site-functions/_bcmr",

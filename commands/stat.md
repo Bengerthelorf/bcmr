@@ -8,6 +8,8 @@ order: 2
 related: [bcmr ls, bcmr du, bcmr hash]
 flags:
   - { f: "<path>", t: "host:path | @bookmark", d: "—", x: "remote path to stat" }
+  - { f: "--json", t: bool, d: "false", x: "emit structured type and size metadata" }
+  - { f: "--config <PATH>", t: path, d: "—", x: "layer this file over discovered configuration" }
 example:
   - "lab:/data/dump.tar: file (15246928128 bytes, 14.2 GB)"
 ---

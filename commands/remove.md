@@ -15,10 +15,18 @@ flags:
   - { f: "-d, --dir",           t: bool,           d: "false", x: "remove empty directories only (rmdir)" }
   - { f: "-e, --exclude",       t: "regex...",     d: "—",     x: "exclude paths matching regex" }
   - { f: "-n, --dry-run",       t: bool,           d: "false", x: "preview without making changes" }
-  - { f: "-t, --plain",         t: bool,           d: "false", x: "plain 3-line progress instead of the TUI box" }
+  - { f: "--progress",          t: "auto|tui|inline|plain|off", d: "auto", x: "choose the progress display" }
   - { f: "-q, --quiet",         t: bool,           d: "false", x: "suppress progress UI; errors only" }
+  - { f: "--json",              t: bool,           d: "false", x: "emit NDJSON events and a terminal result; remain in foreground" }
+  - { f: "-b, --background",    t: bool,           d: "false", x: "submit a background job; query with bcmr status" }
+  - { f: "--config <PATH>",     t: path,           d: "—",     x: "layer this file over discovered configuration" }
+  - { f: "--profile <NAME>",    t: str,            d: "—",     x: "apply named argument defaults; overrides BCMR_PROFILE" }
 example:
   - "scanning ……  37 files · 120.4 mb"
   - "confirm? y"
   - "removed · all good"
 ---
+
+JSON and background removal require explicit consent with `--yes` or
+`--force`, unless using `--dry-run`. `--interactive` cannot be combined
+with JSON or background execution.

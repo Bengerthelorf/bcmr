@@ -51,6 +51,7 @@ pub fn inject_defaults(argv: Vec<String>, config: &Config) -> Result<Vec<String>
 fn collect_user_long_flags(after_sub: &[String]) -> HashSet<&str> {
     after_sub
         .iter()
+        .take_while(|a| a.as_str() != "--")
         .filter_map(|a| {
             let rest = a.strip_prefix("--")?;
             if rest.is_empty() {
@@ -88,6 +89,9 @@ fn find_subcommand(argv: &[String]) -> Option<usize> {
 fn profile_from_argv_or_env(argv: &[String]) -> Option<String> {
     let mut iter = argv.iter().peekable();
     while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
         if arg == "--profile" {
             return iter.next().cloned();
         }
@@ -103,6 +107,10 @@ fn strip_profile_flag(argv: Vec<String>) -> Vec<String> {
     let mut i = 0;
     while i < argv.len() {
         let a = &argv[i];
+        if a == "--" {
+            out.extend(argv[i..].iter().cloned());
+            break;
+        }
         if a == "--profile" {
             i += 2;
             continue;

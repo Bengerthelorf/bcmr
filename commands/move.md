@@ -2,7 +2,7 @@
 cmd: bcmr move
 group: core
 sig: <sources>... <destination>
-desc: move files; same-device is instant rename, cross-device falls back to copy+delete with verify
+desc: move files; same-device uses rename, cross-device falls back to copy+delete
 tags: [stable, core]
 order: 2
 related: [bcmr copy, bcmr remove]
@@ -15,8 +15,8 @@ flags:
   - { f: "-e, --exclude",       t: "regex...",           d: "—",          x: "exclude paths matching regex" }
   - { f: "-n, --dry-run",       t: bool,                 d: "false",      x: "preview without making changes" }
   - { f: "--to <DEST>",         t: "path...",            d: "—",          x: "fan-out target (repeatable); sources removed only if every target succeeds" }
-  - { f: "--no-deref",          t: bool,                 d: "false",      x: "replicate symlinks instead of following them (cp -P)" }
-  - { f: "-V, --verify",        t: bool,                 d: "false",      x: "verify file integrity after move" }
+  - { f: "--no-deref",          t: bool,                 d: "false",      x: "ordinary move rejects this flag; use local copy --no-deref, then remove" }
+  - { f: "-V, --verify",        t: bool,                 d: "false",      x: "verify the copy phase; same-device renames do not need a copy phase" }
   - { f: "-C, --resume",        t: bool,                 d: "false",      x: "resume interrupted move (cross-device only)" }
   - { f: "-s, --strict",        t: bool,                 d: "false",      x: "strict hash-verified resume" }
   - { f: "-a, --append",        t: bool,                 d: "false",      x: "append mode for cross-device" }
@@ -25,8 +25,12 @@ flags:
   - { f: "--compress",          t: "auto|zstd|lz4|none", d: "auto",       x: "wire compression for remote moves" }
   - { f: "--fast",              t: bool,                 d: "false",      x: "remote only: skip server-side blake3 on copy phase" }
   - { f: "--direct",            t: "ssh|direct",         d: "ssh",        x: "remote data plane: ssh stream or direct TCP with AES-256-GCM" }
-  - { f: "-t, --plain",         t: bool,                 d: "false",      x: "plain 3-line progress instead of the TUI box" }
+  - { f: "--progress",          t: "auto|tui|inline|plain|off", d: "auto",  x: "choose the progress display" }
   - { f: "-q, --quiet",         t: bool,                 d: "false",      x: "suppress progress UI; errors only" }
+  - { f: "--json",              t: bool,                 d: "false",      x: "emit NDJSON events and a terminal result; remain in foreground" }
+  - { f: "-b, --background",    t: bool,                 d: "false",      x: "submit a background job; query with bcmr status" }
+  - { f: "--config <PATH>",     t: path,                 d: "—",          x: "layer this file over discovered configuration" }
+  - { f: "--profile <NAME>",    t: str,                  d: "—",          x: "apply named argument defaults; overrides BCMR_PROFILE" }
 example:
   - "move ./notes ~/archive ……  rename(2)"
   - "complete · 1 path moved"
@@ -35,3 +39,6 @@ example:
 Same-device moves use `rename(2)` and complete instantly. Cross-device
 moves fall back to copy + delete with progress tracking and all the
 integrity guarantees of `bcmr copy`.
+
+Use `-r` for directories. `--json` selects structured output; add
+`--background` to submit a job instead of waiting for completion.

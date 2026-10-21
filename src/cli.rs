@@ -16,7 +16,7 @@ EXAMPLES:
       bcmr copy --background --json -V ./big.tar.gz host:dst/
 
   Compare source and destination without copying:
-      bcmr check ./project/ host:archives/
+      bcmr check -r ./project/ host:archives/
 
 ENVIRONMENT:
   BCMR_CAS_DIR                  CAS directory (default: $XDG_CACHE_HOME/bcmr/cas)
@@ -33,13 +33,14 @@ ENVIRONMENT:
   TERM=dumb                     selects plain renderer
 
 CONFIGURATION:
-  ~/.config/bcmr/config.toml      (override with $XDG_CONFIG_HOME)
+  ~/.config/bcmr/config.{toml,yaml}, then the platform config directory.
+  $BCMR_CONFIG / --config add the final override. Use bcmr doctor to inspect layers.
 
 EXIT CODES:
   0    success
-  1    transfer error / 'bcmr check' not in sync
-  2    error result in --json mode / SourceNotFound on bare 'bcmr check'
-  64   invalid arguments (clap)
+  1    operation error in human mode / 'bcmr check' not in sync
+  2    invalid arguments / configuration error / runtime error in --json mode
+  64   missing or unparseable explicit config / unknown profile
   130  Ctrl-C / SIGINT
 
 DOCUMENTATION:
@@ -67,7 +68,7 @@ EXAMPLES:
       bcmr copy --sparse=auto disk.img dst.img
 
   Compress wire payload (auto-skips already-compressed files):
-      bcmr copy --compress=auto src/ host:dst/
+      bcmr copy -r --compress=auto src/ host:dst/
 ";
 
 const MOVE_AFTER_LONG_HELP: &str = "\
@@ -84,14 +85,71 @@ EXAMPLES:
   Compare a single local file against a remote one:
       bcmr check ./report.pdf host:archive/report.pdf
 
-  Recursive directory check (size + content hash for size-matched files):
+  Recursive check (metadata triage; hash size-matched files whose mtimes differ):
       bcmr check -r ./project/ host:archive/
 
   JSON output for scripts:
-      bcmr check --json ./project/ host:archive/
+      bcmr check -r --json ./project/ host:archive/
 
   Skip content hashing (legacy size+mtime only):
-      bcmr check --no-hash ./project/ host:archive/
+      bcmr check -r --no-hash ./project/ host:archive/
+
+DIRECTORIES:
+  An existing destination directory is a parent: source project/ is compared
+  against destination/project/. Use the same parent passed to recursive copy.
+  Matching size + mtime is trusted for directory entries. Explicit file pairs
+  are always hash-checked unless --no-hash is given.
+";
+
+const INIT_AFTER_LONG_HELP: &str = "\
+ACTIVATION:
+  This command prints a script. Evaluate or source it in your shell to activate it.
+  The default prefix is empty: cp, mv, and rm become bcmr shell functions.
+  Use --cmd b for bcp, bmv, and brm. Zsh also activates their completions.
+
+EXAMPLES:
+  Zsh (add to ~/.zshrc and run in the current shell):
+      eval \"$(bcmr init zsh --cmd b)\"
+
+  Bash (add to ~/.bashrc):
+      eval \"$(bcmr init bash --cmd b)\"
+
+  Fish (add to ~/.config/fish/config.fish):
+      bcmr init fish --cmd b | source
+
+  PowerShell (add to $PROFILE):
+      bcmr init powershell --cmd b | Out-String | Invoke-Expression
+
+  Add to PATH without defining wrappers or activating zsh completions:
+      eval \"$(bcmr init zsh --no-cmd --path ~/.local/bin)\"
+";
+
+const COMPLETIONS_AFTER_LONG_HELP: &str = "\
+EXAMPLES:
+  Activate zsh completions and bcp/bmv/brm in the current shell:
+      eval \"$(bcmr init zsh --cmd b)\"
+
+  Install a zsh completion file (does not activate it in the current shell):
+      bcmr completions zsh --install
+
+  Print the install path without writing:
+      bcmr completions zsh --install --print
+
+  Remove the installed file:
+      bcmr completions zsh --install --uninstall
+
+  For file-based zsh loading, add the installed directory to fpath before compinit.
+  PowerShell has no --install support; append the generated script to $PROFILE.
+";
+
+const UPDATE_AFTER_LONG_HELP: &str = "\
+HOMEBREW:
+  Homebrew-managed binaries must be upgraded through Homebrew:
+      brew update
+      brew upgrade Bengerthelorf/tap/bcmr
+
+  Checking for a newer release is still available:
+      bcmr update --check
 ";
 
 const REMOVE_AFTER_LONG_HELP: &str = "\
@@ -132,11 +190,11 @@ pub struct Cli {
     #[arg(short = 'b', long, global = true)]
     pub background: bool,
 
-    /// Use this config file instead of ~/.config/bcmr/config.toml (layered on top of defaults)
+    /// Layer this config file over defaults and discovered configuration
     #[arg(long, global = true, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
-    /// Use a named profile from config (overrides BCMR_PROFILE)
+    /// Argument defaults for copy/move/remove/check (overrides BCMR_PROFILE)
     // argv_inject consumes --profile before clap parses; declared here only so it shows in --help.
     #[arg(long, global = true, value_name = "NAME")]
     pub profile: Option<String>,
@@ -241,7 +299,7 @@ pub struct CopyMoveArgs {
     #[arg(long, hide = true, value_parser = parse_test_mode)]
     pub test_mode: Option<TestMode>,
 
-    /// Verify file integrity after operation
+    /// Verify copied data with BLAKE3 (move: copy phase only)
     #[arg(short = 'V', long, default_value_t = false)]
     pub verify: bool,
 
@@ -253,11 +311,11 @@ pub struct CopyMoveArgs {
     #[arg(short = 's', long, default_value_t = false)]
     pub strict: bool,
 
-    /// Append data to existing file (ignores mtime, checks size only)
+    /// Append to partial destination (local: size only; remote: hash-checked prefix)
     #[arg(short = 'a', long, default_value_t = false)]
     pub append: bool,
 
-    /// Don't follow symbolic links — replicate the link itself at the destination (cp -P)
+    /// Replicate symlinks for local copies (cp -P; ordinary move rejects this flag)
     #[arg(long = "no-deref", default_value_t = false)]
     pub no_deref: bool,
 
@@ -290,20 +348,21 @@ pub enum DirectMode {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Initialize shell integration
+    /// Print a shell integration script (evaluate/source it to activate)
+    #[command(after_long_help = INIT_AFTER_LONG_HELP)]
     Init {
         /// Shell to initialize (bash, zsh, fish, powershell)
         shell: Shell,
 
-        /// Command prefix (base for aliases; empty = no prefix)
+        /// Wrapper prefix (default: empty creates cp/mv/rm; --cmd b creates bcp/bmv/brm)
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         cmd: Option<String>,
 
-        /// Explicit command prefix (overrides cmd if present)
+        /// Explicit wrapper prefix (requires --cmd; overrides its value)
         #[arg(long, requires = "cmd")]
         prefix: Option<String>,
 
-        /// Command suffix
+        /// Wrapper suffix (requires --cmd)
         #[arg(long, requires = "cmd")]
         suffix: Option<String>,
 
@@ -311,7 +370,7 @@ pub enum Commands {
         #[arg(long)]
         path: Option<PathBuf>,
 
-        /// No command prefix
+        /// Do not define command wrappers or activate zsh completions
         #[arg(long)]
         no_cmd: bool,
     },
@@ -366,6 +425,7 @@ pub enum Commands {
     },
 
     /// Check for updates and self-update
+    #[command(after_long_help = UPDATE_AFTER_LONG_HELP)]
     Update {
         /// Print the current and latest versions and exit, without installing.
         #[arg(long)]
@@ -376,6 +436,7 @@ pub enum Commands {
     CompleteRemote { partial: String },
 
     /// Generate shell completions
+    #[command(after_long_help = COMPLETIONS_AFTER_LONG_HELP)]
     Completions {
         /// Shell to generate completions for
         shell: clap_complete::Shell,
@@ -772,11 +833,34 @@ impl Commands {
 pub fn parse_args() -> Cli {
     let raw: Vec<String> = std::env::args().collect();
     // We can't set propagate_version: clap would auto-assign -V to every
-    // subcommand, colliding with --verify. Hand-roll detection so users still
-    // get `bcmr <sub> --version`.
+    // subcommand, colliding with --verify. Probe long-only subcommand versions.
     if subcommand_version_requested(&raw) {
         println!("bcmr {}", env!("CARGO_PKG_VERSION"));
         std::process::exit(0);
+    }
+    // Let clap identify real help/version requests before touching config.
+    // This respects option values and `--`, unlike scanning for flag text.
+    match Cli::try_parse_from(&raw) {
+        Err(error)
+            if matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) =>
+        {
+            error.exit();
+        }
+        Ok(cli)
+            if matches!(
+                &cli.command,
+                Commands::Doctor { .. } | Commands::Init { .. } | Commands::Completions { .. }
+            ) =>
+        {
+            if let Some(path) = &cli.config {
+                std::env::set_var("BCMR_CONFIG", path);
+            }
+            return cli;
+        }
+        _ => {}
     }
     // CONFIG is Lazy and reads $BCMR_CONFIG; propagate --config before the
     // first deref so host/profile defaults come from the file the user named.
@@ -808,33 +892,31 @@ fn validate_explicit_config(path: &str) -> Result<(), String> {
 }
 
 fn subcommand_version_requested(argv: &[String]) -> bool {
-    // Sync with Cli's global value-taking flags (--json is bool, excluded).
-    const TOP_LEVEL_FLAGS_WITH_VALUE: &[&str] = &["--config", "--profile", "--_bg"];
-    let mut i = 1;
-    while i < argv.len() {
-        let a = &argv[i];
-        if a == "--" {
-            return false;
-        }
-        if a.starts_with('-') {
-            let takes_value = !a.contains('=') && TOP_LEVEL_FLAGS_WITH_VALUE.contains(&a.as_str());
-            i += if takes_value { 2 } else { 1 };
-            continue;
-        }
-        if a == "help" {
-            return false;
-        }
-        return argv[i + 1..]
-            .iter()
-            .take_while(|t| t.as_str() != "--")
-            .any(|t| t == "--version");
-    }
-    false
+    use clap::CommandFactory;
+
+    let command = Cli::command()
+        .disable_version_flag(true)
+        .mut_subcommands(|sub| {
+            sub.version(env!("CARGO_PKG_VERSION"))
+                .disable_version_flag(true)
+                .arg(
+                    clap::Arg::new("version")
+                        .long("version")
+                        .action(clap::ArgAction::Version),
+                )
+        });
+    matches!(
+        command.try_get_matches_from(argv),
+        Err(error) if error.kind() == clap::error::ErrorKind::DisplayVersion
+    )
 }
 
 fn pre_scan_config_path(argv: &[String]) -> Option<String> {
     let mut iter = argv.iter().peekable();
     while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
         if arg == "--config" {
             return iter.next().cloned();
         }

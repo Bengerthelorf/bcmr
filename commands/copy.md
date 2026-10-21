@@ -2,7 +2,7 @@
 cmd: bcmr copy
 group: core
 sig: <sources>... <destination>
-desc: copy files or directories with blake3 verification; src and dst may be local or ssh
+desc: copy local or ssh files and directories, with optional blake3 readback verification
 tags: [stable, core]
 order: 1
 related: [bcmr move, bcmr check, bcmr remove]
@@ -15,11 +15,11 @@ flags:
   - { f: "-e, --exclude",       t: "regex...",               d: "—",          x: "exclude paths matching regex (repeatable)" }
   - { f: "-n, --dry-run",       t: bool,                     d: "false",      x: "preview without making changes" }
   - { f: "--to <DEST>",         t: "path...",                d: "—",          x: "fan-out target (repeatable); all positionals become sources" }
-  - { f: "--no-deref",          t: bool,                     d: "false",      x: "replicate symlinks instead of following them (cp -P)" }
+  - { f: "--no-deref",          t: bool,                     d: "false",      x: "local copies only: replicate symlinks instead of following them (cp -P)" }
   - { f: "-V, --verify",        t: bool,                     d: "false",      x: "recompute blake3 after copy" }
-  - { f: "-C, --resume",        t: bool,                     d: "false",      x: "resume interrupted copy (size + mtime check)" }
+  - { f: "-C, --resume",        t: bool,                     d: "false",      x: "resume interrupted copies using available saved state and hashes" }
   - { f: "-s, --strict",        t: bool,                     d: "false",      x: "strict blake3 partial-hash resume" }
-  - { f: "-a, --append",        t: bool,                     d: "false",      x: "append if dst smaller (size check only)" }
+  - { f: "-a, --append",        t: bool,                     d: "false",      x: "append to a partial file; local checks size, remote checks prefix hash" }
   - { f: "--sync",              t: bool,                     d: "false",      x: "fsync after copy" }
   - { f: "--reflink",           t: "auto|force|disable",     d: "auto",       x: "copy-on-write mode" }
   - { f: "--sparse",            t: "auto|force|disable",     d: "auto",       x: "sparse file handling" }
@@ -28,8 +28,12 @@ flags:
   - { f: "--compress",          t: "auto|zstd|lz4|none",     d: "auto",       x: "remote-wire compression" }
   - { f: "--fast",              t: bool,                     d: "false",      x: "remote only: skip server-side blake3; linux splice(2)" }
   - { f: "--direct",            t: "ssh|direct",             d: "ssh",        x: "remote data plane: ssh stream or direct TCP with AES-256-GCM" }
-  - { f: "-t, --plain",         t: bool,                     d: "false",      x: "plain 3-line progress instead of the TUI box" }
+  - { f: "--progress",          t: "auto|tui|inline|plain|off", d: "auto",      x: "choose the progress display" }
   - { f: "-q, --quiet",         t: bool,                     d: "false",      x: "suppress progress UI; errors only" }
+  - { f: "--json",              t: bool,                     d: "false",      x: "emit NDJSON events and a terminal result; remain in foreground" }
+  - { f: "-b, --background",    t: bool,                     d: "false",      x: "submit a background job; query with bcmr status" }
+  - { f: "--config <PATH>",     t: path,                     d: "—",          x: "layer this file over discovered configuration" }
+  - { f: "--profile <NAME>",    t: str,                      d: "—",          x: "apply named argument defaults; overrides BCMR_PROFILE" }
 example:
   - "scanning source ……  2,481 files · 14.2 gb"
   - "handshake (ssh) ……  ok"
@@ -38,14 +42,24 @@ example:
   - "complete · all blake3 verified"
 ---
 
-`bcmr copy` is the primary verb. It operates over local paths, remote ssh
-paths, or a mix. Every byte streams through a blake3 hasher during write —
-the destination is only sealed once the hash of the bytes on disk matches
-the source.
+`bcmr copy` operates over local paths, remote ssh paths, or a mix. Use
+`-r` for directories and `-V` to request BLAKE3 readback verification.
+Local reflink and other copy strategies can avoid streaming every byte
+through the application; readback verification is disabled by default.
 
-Resume modes (`-C`, `-s`, `-a`) differ by what they compare before
-deciding to append vs. re-copy:
+`--json` selects structured output. Add `--background` to submit a job
+instead of waiting for completion.
 
-- **`-C`** — mtime match → append; mismatch → overwrite
-- **`-s`** — blake3 partial hash match → append; mismatch → overwrite
-- **`-a`** — always append if dst is smaller; skip if same size; overwrite if larger
+Local resume modes (`-C`, `-s`, `-a`) differ in how they validate existing
+data:
+
+- **`-C`** — resume from verified chunks in a matching saved session. Without
+  usable session proof, a shorter file is recopied; equal-size files are
+  skipped only after a full hash match.
+- **`-s`** — compare the existing file's BLAKE3 hash with the source prefix;
+  append on a match, otherwise recopy.
+- **`-a`** — trust existing data: append if smaller, skip if equal size, reject
+  a larger destination. This local mode does not validate the existing prefix.
+
+Remote resume and append validate the existing prefix by hash. Remote
+`--append` rejects a mismatched or oversized destination.

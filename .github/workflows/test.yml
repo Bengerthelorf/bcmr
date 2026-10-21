@@ -62,7 +62,7 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y zsh
 
-      - name: Test real shell initialization and remote completion
+      - name: Test CLI usability and real shell integration
         if: runner.os != 'Windows'
         shell: bash
         run: |
@@ -70,6 +70,9 @@ jobs:
           export BCMR="$PWD/target/debug/bcmr"
           python3 tests/shell_integration_test.py
           python3 tests/remote_completion_test.py
+          python3 tests/cli_help_test.py
+          python3 tests/config_doctor_test.py
+          python3 tests/managed_update_test.py
 
       - name: Test Homebrew formula installation
         if: runner.os == 'macOS'

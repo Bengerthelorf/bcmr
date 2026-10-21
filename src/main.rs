@@ -116,12 +116,13 @@ Common usage:
   bcmr check -r src/ host:dst/       # compare without copying
 
   bcmr deploy <host>                 # install bcmr remotely for fast-path
-  bcmr init zsh                      # set up shell integration (bcp/bmv/brm)
-  bcmr completions zsh --install     # one-shot completion install
+  eval \"$(bcmr init zsh --cmd b)\"    # activate bcp/bmv/brm + completions
+  bcmr completions zsh --install     # install a completion file (see --help)
   bcmr doctor                        # diagnose ssh / config / PATH issues
 
 Type `bcmr help <command>` or `bcmr <command> --help` for full options.
-Configuration: ~/.config/bcmr/config.toml
+Configuration: legacy ~/.config/bcmr/config.{toml,yaml} + platform config directory.
+Run `bcmr doctor` to inspect configuration layers.
 ";
 
 #[tokio::main]
@@ -391,9 +392,10 @@ fn show_update_hint(update_rx: Option<mpsc::Receiver<Option<String>>>) {
     if let Some(rx) = update_rx {
         if let Ok(Some(version)) = rx.try_recv() {
             let message = format!(
-                "↑ Update available: v{} → v{} (run `bcmr update`)",
+                "↑ Update available: v{} → v{} (run `{}`)",
                 env!("CARGO_PKG_VERSION"),
-                version
+                version,
+                app::installation::update_command()
             );
             if crate::ui::progress::color_disabled_by_env()
                 || crate::ui::progress::terminal_controls_disabled_by_env()

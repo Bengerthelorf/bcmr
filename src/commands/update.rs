@@ -48,12 +48,13 @@ pub fn check_for_update() -> Option<String> {
 pub fn run(check_only: bool) -> Result<()> {
     let current = cargo_crate_version!();
     let json = crate::config::is_json_mode();
+    let homebrew = crate::app::installation::current_homebrew();
 
     if check_only {
         let latest = fetch_latest_version()?;
         let available = version_newer(&latest, current);
         if json {
-            let result = serde_json::json!({
+            let mut result = serde_json::json!({
                 "type": "result",
                 "status": "success",
                 "operation": "update_check",
@@ -61,6 +62,10 @@ pub fn run(check_only: bool) -> Result<()> {
                 "latest_version": latest,
                 "update_available": available,
             });
+            if let Some(installation) = &homebrew {
+                result["installation_method"] = serde_json::json!("homebrew");
+                result["update_command"] = serde_json::json!(installation.upgrade_command);
+            }
             println!("{result}");
             crate::config::mark_json_terminal_emitted();
         } else {
@@ -70,8 +75,21 @@ pub fn run(check_only: bool) -> Result<()> {
             } else {
                 println!("Latest version:  {} (up to date)", latest);
             }
+            if let Some(installation) = &homebrew {
+                println!(
+                    "Homebrew upgrade: brew update && {}",
+                    installation.upgrade_command
+                );
+            }
         }
         return Ok(());
+    }
+
+    if let Some(installation) = homebrew {
+        anyhow::bail!(
+            "Homebrew manages this installation. Run `brew update` and `{}` to update it.",
+            installation.upgrade_command
+        );
     }
 
     if !json {
@@ -84,7 +102,9 @@ pub fn run(check_only: bool) -> Result<()> {
         .repo_name("bcmr")
         .bin_name("bcmr")
         .target(platform_target()?)
+        .show_output(!json)
         .show_download_progress(!json)
+        .no_confirm(json)
         .current_version(current)
         .build()?
         .update()?;

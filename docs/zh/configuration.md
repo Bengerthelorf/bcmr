@@ -10,6 +10,8 @@ BCMR 从 `~/.config/bcmr/config.toml`（或 `config.yaml`）读取配置。所�
 ## 完整示例
 
 ```toml
+update_check = "off"     # "off"（默认，不访问网络）、"quiet" 或 "notify"
+
 [progress]
 style = "auto"           # "auto"（默认）、"tui"、"inline"、"plain" 或 "off"
 
@@ -28,7 +30,6 @@ box_style = "rounded"    # "rounded"（默认）、"double"、"heavy"、"single"
 reflink = "auto"         # "auto"（默认）、"force" 或 "disable"
 sparse = "auto"          # "auto"（默认）、"force" 或 "disable"
 
-update_check = "off"     # "off"（默认，不访问网络）、"quiet" 或 "notify"
 
 [transfer]
 fallback_warning = true  # 当 serve 快速路径失败、回退到传统 SSH 时
@@ -138,6 +139,10 @@ BCMR 按以下顺序查找配置文件：
 3. 平台特定的配置目录（通过 `directories` crate）：
    - **macOS：** `~/Library/Application Support/com.bcmr.bcmr/`
    - **Windows：** `%APPDATA%\bcmr\bcmr\`
+   - **Linux：** `$XDG_CONFIG_HOME/bcmr/`（默认 `~/.config/bcmr/`）
+4. 最后加载 `$BCMR_CONFIG` 或 `--config <PATH>` 指定的文件。
+
+后加载的值覆盖前面的值；每个目录先加载 TOML，再加载 YAML。运行 `bcmr doctor` 可查看实际加载的文件并验证合并后的配置。配置有误时仍可查看 help 和运行 doctor。`update_check` 是顶层字段，须放在所有 `[section]` 标题之前。
 
 ## 路径书签
 
@@ -151,7 +156,7 @@ logs   = "archive:/var/log/myapp/"
 ```
 
 ```sh
-bcmr copy ./project/  @proj           # → lab:/data/projects/myrepo/
+bcmr copy -r ./project/  @proj           # → lab:/data/projects/myrepo/
 bcmr copy db.gz       @proj/backups/  # → lab:/data/projects/myrepo/backups/
 bcmr copy report.pdf  @backup/today/  # → nas:/backups/today/
 ```
@@ -178,7 +183,7 @@ default_args = ["--direct", "direct"]
 ```
 
 ```sh
-bcmr copy ./project/ lab:dst/
+bcmr copy -r ./project/ lab:dst/
 # 解析为：bcmr copy -p --compress zstd --reflink force ./project/ lab:dst/
 ```
 

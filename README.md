@@ -95,10 +95,25 @@ see the [Internals](https://app.snaix.homes/bcmr/internals/) index.
 brew install Bengerthelorf/tap/bcmr
 ```
 
+Upgrade an existing Homebrew installation with:
+
+```bash
+brew update
+brew upgrade Bengerthelorf/tap/bcmr
+```
+
+Use Homebrew for upgrades; `bcmr update --check` can still check release availability. The built-in updater preserves Homebrew ownership and directs managed installations back to brew.
+
 ### Install Script (macOS / Linux)
 
 ```bash
 curl -fsSL https://app.snaix.homes/bcmr/install.sh | bash
+```
+
+If the documentation site is unavailable, use the repository’s installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Bengerthelorf/bcmr/main/install.sh | bash
 ```
 
 ### Windows
@@ -185,6 +200,8 @@ eval "$(bcmr init zsh --cmd '')"   # creates cp, mv, rm
 Create `~/.config/bcmr/config.toml`:
 
 ```toml
+update_check = "off"     # "off" (default, no network), "quiet", or "notify"
+
 [progress]
 style = "auto"          # "auto", "tui", "inline", "plain", or "off"
 
@@ -204,8 +221,6 @@ sparse = "auto"          # "auto" or "never"
 [scp]
 parallel_transfers = 4   # default number of parallel SCP workers
 compression = "auto"     # "auto", "force", or "off"
-
-update_check = "off"     # "off" (default, no network), "quiet", or "notify"
 ```
 
 ## Contributing

@@ -9,10 +9,12 @@ pub(crate) fn background_update_check(
     if matches!(
         command,
         Commands::Update { .. }
+            | Commands::Init { .. }
             | Commands::Completions { .. }
             | Commands::CompleteRemote { .. }
             | Commands::Serve { .. }
             | Commands::Deploy { .. }
+            | Commands::Doctor { .. }
     ) {
         return None;
     }

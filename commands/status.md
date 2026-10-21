@@ -1,7 +1,7 @@
 ---
 cmd: bcmr status
 group: system
-sig: "[job_id] [--json]"
+sig: "[job_id] [options]"
 desc: inspect explicit --background jobs (scanning / running / done / failed / interrupted)
 tags: [stable]
 order: 3
@@ -9,10 +9,11 @@ related: [bcmr copy, bcmr move, bcmr remove]
 flags:
   - { f: "<job_id>", t: str,  d: "—",     x: "specific job id, or omit for list of recent jobs" }
   - { f: "--json",   t: bool, d: "false", x: "structured wrapper for scripts" }
-  - { f: "--watch",  t: bool, d: "false", x: "follow a running job's log until its terminal result" }
+  - { f: "--watch",  t: bool, d: "false", x: "requires job_id; follow its log until the terminal result" }
   - { f: "--rm",     t: bool, d: "false", x: "remove the named job's log (with --all: every job)" }
   - { f: "--all",    t: bool, d: "false", x: "with --rm, target every job log" }
   - { f: "--gc",     t: bool, d: "false", x: "drop job logs older than the 7d retention" }
+  - { f: "--config <PATH>", t: path, d: "—", x: "layer this file over discovered configuration" }
 example:
   - "764dee358ff4   running       78%"
   - "2c9a1f40d1ea   done         100%"
@@ -31,3 +32,6 @@ classifies each job:
 - `interrupted` — pid gone, no terminal event written (crash / SIGKILL / OOM)
 
 Logs older than 7 days are cleaned up when a new job starts.
+
+`--all` requires `--rm` and cannot name a job. `--gc` cannot be combined
+with `--rm` or `--all`; `--watch` cannot be combined with cleanup flags.

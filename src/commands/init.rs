@@ -9,8 +9,12 @@ pub fn generate_init_script(
     path: Option<&PathBuf>,
     no_cmd: bool,
 ) -> String {
-    let exe_path = std::env::current_exe()
-        .unwrap_or_else(|_| PathBuf::from("bcmr"))
+    let exe_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("bcmr"));
+    // Homebrew removes old kegs during upgrades. Keep sourced wrappers on the
+    // verified opt link so they follow the active version in the same shell.
+    let exe_path = crate::app::installation::homebrew_from_executable(&exe_path)
+        .and_then(|installation| installation.stable_executable)
+        .unwrap_or(exe_path)
         .display()
         .to_string();
 

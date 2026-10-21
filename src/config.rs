@@ -198,7 +198,7 @@ impl Default for Config {
 pub static CONFIG: Lazy<Config> = Lazy::new(|| {
     Config::new().unwrap_or_else(|e| {
         eprintln!("bcmr: failed to parse configuration: {e}");
-        eprintln!("bcmr: check ~/.config/bcmr/config.{{toml,yaml}} or $BCMR_CONFIG");
+        eprintln!("bcmr: run `bcmr doctor` to inspect active configuration files, or select one with --config <PATH>");
         std::process::exit(2);
     })
 });
@@ -243,8 +243,44 @@ pub fn resolve_path_alias(
     }
 }
 
+/// Existing file layers, in the same order used by normal commands.
+pub fn config_sources() -> Vec<PathBuf> {
+    let mut sources = Vec::new();
+    let user_config_dir =
+        directories::UserDirs::new().map(|u| u.home_dir().join(".config").join("bcmr"));
+    let mut config_dirs = Vec::new();
+    if let Some(dir) = user_config_dir {
+        config_dirs.push(dir);
+    }
+    if let Some(proj_dirs) = ProjectDirs::from("com", "bcmr", "bcmr") {
+        let dir = proj_dirs.config_dir().to_path_buf();
+        if !config_dirs.contains(&dir) {
+            config_dirs.push(dir);
+        }
+    }
+    for dir in config_dirs {
+        for filename in ["config.toml", "config.yaml"] {
+            let path = dir.join(filename);
+            if path.exists() {
+                sources.push(path);
+            }
+        }
+    }
+    if let Ok(override_path) = std::env::var("BCMR_CONFIG") {
+        let path = PathBuf::from(override_path);
+        if path.exists() {
+            sources.push(path);
+        }
+    }
+    sources
+}
+
 impl Config {
     pub fn new() -> Result<Self, ConfigError> {
+        Self::from_sources(&config_sources())
+    }
+
+    pub fn from_sources(sources: &[PathBuf]) -> Result<Self, ConfigError> {
         let mut s = ConfigLoader::builder();
 
         let defaults = Config::default();
@@ -306,42 +342,8 @@ impl Config {
             .set_default("update_check", "off")
             .unwrap();
 
-        if let Some(user_dirs) = directories::UserDirs::new() {
-            let config_dir = user_dirs.home_dir().join(".config").join("bcmr");
-            let config_path = config_dir.join("config.toml");
-            if config_path.exists() {
-                s = s.add_source(File::from(config_path));
-            }
-            let yaml_path = config_dir.join("config.yaml");
-            if yaml_path.exists() {
-                s = s.add_source(File::from(yaml_path));
-            }
-        }
-
-        if let Some(proj_dirs) = ProjectDirs::from("com", "bcmr", "bcmr") {
-            let config_dir = proj_dirs.config_dir();
-            let user_config_dir =
-                directories::UserDirs::new().map(|u| u.home_dir().join(".config").join("bcmr"));
-            let is_duplicate = user_config_dir
-                .as_ref()
-                .is_some_and(|u| config_dir == u.as_path());
-            if !is_duplicate {
-                let config_path = config_dir.join("config.toml");
-                if config_path.exists() {
-                    s = s.add_source(File::from(config_path));
-                }
-                let yaml_path = config_dir.join("config.yaml");
-                if yaml_path.exists() {
-                    s = s.add_source(File::from(yaml_path));
-                }
-            }
-        }
-
-        if let Ok(override_path) = std::env::var("BCMR_CONFIG") {
-            let path = std::path::PathBuf::from(&override_path);
-            if path.exists() {
-                s = s.add_source(File::from(path));
-            }
+        for path in sources {
+            s = s.add_source(File::from(path.clone()));
         }
 
         let config: Self = s.build()?.try_deserialize()?;

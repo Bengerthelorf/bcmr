@@ -67,10 +67,25 @@ bcmr 不是 delta-sync 引擎。如果你在 100 GB 文件里只改了 3 MB 而�
 brew install Bengerthelorf/tap/bcmr
 ```
 
+升级已有的 Homebrew 安装：
+
+```bash
+brew update
+brew upgrade Bengerthelorf/tap/bcmr
+```
+
+通过 Homebrew 安装时，请使用 brew 升级；仍可用 `bcmr update --check` 查询新版本。内置自更新会识别 Homebrew 安装并给出正确的升级命令。
+
 ### 安装脚本 (macOS / Linux)
 
 ```bash
 curl -fsSL https://app.snaix.homes/bcmr/install.sh | bash
+```
+
+如果文档站无法访问，可使用仓库中的安装脚本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Bengerthelorf/bcmr/main/install.sh | bash
 ```
 
 ### Windows
@@ -157,6 +172,8 @@ eval "$(bcmr init zsh --cmd '')"   # 创建 cp, mv, rm
 创建 `~/.config/bcmr/config.toml`：
 
 ```toml
+update_check = "off"     # "off"（默认，不访问网络）、"quiet" 或 "notify"
+
 [progress]
 style = "auto"          # "auto"、"tui"、"inline"、"plain" 或 "off"
 
@@ -176,8 +193,6 @@ sparse = "auto"          # "auto" 或 "never"
 [scp]
 parallel_transfers = 4   # 默认并行 SCP 工作线程数
 compression = "auto"     # "auto"、"force" 或 "off"
-
-update_check = "off"     # "off"（默认，不访问网络）、"quiet" 或 "notify"
 ```
 
 ## 贡献

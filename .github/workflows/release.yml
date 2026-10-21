@@ -319,6 +319,9 @@ jobs:
           test "$("$BCMR" --version)" = "bcmr $EXPECTED_VERSION"
           python3 tests/shell_integration_test.py
           python3 tests/remote_completion_test.py
+          python3 tests/cli_help_test.py
+          python3 tests/config_doctor_test.py
+          python3 tests/managed_update_test.py
 
   publish-crate:
     name: Publish to crates.io
@@ -405,3 +408,6 @@ jobs:
           test "$("$BCMR" --version)" = "bcmr $EXPECTED_VERSION"
           python3 tests/shell_integration_test.py
           python3 tests/remote_completion_test.py
+          python3 tests/cli_help_test.py
+          python3 tests/config_doctor_test.py
+          python3 tests/managed_update_test.py

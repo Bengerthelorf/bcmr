@@ -166,43 +166,37 @@ fn run_local_checks() -> Vec<Check> {
 }
 
 fn check_config_file() -> Check {
-    let path = std::env::var_os("BCMR_CONFIG")
-        .map(PathBuf::from)
-        .or_else(|| {
-            directories::UserDirs::new().map(|u| {
-                u.home_dir()
-                    .join(".config")
-                    .join("bcmr")
-                    .join("config.toml")
-            })
-        });
-    let Some(path) = path else {
-        return Check::warn(
-            "config file",
-            "could not resolve $HOME and BCMR_CONFIG is unset",
-            "set $HOME to a real directory or pass --config <PATH>",
-        );
+    let sources = crate::config::config_sources();
+    let layers = if sources.is_empty() {
+        "no configuration files found (using built-in defaults)".to_string()
+    } else {
+        format!(
+            "active layers (in order): {}",
+            sources
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(" -> ")
+        )
     };
-    if !path.exists() {
-        return Check::ok(
+    match crate::config::Config::from_sources(&sources) {
+        Err(error) => Check::fail(
             "config file",
-            format!("{} (none — using built-in defaults)", path.display()),
-        );
-    }
-    match std::fs::read_to_string(&path) {
-        Ok(s) => match toml::from_str::<toml::Value>(&s) {
-            Ok(_) => Check::ok("config file", format!("{} (valid TOML)", path.display())),
-            Err(e) => Check::fail(
-                "config file",
-                format!("{} (parse error)", path.display()),
-                &format!("fix or remove the file; error: {}", e),
-            ),
-        },
-        Err(e) => Check::fail(
-            "config file",
-            format!("{} (unreadable)", path.display()),
-            &format!("fix permissions; error: {}", e),
+            format!("{layers}; configuration error: {error}"),
+            "fix the configuration error in the listed files, then rerun bcmr doctor",
         ),
+        Ok(_) => {
+            if let Ok(path) = std::env::var("BCMR_CONFIG") {
+                if !std::path::Path::new(&path).exists() {
+                    return Check::warn(
+                        "config file",
+                        format!("{layers}; BCMR_CONFIG {path} is missing and was ignored"),
+                        "correct BCMR_CONFIG or --config, or unset BCMR_CONFIG to use discovered files",
+                    );
+                }
+            }
+            Check::ok("config file", format!("{layers}; valid configuration"))
+        }
     }
 }
 
@@ -211,7 +205,10 @@ fn check_jobs_dir() -> Check {
     if !dir.exists() {
         return Check::ok(
             "jobs dir",
-            format!("{} (empty — created on first --json run)", dir.display()),
+            format!(
+                "{} (empty — created on first --background job)",
+                dir.display()
+            ),
         );
     }
     let entries = match std::fs::read_dir(&dir) {

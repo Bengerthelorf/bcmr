@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise generated shell scripts against a real zsh. Set BCMR to the binary."""
+import json
 import os
 import pathlib
 import pty
@@ -8,6 +9,7 @@ import signal
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -76,6 +78,70 @@ class ShellIntegrationTests(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertFalse((self.root / "BCMR_INJECTION").exists())
         self.assertFalse((self.root / "BCMR_BACKTICK").exists())
+
+    # A wrapper sourced before an upgrade must follow opt after old keg cleanup.
+    def test_homebrew_wrappers_survive_keg_upgrade_and_cleanup(self):
+        for shell_name in ("bash", "zsh"):
+            with self.subTest(shell=shell_name):
+                self.assert_homebrew_upgrade_survives(shell_name)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux resolves executable symlinks")
+    def test_linux_homebrew_path_wrappers_survive_keg_cleanup(self):
+        for shell_name in ("bash", "zsh"):
+            with self.subTest(shell=shell_name):
+                self.assert_homebrew_upgrade_survives(shell_name, via_path=True)
+
+    def assert_homebrew_upgrade_survives(self, shell_name, via_path=False):
+        shell = shutil.which(shell_name)
+        if not shell:
+            self.skipTest(f"{shell_name} is required")
+        prefix = self.root / f"{shell_name} brew's custom prefix"
+        for version in ("0.7.0", "0.7.1"):
+            keg = prefix / "Cellar/bcmr" / version
+            (keg / "bin").mkdir(parents=True)
+            shutil.copy2(BCMR, keg / "bin/bcmr")
+            receipt = {
+                "homebrew_version": "6.0.22",
+                "source": {
+                    "tap": "bengerthelorf/tap",
+                    "spec": "stable",
+                    "path": str(prefix / "Library/Taps/bengerthelorf/homebrew-tap/Formula/bcmr.rb"),
+                    "versions": {"stable": version, "head": None, "version_scheme": 0},
+                },
+            }
+            (keg / "INSTALL_RECEIPT.json").write_text(json.dumps(receipt))
+        opt = prefix / "opt/bcmr"
+        opt.parent.mkdir()
+        opt.symlink_to("../Cellar/bcmr/0.7.0")
+        linked = prefix / "bin/bcmr"
+        linked.parent.mkdir()
+        linked.symlink_to("../opt/bcmr/bin/bcmr")
+        old_keg = prefix / "Cellar/bcmr/0.7.0"
+        env = dict(self.env, PATH=str(linked.parent) + os.pathsep + self.env["PATH"],
+                   XDG_CONFIG_HOME=str(self.root / "config"))
+        executable = "bcmr" if via_path else str(old_keg / "bin/bcmr")
+        generated = subprocess.check_output([executable, "init", shell_name, "--cmd", "b"],
+                                            env=env, text=True)
+        wrapper_checks = '\n'.join(
+            f'{command} --help >/dev/null || exit {code}'
+            for code, command in enumerate(("bcp", "bmv", "brm"), start=40))
+        script = generated + "\n" + wrapper_checks + f'''
+command rm -- {shlex.quote(str(opt))}
+command ln -s -- ../Cellar/bcmr/0.7.1 {shlex.quote(str(opt))}
+command rm -rf -- {shlex.quote(str(old_keg))}
+{shlex.quote(str(linked))} --version >/dev/null || exit 43
+{wrapper_checks}
+'''
+        if shell_name == "zsh":
+            # Regeneration must also use the stable executable after the upgrade.
+            script += "\nunfunction _bcmr _bcmr_with_remote\n" + generated + '''
+(( $+functions[_bcmr] && $+functions[_bcmr_with_remote] )) || exit 44
+[[ ${_comps[bcp]} == _bcp ]] || exit 45
+'''
+        result = subprocess.run([shell, "-f", "-c", script], env=env, cwd=self.root,
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stderr, "")
 
     def test_path_argument_is_literal(self):
         path = self.root / 'bin "quoted" $(touch BCMR_INJECTION) `touch BCMR_BACKTICK` 雪'

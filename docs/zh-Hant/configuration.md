@@ -10,6 +10,8 @@ BCMR 從 `~/.config/bcmr/config.toml`（或 `config.yaml`）讀取設定。所�
 ## 完整範例
 
 ```toml
+update_check = "off"     # "off"（預設，不存取網路）、"quiet" 或 "notify"
+
 [progress]
 style = "auto"           # "auto"（預設）、"tui"、"inline"、"plain" 或 "off"
 
@@ -28,7 +30,6 @@ box_style = "rounded"    # "rounded"（預設）、"double"、"heavy"、"single"
 reflink = "auto"         # "auto"（預設）、"force" 或 "disable"
 sparse = "auto"          # "auto"（預設）、"force" 或 "disable"
 
-update_check = "off"     # "off"（預設，不存取網路）、"quiet" 或 "notify"
 
 [transfer]
 fallback_warning = true  # 當 serve 快速路徑失敗、退回到傳統 SSH 時
@@ -138,6 +139,10 @@ BCMR 按以下順序查找設定檔：
 3. 平台特定的設定目錄（透過 `directories` crate）：
    - **macOS：** `~/Library/Application Support/com.bcmr.bcmr/`
    - **Windows：** `%APPDATA%\bcmr\bcmr\`
+   - **Linux：** `$XDG_CONFIG_HOME/bcmr/`（預設 `~/.config/bcmr/`）
+4. 最後載入 `$BCMR_CONFIG` 或 `--config <PATH>` 指定的檔案。
+
+後載入的值覆蓋前面的值；每個目錄先載入 TOML，再載入 YAML。執行 `bcmr doctor` 可查看實際載入的檔案並驗證合併後的設定。設定有誤時仍可查看 help 和執行 doctor。`update_check` 是頂層欄位，須放在所有 `[section]` 標題之前。
 
 ## 路徑書籤
 
@@ -151,7 +156,7 @@ logs   = "archive:/var/log/myapp/"
 ```
 
 ```sh
-bcmr copy ./project/  @proj           # → lab:/data/projects/myrepo/
+bcmr copy -r ./project/  @proj           # → lab:/data/projects/myrepo/
 bcmr copy db.gz       @proj/backups/  # → lab:/data/projects/myrepo/backups/
 bcmr copy report.pdf  @backup/today/  # → nas:/backups/today/
 ```
@@ -178,7 +183,7 @@ default_args = ["--direct", "direct"]
 ```
 
 ```sh
-bcmr copy ./project/ lab:dst/
+bcmr copy -r ./project/ lab:dst/
 # 解析為：bcmr copy -p --compress zstd --reflink force ./project/ lab:dst/
 ```
 

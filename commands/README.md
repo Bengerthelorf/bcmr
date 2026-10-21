@@ -10,6 +10,30 @@ Keep files thin: the frontmatter *is* the data. The markdown body is
 optional long-form prose that shows in the detail panel when a reader
 picks a command.
 
+## Shared options
+
+All commands display these global options in `--help`. The tables in each
+command page list the options that affect that command. Their scope is:
+
+| Option | Scope and behavior |
+| --- | --- |
+| `--json` | Structured output for copy, move, remove, check, status, doctor, ls, stat, du, hash, and update. Init and completions keep their script output; deploy keeps its human diagnostics. Runtime errors use JSON in JSON mode. |
+| `-b, --background` | Only copy, move, and remove accept background execution. Other commands reject it. Use `bcmr status` to inspect a submitted job. |
+| `--config <PATH>` | Layer this file over defaults and discovered configuration. Init and completions generate scripts without loading configuration and ignore this option. |
+| `--profile <NAME>` | Apply named argument defaults to copy, move, remove, and check; override `BCMR_PROFILE`. |
+| `-h, --help` | Print command help; `--help` includes extended examples where available. |
+
+Help, versions, init, and completions remain available when configuration needs
+repair. Doctor reports configuration errors directly, including syntax and
+schema validation failures across the active layers.
+
+`--json` alone runs in the foreground. For JSON or background overwrites,
+use `--force --yes`. For JSON or background removal, use `--yes` or
+`--force` (or `--dry-run` to preview).
+
+`bcmr --version` prints the version. Subcommands also accept `--version`;
+`-V` on copy/move means verification.
+
 ## Frontmatter fields
 
 | field      | type       | required | what                                                                |

@@ -8,6 +8,8 @@ order: 1
 related: [bcmr stat, bcmr du, bcmr hash]
 flags:
   - { f: "<path>", t: "host:path | @bookmark", d: "—", x: "remote path to list" }
+  - { f: "--json", t: bool, d: "false", x: "emit a structured directory listing" }
+  - { f: "--config <PATH>", t: path, d: "—", x: "layer this file over discovered configuration" }
 example:
   - "d        -  src"
   - "- 14.2 MB  data.bin"

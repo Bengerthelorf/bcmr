@@ -1,6 +1,7 @@
 pub(crate) mod argv_inject;
 pub(crate) mod commands;
 pub(crate) mod completions;
+pub(crate) mod installation;
 pub(crate) mod prompts;
 pub(crate) mod runners;
 pub(crate) mod status;

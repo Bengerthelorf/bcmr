@@ -9,6 +9,8 @@ BCMR reads configuration from `~/.config/bcmr/config.toml` (or `config.yaml`). A
 ## Full Example
 
 ```toml
+update_check = "off"     # "off" (default, no network), "quiet", or "notify"
+
 [progress]
 style = "auto"           # "auto" (default), "tui", "inline", "plain", or "off"
 
@@ -27,7 +29,6 @@ box_style = "rounded"    # "rounded" (default), "double", "heavy", "single"
 reflink = "auto"         # "auto" (default), "force", or "disable"
 sparse = "auto"          # "auto" (default), "force", or "disable"
 
-update_check = "off"     # "off" (default, no network), "quiet", or "notify"
 
 [scp]
 parallel_transfers = 4   # concurrent SSH transfers (default: 4)
@@ -137,6 +138,10 @@ BCMR checks these paths in order:
 3. Platform-specific config directory (via `directories` crate):
    - **macOS:** `~/Library/Application Support/com.bcmr.bcmr/`
    - **Windows:** `%APPDATA%\bcmr\bcmr\`
+   - **Linux:** `$XDG_CONFIG_HOME/bcmr/` (defaults to `~/.config/bcmr/`)
+4. `$BCMR_CONFIG`, or the file selected by `--config <PATH>`, is loaded last.
+
+Later files override earlier values; each directory loads TOML before YAML. Run `bcmr doctor` to see active files and validate the merged configuration. Help and doctor remain available when configuration is invalid. `update_check` is a top-level key, before any `[section]` header.
 
 ## Path Bookmarks
 
@@ -150,7 +155,7 @@ logs   = "archive:/var/log/myapp/"
 ```
 
 ```sh
-bcmr copy ./project/  @proj           # → lab:/data/projects/myrepo/
+bcmr copy -r ./project/  @proj           # → lab:/data/projects/myrepo/
 bcmr copy db.gz       @proj/backups/  # → lab:/data/projects/myrepo/backups/
 bcmr copy report.pdf  @backup/today/  # → nas:/backups/today/
 ```
@@ -177,7 +182,7 @@ default_args = ["--direct", "direct"]
 ```
 
 ```sh
-bcmr copy ./project/ lab:dst/
+bcmr copy -r ./project/ lab:dst/
 # resolves to: bcmr copy -p --compress zstd --reflink force ./project/ lab:dst/
 ```
 

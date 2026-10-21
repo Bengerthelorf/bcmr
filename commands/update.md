@@ -8,13 +8,24 @@ order: 1
 related: [bcmr deploy]
 flags:
   - { f: "--check", t: bool, d: "false", x: "print current and latest versions without installing" }
+  - { f: "--json", t: bool, d: "false", x: "emit a structured update check or installation result" }
+  - { f: "--config <PATH>", t: path, d: "—", x: "layer this file over discovered configuration" }
 example:
-  - "current: 0.9.0"
-  - "latest:  0.9.1"
-  - "downloading ……  ok"
-  - "replaced /usr/local/bin/bcmr · all good"
+  - "bcmr update --check"
+  - "Current version: 0.7.0"
+  - "Latest version:  0.7.0 (up to date)"
 ---
 
-bcmr can also run this check in the background once per invocation (rate
-limited). Off by default — opt in with `update_check = "notify"` in
+For a Homebrew installation, upgrade through Homebrew:
+
+```sh
+brew update
+brew upgrade Bengerthelorf/tap/bcmr
+```
+
+`bcmr update --check` remains available. Self-update refuses to replace a
+Homebrew-managed binary.
+
+bcmr can also run this check in the background on eligible commands.
+Off by default — opt in with `update_check = "notify"` in
 [config](/guide/configuration).

@@ -1,7 +1,7 @@
 ---
 cmd: bcmr deploy
 group: system
-sig: <target> [--path <path>]
+sig: <target> [--path <path>] [--sudo]
 desc: install bcmr on a remote host (same-platform or cross-platform via github releases)
 tags: [stable]
 order: 2
@@ -10,10 +10,11 @@ flags:
   - { f: "<target>",  t: "user@host",      d: "—",                    x: "remote ssh target" }
   - { f: "--path",    t: path,             d: "~/.local/bin/bcmr",    x: "installation path on remote" }
   - { f: "--sudo",    t: bool,             d: "false",                x: "use sudo for the remote install step (passwordless)" }
+  - { f: "--config <PATH>", t: path,        d: "—",                    x: "layer this file over discovered configuration" }
 example:
   - "probing remote ……  linux/x86_64"
   - "same arch · uploading local binary"
-  - "bcmr 0.9.1 installed at ~/.local/bin/bcmr"
+  - "bcmr 0.7.0 installed at ~/.local/bin/bcmr"
 ---
 
 Enables the [serve protocol](/guide/remote-copy#serve-protocol) for direct-tcp
