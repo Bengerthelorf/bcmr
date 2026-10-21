@@ -305,7 +305,7 @@ pub(super) enum Reader {
         offset: u64,
     },
     Ssh {
-        child: Child,
+        child: Box<Child>,
         stdout: ChildStdout,
         stderr: tokio::task::JoinHandle<String>,
     },
@@ -371,7 +371,7 @@ impl Reader {
                         .ok_or_else(|| backend::invalid("SSH reader stderr unavailable"))?,
                 ));
                 Ok(Self::Ssh {
-                    child,
+                    child: Box::new(child),
                     stdout,
                     stderr,
                 })
