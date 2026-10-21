@@ -83,9 +83,12 @@ mod tests {
         std::fs::create_dir(&opt).unwrap();
         symlink(&keg, opt.join("bcmr")).unwrap();
         let installation = homebrew_from_executable(&binary).unwrap();
+        // The detector resolves prefix aliases such as macOS /var and /tmp,
+        // while retaining the opt link that must follow later upgrades.
+        let canonical_root = std::fs::canonicalize(root.path()).unwrap();
         assert_eq!(
             installation.stable_executable,
-            Some(opt.join("bcmr/bin/bcmr"))
+            Some(canonical_root.join("opt/bcmr/bin/bcmr"))
         );
         assert_eq!(
             installation.upgrade_command,
