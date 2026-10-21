@@ -475,3 +475,21 @@ fn show_update_hint(update_rx: Option<mpsc::Receiver<Option<String>>>) {
         }
     }
 }
+
+#[cfg(test)]
+mod future_stack_tests {
+    #[test]
+    fn command_dispatch_future_stays_within_stack_budget() {
+        fn future_size<F>(_: impl FnOnce() -> F) -> usize {
+            std::mem::size_of::<F>()
+        }
+        // All command branches contribute to this future, even `check` and
+        // `--help`. Keep room for debug-build construction/polling on Windows'
+        // default 1 MiB main stack without increasing the platform stack limit.
+        let bytes = future_size(super::run);
+        assert!(
+            bytes <= 128 * 1024,
+            "command dispatch future occupies {bytes} bytes"
+        );
+    }
+}

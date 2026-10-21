@@ -191,7 +191,7 @@ class _TimestampPermissionCases:
     backend_options = ()
 
     def deny_timestamp_changes(self, destination):
-        subprocess.run(["chmod", "+a", "everyone deny writeattr", str(destination)],
+        subprocess.run(["/bin/chmod", "+a", "everyone deny writeattr", str(destination)],
                        check=True, capture_output=True)
         metadata = destination.stat()
         # Exercise the real filesystem permission, not a mocked chmod result.

@@ -146,7 +146,7 @@ async fn local_content(
                 None
             };
             let mut hasher = blake3::Hasher::new();
-            let mut buffer = [0u8; 64 * 1024];
+            let mut buffer = vec![0u8; 64 * 1024];
             loop {
                 crate::core::interrupt::check()?;
                 let n = file.read(&mut buffer).await?;
@@ -310,7 +310,7 @@ cat <&3
         String::from_utf8_lossy(&retained).into_owned()
     });
     let mut hash = blake3::Hasher::new();
-    let mut buffer = [0; 64 * 1024];
+    let mut buffer = vec![0u8; 64 * 1024];
     loop {
         crate::core::interrupt::check()?;
         let n = stdout.read(&mut buffer).await?;
