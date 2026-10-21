@@ -160,7 +160,7 @@ async fn probe(remote: &RemotePath, no_deref: bool) -> Result<Probe, BcmrError> 
         return Err(invalid_listing(remote, "incomplete child metadata"));
     }
     let mut children = Vec::new();
-    for record in fields[4..].chunks_exact(3) {
+    for record in fields[4..].as_chunks::<3>().0 {
         let name = record[0];
         if name.is_empty() || name == b"." || name == b".." || name.contains(&b'/') {
             return Err(invalid_listing(remote, "invalid child name"));

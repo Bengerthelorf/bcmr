@@ -300,7 +300,7 @@ async fn snapshots(sources: &[RemotePath], label: &str) -> Result<Vec<Snapshot>,
                 "cleanup metadata has an unexpected field count".into(),
             ));
         }
-        for (source, fields) in batch.iter().zip(fields.chunks_exact(4)) {
+        for (source, fields) in batch.iter().zip(fields.as_chunks::<4>().0) {
             let text = |bytes: &[u8]| {
                 String::from_utf8(bytes.to_vec())
                     .map_err(|_| BcmrError::InvalidInput("non-UTF-8 cleanup metadata".into()))
