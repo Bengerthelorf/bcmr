@@ -64,6 +64,9 @@ function {prefix}rm{suffix}() {{
 
                 if matches!(shell, Shell::Zsh) {
                     script.push_str(&format!(
+                        "\n# Let bcmr expand source stars, including remote paths, before zsh NOMATCH.\nalias {prefix}cp{suffix}='noglob {prefix}cp{suffix}'\nalias {prefix}mv{suffix}='noglob {prefix}mv{suffix}'\n"
+                    ));
+                    script.push_str(&format!(
                         r#"
 # Initialize completion only when necessary. Keep compinit's security checks.
 # An anonymous function keeps temporary state out of the user's shell.

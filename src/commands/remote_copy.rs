@@ -17,6 +17,7 @@ use serve::{handle_serve_download, handle_serve_upload};
 
 pub(super) fn transfer_options_from_cli(cli: &Commands) -> remote::TransferOptions {
     remote::TransferOptions {
+        force: cli.is_force(),
         preserve: cli.is_preserve(),
         verify: cli.is_verify(),
         resume: cli.is_resume(),
@@ -246,6 +247,25 @@ pub(super) fn resolve_upload_remote(
     }
 }
 
+pub(super) fn resolve_download_local(
+    source: &RemotePath,
+    dest: &std::path::Path,
+) -> Result<PathBuf> {
+    if crate::core::destination::local_is_directory(dest) {
+        if source.file_name() == "." {
+            // An explicit source login-directory shorthand retains its
+            // existing contents semantics; listing entries are still checked.
+            return Ok(dest.to_path_buf());
+        }
+        Ok(crate::core::destination::remote_entry_path(
+            dest,
+            source.file_name(),
+        )?)
+    } else {
+        Ok(dest.to_path_buf())
+    }
+}
+
 pub async fn handle_remote_copy(
     args: &Commands,
     sources: &[std::path::PathBuf],
@@ -257,6 +277,23 @@ pub async fn handle_remote_copy(
     let is_upload = remote_dest_initial.is_some();
 
     reject_remote_to_remote(sources, &remote_dest_initial)?;
+
+    if !is_upload {
+        if sources
+            .iter()
+            .any(|source| parse_remote_path(&source.to_string_lossy()).is_none())
+        {
+            anyhow::bail!(
+                "Mixed local/remote sources to a local destination are not supported. Copy them in separate commands."
+            );
+        }
+        if sources.len() > 1 && !crate::core::destination::local_is_directory(dest) {
+            anyhow::bail!(
+                "When downloading multiple sources, destination '{}' must be a directory (existing or ending in '/')",
+                dest.display()
+            );
+        }
+    }
 
     if args.is_no_deref() {
         anyhow::bail!(
@@ -319,6 +356,15 @@ pub async fn handle_remote_copy(
     let dest_str = dest.to_string_lossy();
     let remote_dest = parse_remote_path(&dest_str);
 
+    if let Some(remote) = &remote_dest {
+        if sources.len() > 1 && remote.path != "." && !remote.path.ends_with('/') {
+            anyhow::bail!(
+                "When uploading multiple sources, destination '{}' must be a directory (existing or ending in '/')",
+                remote
+            );
+        }
+    }
+
     let compression_mode = CONFIG.scp.compression.to_lowercase();
     let compress = match compression_mode.as_str() {
         "force" => true,
@@ -376,6 +422,16 @@ pub async fn handle_remote_copy(
     let serve_parallel = parallel.max(1);
 
     let ssh_target = check_target.ssh_target();
+    // A serve pool is bound to one host. Keep each source's original host on
+    // mixed-host downloads rather than looking up every path on the first host.
+    if !is_upload
+        && sources.iter().any(|source| {
+            parse_remote_path(&source.to_string_lossy())
+                .is_some_and(|remote| remote.ssh_target() != ssh_target)
+        })
+    {
+        return handle_remote_download(args, sources, dest, parallel, excludes).await;
+    }
     let serve_result = if let Some(ref rdest) = remote_dest {
         handle_serve_upload(args, sources, rdest, &ssh_target, excludes, serve_parallel).await
     } else {
@@ -404,7 +460,7 @@ pub async fn handle_remote_copy(
                 };
                 eprintln!(
                     "\nbcmr: serve fast path unavailable ({msg}).\n\
-                     bcmr: falling back to legacy SSH (per-file scp \
+                     bcmr: falling back to legacy SSH (per-file shell \
                      workers) — slower by ~5-10× on many-file batches.\n\
                      bcmr: set `transfer.fallback_warning = false` in \
                      ~/.config/bcmr/config.toml to silence this.{sync_caveat}"

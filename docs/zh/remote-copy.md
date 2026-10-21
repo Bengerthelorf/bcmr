@@ -9,6 +9,21 @@ BCMR 支持使用 SCP 风格语法通过 SSH 复制文件到远程主机或从�
 
 ## 语法
 
+### 源路径中的星号
+
+复制和移动支持本地及远程源路径中的 `*`。直接调用 bcmr 时请加引号，让 Shell 将模式原样传入：
+
+```bash
+bcmr copy 'mini_m2:/Users/snaix/Downloads/deecamp中期检查*' ~/Downloads/
+bcmr copy 'host:~/reports/report*' ./downloads/
+```
+
+执行 `eval "$(bcmr init zsh --cmd b)"` 后，`bcp`、`bmv` 也支持不加引号的星号。生成的 `noglob` 别名只作用于这两个包装命令，不改变 zsh 的 `NOMATCH` 设置或其他命令。升级后需要重新初始化。
+
+`*` 匹配单个路径层级内的零个或多个字符，不跨 `/`。隐藏文件需显式以点号开头；匹配到目录仍需 `-r`。无匹配时在复制前报错。已存在的精确路径优先按字面处理，包括名称本身含 `*` 的文件；目标路径始终按字面处理。仅 `*` 有模式含义，`?`、方括号和递归 `**` 不作为额外操作符。多目标操作共用一次展开的源列表。
+
+其他与 scp 的差异见 [scp 功能对照](./scp-compatibility.md)。
+
 ```bash
 # 上传：本地 → 远程
 bcmr copy local_file.txt user@host:/remote/path/
@@ -57,7 +72,7 @@ BCMR 有**两套独立**的压缩层，请区分：
 
 ### SSH 层（传统 SCP 路径）
 
-远端没有安装 bcmr，传输回退到 SCP 时，SSH 传输层可以用 zlib 压缩。在 `[scp]` 中配置：
+远端没有安装 bcmr，传输回退到传统 SSH 通道时，SSH 传输层可以用 zlib 压缩。在 `[scp]` 中配置：
 
 | 值 | 行为 |
 |----|------|
@@ -208,3 +223,5 @@ BCMR 通过 `[user@]host:path` 格式检测远程路径。以下模式被识别�
 - 相对路径（`./file`、`../file`）
 - 主目录（`~/file`）
 - Windows 盘符（`C:\file`）
+
+目标路径规则和仍未统一的行为见 [本地与远程行为对照](./local-remote-semantics.md)。

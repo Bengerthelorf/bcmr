@@ -1,6 +1,6 @@
 use super::{
-    collect_upload_files, progress_mode, resolve_upload_remote, run_parallel_transfers,
-    transfer_options_from_cli, TransferItem,
+    collect_upload_files, progress_mode, resolve_download_local, resolve_upload_remote,
+    run_parallel_transfers, transfer_options_from_cli, TransferItem,
 };
 use crate::cli::Commands;
 use crate::core::remote::{self, parse_remote_path, RemotePath};
@@ -51,7 +51,7 @@ pub(super) async fn handle_remote_upload(
                     resolve_upload_remote(src, rdest, sources.len() > 1)
                 );
             } else if src.is_dir() && args.is_recursive() {
-                let dir_remote = rdest.join(&src.file_name().unwrap_or_default().to_string_lossy());
+                let dir_remote = resolve_upload_remote(src, rdest, sources.len() > 1);
                 for item in collect_upload_files(src, &dir_remote, &excludes)? {
                     println!("  {} -> {}", item.local_path.display(), item.remote);
                 }
@@ -87,7 +87,7 @@ pub(super) async fn handle_remote_upload(
                     is_upload: true,
                 });
             } else if src.is_dir() && args.is_recursive() {
-                let dir_remote = rdest.join(&src.file_name().unwrap_or_default().to_string_lossy());
+                let dir_remote = resolve_upload_remote(src, rdest, sources.len() > 1);
                 remote::ensure_remote_tree(src, &dir_remote).await?;
                 items.extend(collect_upload_files(src, &dir_remote, &excludes)?);
             }
@@ -112,7 +112,7 @@ pub(super) async fn handle_remote_upload(
                 )
                 .await?;
             } else if src.is_dir() && args.is_recursive() {
-                let dir_remote = rdest.join(&src.file_name().unwrap_or_default().to_string_lossy());
+                let dir_remote = resolve_upload_remote(src, rdest, sources.len() > 1);
                 remote::upload_directory(
                     src,
                     &dir_remote,
@@ -161,12 +161,7 @@ pub(super) async fn handle_remote_download(
         for (rsrc, _) in &remote_sources {
             let info = remote::remote_stat(rsrc).await?;
             if info.is_dir && args.is_recursive() {
-                let dir_name = rsrc.file_name();
-                let local_dir = if dest_local.is_dir() {
-                    dest_local.join(dir_name)
-                } else {
-                    dest_local.to_path_buf()
-                };
+                let local_dir = resolve_download_local(rsrc, dest_local)?;
                 let entries = remote::remote_list_files(rsrc).await?;
                 for (rel_path, _, is_dir_entry) in &entries {
                     if *is_dir_entry {
@@ -181,15 +176,12 @@ pub(super) async fn handle_remote_download(
                     println!(
                         "  {} -> {}",
                         rsrc.join(rel_path),
-                        local_dir.join(rel_path).display()
+                        crate::core::destination::remote_entry_path(&local_dir, rel_path)?
+                            .display()
                     );
                 }
             } else {
-                let local_path = if dest_local.is_dir() {
-                    dest_local.join(rsrc.file_name())
-                } else {
-                    dest_local.to_path_buf()
-                };
+                let local_path = resolve_download_local(rsrc, dest_local)?;
                 println!("  {} -> {}", rsrc, local_path.display());
             }
         }
@@ -218,13 +210,9 @@ pub(super) async fn handle_remote_download(
                 if !args.is_recursive() {
                     bail!("Remote source '{}' is a directory. Use -r flag.", rsrc);
                 }
-                let dir_name = rsrc.file_name();
-                let local_dir = if dest_local.is_dir() {
-                    dest_local.join(dir_name)
-                } else {
-                    dest_local.to_path_buf()
-                };
+                let local_dir = resolve_download_local(rsrc, dest_local)?;
                 let entries = remote::remote_list_files(rsrc).await?;
+                tokio::fs::create_dir_all(&local_dir).await?;
                 for (rel_path, _, is_dir_entry) in &entries {
                     if *is_dir_entry
                         && !crate::core::traversal::is_excluded(
@@ -232,7 +220,10 @@ pub(super) async fn handle_remote_download(
                             &excludes,
                         )
                     {
-                        tokio::fs::create_dir_all(local_dir.join(rel_path)).await?;
+                        tokio::fs::create_dir_all(crate::core::destination::remote_entry_path(
+                            &local_dir, rel_path,
+                        )?)
+                        .await?;
                     }
                 }
                 for (rel_path, size, is_dir_entry) in &entries {
@@ -246,18 +237,16 @@ pub(super) async fn handle_remote_download(
                         continue;
                     }
                     items.push(TransferItem {
-                        local_path: local_dir.join(rel_path),
+                        local_path: crate::core::destination::remote_entry_path(
+                            &local_dir, rel_path,
+                        )?,
                         remote: rsrc.join(rel_path),
                         size: *size,
                         is_upload: false,
                     });
                 }
             } else {
-                let local_path = if dest_local.is_dir() {
-                    dest_local.join(rsrc.file_name())
-                } else {
-                    dest_local.to_path_buf()
-                };
+                let local_path = resolve_download_local(rsrc, dest_local)?;
                 items.push(TransferItem {
                     local_path,
                     remote: rsrc.clone(),
@@ -281,12 +270,7 @@ pub(super) async fn handle_remote_download(
                 if !args.is_recursive() {
                     bail!("Remote source '{}' is a directory. Use -r flag.", rsrc);
                 }
-                let dir_name = rsrc.file_name();
-                let local_dir = if dest_local.is_dir() {
-                    dest_local.join(dir_name)
-                } else {
-                    dest_local.to_path_buf()
-                };
+                let local_dir = resolve_download_local(rsrc, dest_local)?;
                 if !local_dir.exists() {
                     tokio::fs::create_dir_all(&local_dir).await?;
                 }
@@ -303,11 +287,7 @@ pub(super) async fn handle_remote_download(
                 )
                 .await?;
             } else {
-                let local_path = if dest_local.is_dir() {
-                    dest_local.join(rsrc.file_name())
-                } else {
-                    dest_local.to_path_buf()
-                };
+                let local_path = resolve_download_local(rsrc, dest_local)?;
                 remote::download_file(
                     rsrc,
                     &local_path,

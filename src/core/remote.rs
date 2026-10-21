@@ -1,5 +1,6 @@
 mod attrs;
 mod ops;
+mod patterns;
 mod resume;
 mod ssh_cmd;
 mod transfer;
@@ -14,6 +15,7 @@ pub use ops::{
     remote_list_files, remote_list_shallow, remote_path_is_directory, remote_remove, remote_stat,
     remote_total_size, resolve_remote_home, validate_ssh_connection,
 };
+pub use patterns::expand_remote_star;
 pub use resume::{check_resume_state, ResumeDecision};
 #[allow(unused_imports)]
 pub(crate) use ssh_cmd::ssh_error_message;
@@ -54,7 +56,11 @@ impl RemotePath {
     }
 
     pub fn file_name(&self) -> &str {
-        self.path.rsplit('/').next().unwrap_or(&self.path)
+        self.path
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or(&self.path)
     }
 
     pub fn join(&self, subpath: &str) -> Self {
@@ -207,6 +213,7 @@ pub struct RemoteFileInfo {
 
 #[derive(Clone, Default)]
 pub struct TransferOptions {
+    pub force: bool,
     pub preserve: bool,
     pub verify: bool,
     pub resume: bool,

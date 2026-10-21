@@ -63,3 +63,28 @@ data:
 
 Remote resume and append validate the existing prefix by hash. Remote
 `--append` rejects a mismatched or oversized destination.
+
+
+## Source stars
+
+Source paths support `*` locally and remotely. For example:
+
+```bash
+bcmr copy 'host:reports/report*' ./downloads/
+```
+
+Quote patterns for direct bcmr calls. Initialized zsh copy/move wrappers accept
+unquoted stars through command-specific `noglob` aliases. Stars do not cross
+`/`, hidden names require a leading dot, and directories still require `-r`.
+No matches is an error before writes; exact existing paths and destinations
+remain literal. Only `*` is expanded. Fan-out resolves matches once, and move
+removes only that resolved source set after every target succeeds.
+
+
+## Destination paths
+
+Existing directories and paths ending in `/` are parent directories, including
+missing ones: `bcmr copy report.pdf new/parent/` creates `new/parent/report.pdf`.
+A single bare missing destination names the new file or directory. Multiple
+sources require an existing directory or an explicit trailing `/`.
+Dry-run uses the same mapping without creating directories.

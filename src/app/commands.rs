@@ -25,7 +25,10 @@ fn validate_source_kind(src: &std::path::Path, no_deref: bool) -> Result<()> {
         src.metadata()
     } {
         Ok(m) => m,
-        Err(_) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(BcmrError::SourceNotFound(src.to_path_buf()).into());
+        }
+        Err(error) => return Err(error.into()),
     };
     let ft = md.file_type();
     if no_deref && ft.is_symlink() {
@@ -59,7 +62,14 @@ fn validate_source_kind(src: &std::path::Path, no_deref: bool) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn validate_source_kind(_src: &std::path::Path, _no_deref: bool) -> Result<()> {
+fn validate_source_kind(src: &std::path::Path, no_deref: bool) -> Result<()> {
+    if crate::core::remote::parse_remote_path(&src.to_string_lossy()).is_none() {
+        if no_deref {
+            src.symlink_metadata()?;
+        } else {
+            src.metadata()?;
+        }
+    }
     Ok(())
 }
 
@@ -67,11 +77,8 @@ fn source_basename(src: &std::path::Path) -> Option<String> {
     use crate::core::remote::parse_remote_path;
     let s = src.to_string_lossy();
     if let Some(rsrc) = parse_remote_path(&s) {
-        rsrc.path
-            .rsplit('/')
-            .next()
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
+        let name = rsrc.file_name();
+        (!name.is_empty()).then(|| name.to_string())
     } else {
         src.file_name()
             .and_then(|n| n.to_str())
@@ -215,9 +222,9 @@ async fn handle_copy_one(args: &Commands, dest_override: Option<&std::path::Path
         }
     }
 
-    if sources.len() > 1 && (!dest.exists() || !dest.is_dir()) {
+    if sources.len() > 1 && !crate::core::destination::local_is_directory(dest) {
         bail!(
-            "When copying multiple sources, destination '{}' must be an existing directory",
+            "When copying multiple sources, destination '{}' must be an existing directory or end with a directory separator",
             dest.display()
         );
     }
@@ -351,6 +358,17 @@ async fn handle_copy_one(args: &Commands, dest_override: Option<&std::path::Path
     }
 }
 
+fn reject_excluded_move_cleanup(excludes: &[regex::Regex]) -> Result<()> {
+    if !excludes.is_empty() {
+        bail!(
+            "--exclude is not supported for remote or fan-out moves: deleting whole sources \
+             could remove excluded files that were not copied. Use copy --exclude, then \
+             remove only the sources you have verified. No files were moved."
+        );
+    }
+    Ok(())
+}
+
 pub(crate) async fn handle_move_command(args: &Commands) -> Result<()> {
     use crate::core::remote::{parse_remote_path, remote_remove};
 
@@ -366,6 +384,8 @@ pub(crate) async fn handle_move_command(args: &Commands) -> Result<()> {
         }
         return handle_move_one(args).await;
     }
+
+    reject_excluded_move_cleanup(&args.compile_excludes()?)?;
 
     let mut failures = 0usize;
     for dest in &cm.to {
@@ -383,6 +403,10 @@ pub(crate) async fn handle_move_command(args: &Commands) -> Result<()> {
             failures,
             cm.to.len()
         );
+    }
+
+    if args.is_dry_run() {
+        return Ok(());
     }
 
     let recursive = args.is_recursive();
@@ -436,9 +460,9 @@ async fn handle_move_one(args: &Commands) -> Result<()> {
         return handle_remote_move(args, sources, dest, &excludes).await;
     }
 
-    if sources.len() > 1 && (!dest.exists() || !dest.is_dir()) {
+    if sources.len() > 1 && !crate::core::destination::local_is_directory(dest) {
         bail!(
-            "When moving multiple sources, destination '{}' must be an existing directory",
+            "When moving multiple sources, destination '{}' must be an existing directory or end with a directory separator",
             dest.display()
         );
     }
@@ -547,6 +571,7 @@ async fn handle_remote_move(
     use crate::core::remote::{parse_remote_path, remote_remove};
     use crate::ui::display::{print_dry_run, ActionType};
 
+    reject_excluded_move_cleanup(excludes)?;
     handle_remote_copy(args, sources, dest, excludes).await?;
 
     if args.is_dry_run() {

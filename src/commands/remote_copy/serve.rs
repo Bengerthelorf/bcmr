@@ -1,4 +1,7 @@
-use super::{progress_mode, transfer_options_from_cli, STRIPING_MIN_FILE_SIZE};
+use super::{
+    progress_mode, resolve_download_local, resolve_upload_remote, transfer_options_from_cli,
+    STRIPING_MIN_FILE_SIZE,
+};
 use crate::cli::Commands;
 use crate::core::checksum::bytes_to_hex;
 use crate::core::remote::{check_resume_state, parse_remote_path, RemotePath, ResumeDecision};
@@ -166,20 +169,16 @@ pub(super) async fn handle_serve_upload(
             continue;
         }
         if src.is_file() {
-            let remote_path = if multi_source || rdest.path.ends_with('/') {
-                format!(
-                    "{}/{}",
-                    rdest.path,
-                    src.file_name().unwrap_or_default().to_string_lossy()
-                )
-            } else {
-                rdest.path.clone()
-            };
+            let remote_path = resolve_upload_remote(src, rdest, multi_source).path;
             let size = src.metadata()?.len();
             (runner.file_callback())(&src.file_name().unwrap_or_default().to_string_lossy(), size);
 
             let resume_offset =
                 upload_resume_offset(&mut pool, args, src, &remote_path, size).await?;
+            let resume_overwrite = matches!(
+                &resume_offset,
+                Some(UploadDecision::Overwrite | UploadDecision::Append(_))
+            );
             if let Some(UploadDecision::Skip) = resume_offset {
                 (runner.inc_callback())(size);
                 continue;
@@ -220,7 +219,7 @@ pub(super) async fn handle_serve_upload(
                 // publication. Keep production uploads on the handle-bound
                 // transaction path until the protocol has a server-side
                 // transaction token shared across connections.
-                let server_hash = if args.is_force() {
+                let server_hash = if args.is_force() || resume_overwrite {
                     pool.first_mut().put_overwrite(&remote_path, src).await?
                 } else {
                     pool.first_mut().put(&remote_path, src).await?
@@ -255,7 +254,8 @@ pub(super) async fn handle_serve_upload(
                      refusing fallback after transfer processing began"
                 );
             }
-            serve_upload_dir(&mut pool, src, rdest, &runner, excludes, args).await?;
+            let remote_dir = resolve_upload_remote(src, rdest, multi_source);
+            serve_upload_dir(&mut pool, src, &remote_dir, &runner, excludes, args).await?;
         } else if src.is_dir() {
             pool.close().await?;
             bail!(
@@ -277,8 +277,7 @@ async fn serve_upload_dir(
     excludes: &[regex::Regex],
     args: &Commands,
 ) -> Result<()> {
-    let dir_name = local_dir.file_name().unwrap_or_default().to_string_lossy();
-    let remote_dir = format!("{}/{}", remote_base.path, dir_name);
+    let remote_dir = remote_base.path.clone();
     pool.mkdir(&remote_dir).await?;
 
     let mut files_to_put: Vec<FileTransfer> = Vec::new();
@@ -402,8 +401,7 @@ pub(super) async fn handle_serve_download(
             }
             if is_dir && args.is_recursive() {
                 let entries = pool.first_mut().list(&rp.path).await?;
-                let dir_name = rp.file_name();
-                let local_base = dest.join(dir_name);
+                let local_base = resolve_download_local(&rp, dest)?;
                 items.push(DownloadItem {
                     remote_path: String::new(),
                     local_path: local_base.clone(),
@@ -418,7 +416,8 @@ pub(super) async fn handle_serve_download(
                     ) {
                         continue;
                     }
-                    let local = local_base.join(&entry.path);
+                    let local =
+                        crate::core::destination::remote_entry_path(&local_base, &entry.path)?;
                     let remote = format!("{}/{}", rp.path, entry.path);
                     if entry.is_dir {
                         items.push(DownloadItem {
@@ -441,11 +440,7 @@ pub(super) async fn handle_serve_download(
                 }
             } else if !is_dir {
                 add_transfer_size(&mut total_size, size)?;
-                let local = if dest.is_dir() {
-                    dest.join(rp.file_name())
-                } else {
-                    dest.to_path_buf()
-                };
+                let local = resolve_download_local(&rp, dest)?;
                 items.push(DownloadItem {
                     remote_path: rp.path.clone(),
                     local_path: local,
@@ -523,12 +518,13 @@ pub(super) async fn handle_serve_download(
             *size,
         );
         let _ = pool
-            .striped_get_file_synced_with_metadata(
+            .striped_get_file_synced_with_metadata_and_overwrite(
                 remote_path,
                 local_path,
                 *size,
                 args.is_sync(),
                 *metadata,
+                args.is_force(),
             )
             .await?;
         (runner.inc_callback())(*size);
@@ -538,10 +534,11 @@ pub(super) async fn handle_serve_download(
         let file_cb = runner.file_callback();
         let inc = runner.inc_callback();
         let sync = args.is_sync();
-        pool.pipelined_get_files_striped(
+        pool.pipelined_get_files_striped_with_overwrite(
             files_to_get,
             sync,
             args.is_verify(),
+            args.is_force(),
             move |_idx, path, size| {
                 file_cb(
                     &path.file_name().unwrap_or_default().to_string_lossy(),

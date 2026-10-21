@@ -128,6 +128,11 @@ where
                     ..
                 } => {
                     check_symlink_overwrite(dst, kind, cli)?;
+                    if let Some(parent) =
+                        dst.parent().filter(|parent| !parent.as_os_str().is_empty())
+                    {
+                        fs::create_dir_all(parent).await?;
+                    }
                     create_symlink_replacing(dst, target, kind, cli.is_force(), &test_mode).await?;
                     if verbose {
                         eprintln!("'{}' -> '{}' (symlink)", target.display(), dst.display());

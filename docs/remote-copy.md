@@ -8,6 +8,29 @@ BCMR supports copying files to and from remote hosts using SCP-like syntax over 
 
 ## Syntax
 
+### Source stars
+
+Copy and move expand `*` in local or remote source paths. Quote patterns when
+calling bcmr directly so your shell passes them through:
+
+```bash
+bcmr copy 'mini_m2:/Users/snaix/Downloads/deecamp中期检查*' ~/Downloads/
+bcmr copy 'host:~/reports/report*' ./downloads/
+```
+
+After evaluating `bcmr init zsh --cmd b`, `bcp` and `bmv` also accept unquoted
+stars. Their command-specific `noglob` aliases leave zsh's `NOMATCH` setting
+and other commands unchanged. Reload initialization after upgrading.
+
+`*` matches zero or more characters in one path component; it does not cross
+`/`. Hidden names require a leading dot, and matching directories still
+require `-r`. No matches is an error before copying. An exact existing path
+is kept literal, including a filename containing `*`; destinations are always
+literal. Only `*` has pattern meaning (`?`, brackets and recursive `**` are
+not additional pattern operators). Fan-out resolves one shared source snapshot.
+
+For remaining differences from scp, see [scp compatibility](./scp-compatibility.md).
+
 ```bash
 # Upload: local → remote
 bcmr copy local_file.txt user@host:/remote/path/
@@ -55,7 +78,7 @@ Uploading: [████████░░░░░░░░░░░░░░�
 
 BCMR has **two separate** compression layers. Know the difference:
 
-### SSH-Level (legacy SCP path)
+### SSH-Level (legacy SSH path)
 
 When the remote doesn't have bcmr installed and transfers fall back
 to SCP, the SSH transport can compress with zlib. Configure in
@@ -100,7 +123,7 @@ process overhead and enables server-side hashing.
 
 The current wire version is 2 and intentionally does not accept v1
 PUT semantics. If the remote is missing bcmr or has a mismatched
-protocol, bcmr prints a fallback warning and uses legacy SCP.
+protocol, bcmr prints a fallback warning and uses legacy SSH shell commands.
 
 ### Installing bcmr on Remote
 
@@ -249,3 +272,5 @@ BCMR detects remote paths by the `[user@]host:path` format. These patterns are r
 - Relative paths (`./file`, `../file`)
 - Home directory (`~/file`)
 - Windows drive letters (`C:\file`)
+
+See [local/remote behavior](./local-remote-semantics.md) for destination rules and remaining differences.

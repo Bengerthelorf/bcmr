@@ -36,6 +36,17 @@ bcmr init powershell --cmd b | Out-String | Invoke-Expression
 
 ## Options
 
+Zsh copy/move wrappers use command-specific `noglob` aliases. This lets bcmr
+expand remote source stars before zsh can reject them as unmatched local files:
+
+```zsh
+eval "$(bcmr init zsh --cmd b)"
+bcp mini_m2:/Users/snaix/Downloads/deecamp中期检查* ~/Downloads/
+```
+
+Reload initialization after upgrading. This leaves global shell options and
+the remove wrapper unchanged. Direct `bcmr copy` calls should quote patterns.
+
 | Flag | Description |
 |------|-------------|
 | `--cmd <prefix>` | Set command prefix (e.g., `b` creates `bcp`, `bmv`, `brm`) |

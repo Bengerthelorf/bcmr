@@ -82,7 +82,7 @@ where
     }
 
     if src.is_file() {
-        let dst_path = if dst.is_dir() {
+        let dst_path = if crate::core::destination::local_is_directory(dst) {
             dst.join(
                 src.file_name()
                     .ok_or_else(BcmrError::invalid_source_file_name)?,
@@ -112,6 +112,12 @@ where
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
+        if let Some(parent) = dst_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent).await?;
+        }
         if let Err(e) = fs::rename(src, &dst_path).await {
             if is_cross_device_error(&e) {
                 copy::copy_path(
@@ -144,7 +150,7 @@ where
         let src_name = src
             .file_name()
             .ok_or_else(BcmrError::invalid_source_dir_name)?;
-        let new_dst = if dst.is_dir() {
+        let new_dst = if crate::core::destination::local_is_directory(dst) {
             dst.join(src_name)
         } else {
             dst.to_path_buf()
@@ -207,6 +213,13 @@ where
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
+
+            if let Some(parent) = new_dst
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                fs::create_dir_all(parent).await?;
+            }
 
             if let Err(e) = fs::rename(src, &new_dst).await {
                 if is_cross_device_error(&e) {

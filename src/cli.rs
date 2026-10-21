@@ -76,11 +76,17 @@ EXAMPLES:
   Local copy with verify:
       bcmr copy -V src.iso dst.iso
 
+  Create a destination directory and retain the source name:
+      bcmr copy report.pdf ./new/parent/
+
   Recursive with preserve, parallel local jobs:
       bcmr copy -r -p -j 4 ./project/ ./backup/
 
   Upload to remote host:
       bcmr copy ./report.pdf host:archive/
+
+  Download sources matching a star (quote for direct shell invocation):
+      bcmr copy 'host:reports/report*' ./downloads/
 
   Resume a previous run after interruption:
       bcmr copy -C ./large.tar.gz host:dst/
@@ -93,6 +99,18 @@ EXAMPLES:
 
   Compress wire payload (auto-skips already-compressed files):
       bcmr copy -r --compress=auto src/ host:dst/
+
+SOURCE STARS:
+  Copy/move expand * within source path components, locally or remotely.
+  Hidden names require a leading dot; matched directories still require -r.
+  No matches is an error. Exact existing paths win; destinations stay literal.
+  Zsh wrappers from `bcmr init zsh` accept unquoted stars; direct bcmr calls
+  should quote patterns. Other pattern syntax is not expanded by bcmr.
+
+DESTINATIONS:
+  An existing directory or a trailing slash means a parent directory; missing
+  directories are created. A single bare missing target names the new file or
+  directory. Multiple sources require a directory target. Dry-run creates none.
 ";
 
 const MOVE_AFTER_LONG_HELP: &str = "\
@@ -102,6 +120,15 @@ EXAMPLES:
 
   Move recursively to a remote host (copy + verify + delete-source):
       bcmr move -r -V ./project/ host:archive/
+
+  Move files matching a star:
+      bcmr move 'host:reports/report*' ./downloads/
+
+SOURCE STARS:
+  Same source * rules as copy. Fan-out resolves matches once; sources are
+  removed only after all destinations succeed.
+  --exclude is currently refused for remote/fan-out moves to protect files
+  excluded from the copy phase. Use copy --exclude, then remove verified sources.
 ";
 
 const CHECK_AFTER_LONG_HELP: &str = "\
@@ -130,6 +157,7 @@ ACTIVATION:
   This command prints a script. Evaluate or source it in your shell to activate it.
   The default prefix is empty: cp, mv, and rm become bcmr shell functions.
   Use --cmd b for bcp, bmv, and brm. Zsh also activates their completions.
+  Zsh copy/move wrappers use noglob aliases so bcmr can expand source stars.
 
 EXAMPLES:
   Zsh (add to ~/.zshrc and run in the current shell):

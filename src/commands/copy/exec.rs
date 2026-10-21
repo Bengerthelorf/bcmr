@@ -69,6 +69,9 @@ where
         } = entry
         {
             check_symlink_overwrite(dst, *kind, cli)?;
+            if let Some(parent) = dst.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+                fs::create_dir_all(parent).await?;
+            }
             create_symlink_replacing(dst, target, *kind, cli.is_force(), &test_mode).await?;
             if verbose {
                 eprintln!("'{}' -> '{}' (symlink)", target.display(), dst.display());
@@ -139,7 +142,7 @@ where
     }
 
     if src.is_file() {
-        let dst_path = if dst.is_dir() {
+        let dst_path = if crate::core::destination::local_is_directory(dst) {
             dst.join(
                 src.file_name()
                     .ok_or_else(BcmrError::invalid_source_file_name)?,
@@ -177,7 +180,7 @@ where
         let src_dir_name = src
             .file_name()
             .ok_or_else(BcmrError::invalid_source_dir_name)?;
-        let new_dst = if dst.is_dir() {
+        let new_dst = if crate::core::destination::local_is_directory(dst) {
             dst.join(src_dir_name)
         } else {
             dst.to_path_buf()

@@ -9,6 +9,15 @@ BCMR 提供類似 zoxide 的 shell 整合。你可以建立帶自訂前綴、後
 
 ## 設定
 
+zsh 的複製和移動包裝命令會設定專用 `noglob` 別名，讓 bcmr 展開遠端來源路徑的 `*`，避免 zsh 先按本機檔案比對而報錯。升級後重新執行初始化即可：
+
+```zsh
+eval "$(bcmr init zsh --cmd b)"
+bcp mini_m2:/Users/snaix/Downloads/deecamp中期检查* ~/Downloads/
+```
+
+此設定不改變全域 Shell 選項和刪除命令。直接呼叫 `bcmr copy` 時，來源模式仍應加引號。
+
 在 shell 設定檔中加入以下內容：
 
 :::code-group

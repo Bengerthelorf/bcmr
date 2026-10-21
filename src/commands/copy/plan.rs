@@ -95,7 +95,7 @@ pub(super) fn scan_sources(
     excludes: &[regex::Regex],
     mut on_entry: impl FnMut(PlanEntry, u64) -> std::result::Result<(), BcmrError>,
 ) -> std::result::Result<(), BcmrError> {
-    let dst_is_dir = dst.exists() && dst.is_dir();
+    let dst_is_dir = crate::core::destination::local_is_directory(dst);
 
     for src in sources {
         if traversal::is_excluded(src, excludes) {

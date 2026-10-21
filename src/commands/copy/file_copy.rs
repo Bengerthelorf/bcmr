@@ -1055,6 +1055,7 @@ impl CopyFileOptions {
     pub(super) fn from_cli(cli: &Commands, test_mode: TestMode) -> Self {
         Self {
             transfer: crate::core::remote::TransferOptions {
+                force: cli.is_force(),
                 preserve: cli.is_preserve(),
                 verify: cli.is_verify(),
                 resume: cli.is_resume(),
@@ -1200,6 +1201,7 @@ where
         other => other,
     };
     let crate::core::remote::TransferOptions {
+        force: _,
         preserve,
         verify,
         resume,
@@ -1813,6 +1815,7 @@ mod tests {
     fn copy_options_with_direct_mode(mode: &str, reflink: &str) -> CopyFileOptions {
         CopyFileOptions {
             transfer: crate::core::remote::TransferOptions {
+                force: false,
                 preserve: false,
                 verify: false,
                 resume: mode == "resume",

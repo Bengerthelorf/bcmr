@@ -127,11 +127,37 @@ impl ServeClientPool {
             .collect())
     }
 
+    // Retain the original public API for library callers and integration tests.
+    #[allow(dead_code)]
     pub async fn pipelined_get_files_striped<FStart, FChunk>(
         &mut self,
         files: Vec<FileTransfer>,
         sync_after_each: bool,
         verify_before_publish: bool,
+        on_file_start: FStart,
+        on_chunk: FChunk,
+    ) -> Result<(), BcmrError>
+    where
+        FStart: Fn(usize, &Path, u64) + Send + Sync + Clone + 'static,
+        FChunk: Fn(u64) + Send + Sync + Clone + 'static,
+    {
+        self.pipelined_get_files_striped_with_overwrite(
+            files,
+            sync_after_each,
+            verify_before_publish,
+            true,
+            on_file_start,
+            on_chunk,
+        )
+        .await
+    }
+
+    pub async fn pipelined_get_files_striped_with_overwrite<FStart, FChunk>(
+        &mut self,
+        files: Vec<FileTransfer>,
+        sync_after_each: bool,
+        verify_before_publish: bool,
+        overwrite: bool,
         on_file_start: FStart,
         on_chunk: FChunk,
     ) -> Result<(), BcmrError>
@@ -153,10 +179,11 @@ impl ServeClientPool {
                 let on_chunk_c = on_chunk.clone();
                 async move {
                     client
-                        .pipelined_get_files(
+                        .pipelined_get_files_with_overwrite(
                             bucket_files,
                             sync_after_each,
                             verify_before_publish,
+                            overwrite,
                             move |local_idx, path, size| {
                                 let orig_idx = indices[local_idx];
                                 on_start_c(orig_idx, path, size);
@@ -244,12 +271,33 @@ impl ServeClientPool {
         sync_before_publish: bool,
         metadata: Option<crate::core::file_metadata::PortableFileMetadata>,
     ) -> Result<[u8; 32], BcmrError> {
+        self.striped_get_file_synced_with_metadata_and_overwrite(
+            remote,
+            local,
+            remote_size,
+            sync_before_publish,
+            metadata,
+            true,
+        )
+        .await
+    }
+
+    pub async fn striped_get_file_synced_with_metadata_and_overwrite(
+        &mut self,
+        remote: &str,
+        local: &Path,
+        remote_size: u64,
+        sync_before_publish: bool,
+        metadata: Option<crate::core::file_metadata::PortableFileMetadata>,
+        overwrite: bool,
+    ) -> Result<[u8; 32], BcmrError> {
         self.striped_get_file_impl(
             remote,
             local,
             remote_size,
             sync_before_publish,
             metadata,
+            overwrite,
             |_staging_path| {},
         )
         .await
@@ -267,10 +315,19 @@ impl ServeClientPool {
     where
         F: FnOnce(&Path),
     {
-        self.striped_get_file_impl(remote, local, remote_size, false, None, before_transfer)
-            .await
+        self.striped_get_file_impl(
+            remote,
+            local,
+            remote_size,
+            false,
+            None,
+            true,
+            before_transfer,
+        )
+        .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn striped_get_file_impl<F>(
         &mut self,
         remote: &str,
@@ -278,6 +335,7 @@ impl ServeClientPool {
         remote_size: u64,
         sync_before_publish: bool,
         metadata: Option<crate::core::file_metadata::PortableFileMetadata>,
+        overwrite: bool,
         before_transfer: F,
     ) -> Result<[u8; 32], BcmrError>
     where
@@ -286,7 +344,23 @@ impl ServeClientPool {
         if self.clients.is_empty() {
             return Err(BcmrError::pool_empty());
         }
-        let staging = AtomicFile::new(local)?;
+        if let Some(parent) = local
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            if !parent.exists() {
+                if sync_before_publish {
+                    crate::core::io::create_dir_all_durable_async(parent).await?;
+                } else {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+            }
+        }
+        let staging = if overwrite {
+            AtomicFile::new(local)?
+        } else {
+            AtomicFile::new_no_replace(local)?
+        };
         let f = staging.try_clone_file()?;
         f.set_len(remote_size)?;
         drop(f);

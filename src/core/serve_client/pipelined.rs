@@ -113,6 +113,8 @@ impl ServeClient {
         Ok(hashes)
     }
 
+    // Retain the original public API for library callers and integration tests.
+    #[allow(dead_code)]
     pub async fn pipelined_get_files<FStart, FChunk>(
         &mut self,
         files: Vec<FileTransfer>,
@@ -125,11 +127,36 @@ impl ServeClient {
         FStart: FnMut(usize, &Path, u64),
         FChunk: FnMut(u64),
     {
+        self.pipelined_get_files_with_overwrite(
+            files,
+            sync_after_each,
+            verify_before_publish,
+            true,
+            on_file_start,
+            on_chunk,
+        )
+        .await
+    }
+
+    pub async fn pipelined_get_files_with_overwrite<FStart, FChunk>(
+        &mut self,
+        files: Vec<FileTransfer>,
+        sync_after_each: bool,
+        verify_before_publish: bool,
+        overwrite: bool,
+        on_file_start: FStart,
+        on_chunk: FChunk,
+    ) -> Result<(), BcmrError>
+    where
+        FStart: FnMut(usize, &Path, u64),
+        FChunk: FnMut(u64),
+    {
         let r = self
             .pipelined_get_files_imp(
                 files,
                 sync_after_each,
                 verify_before_publish,
+                overwrite,
                 on_file_start,
                 on_chunk,
             )
@@ -145,6 +172,7 @@ impl ServeClient {
         files: Vec<FileTransfer>,
         sync_after_each: bool,
         verify_before_publish: bool,
+        overwrite: bool,
         mut on_file_start: FStart,
         mut on_chunk: FChunk,
     ) -> Result<(), BcmrError>
@@ -188,7 +216,12 @@ impl ServeClient {
                     }
                 }
             }
-            let mut staging = match AtomicFile::new(&ft.local) {
+            let stage = if overwrite {
+                AtomicFile::new(&ft.local)
+            } else {
+                AtomicFile::new_no_replace(&ft.local)
+            };
+            let mut staging = match stage {
                 Ok(staging) => Some(staging),
                 Err(e) => {
                     recv_err = Some(BcmrError::InvalidInput(format!(

@@ -170,6 +170,7 @@ async fn run() -> Result<()> {
     if is_json_mode() {
         validate_noninteractive_confirmation(&cli)?;
     }
+    app::source_patterns::expand_copy_move_sources(&mut cli.command).await?;
 
     let update_rx = background_update_check(&cli.command);
 

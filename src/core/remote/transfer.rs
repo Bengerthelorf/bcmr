@@ -3,6 +3,7 @@ use super::ops::{remote_file_hash, remote_file_size, remote_list_files};
 use super::resume::check_resume_state;
 use super::ssh_cmd::{shell_escape, ssh_command, ssh_error_message};
 use super::{RemotePath, TransferCallbacks, TransferOptions};
+use crate::core::atomic_file::AtomicFile;
 use crate::core::error::BcmrError;
 use std::path::Path;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -27,6 +28,10 @@ pub async fn download_file(
     } else {
         None
     };
+    let allow_overwrite = opts.force || opts.resume || opts.strict || opts.append;
+    if existing_size.is_some() && !allow_overwrite {
+        return Err(BcmrError::TargetExists(local_dst.to_path_buf()));
+    }
     let local_path_for_hash = local_dst.to_path_buf();
     let remote_for_hash = remote.clone();
     let remote_for_partial = remote.clone();
@@ -73,6 +78,26 @@ pub async fn download_file(
         format!("cat '{}'", shell_escape(&remote.path))
     };
 
+    let staging = if decision.use_append_mode {
+        None
+    } else if allow_overwrite {
+        Some(AtomicFile::new(local_dst)?)
+    } else {
+        Some(AtomicFile::new_no_replace(local_dst)?)
+    };
+    let transfer_path = staging
+        .as_ref()
+        .map(|stage| stage.staging_path())
+        .unwrap_or_else(|| local_dst.to_path_buf());
+    let mut dst_file = if let Some(stage) = &staging {
+        tokio::fs::File::from_std(stage.try_clone_file()?)
+    } else {
+        tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(local_dst)
+            .await?
+    };
+
     let mut child = ssh_command(&remote.ssh_target())
         .arg(ssh_cmd)
         .stdout(std::process::Stdio::piped())
@@ -85,14 +110,6 @@ pub async fn download_file(
         .ok_or_else(|| BcmrError::InvalidInput("Failed to capture SSH stdout".to_string()))?;
     let mut stderr_pipe = child.stderr.take();
 
-    let mut dst_file = if decision.use_append_mode {
-        tokio::fs::OpenOptions::new()
-            .append(true)
-            .open(local_dst)
-            .await?
-    } else {
-        tokio::fs::File::create(local_dst).await?
-    };
     let io_result = copy_download_stream(
         &mut stdout,
         &mut dst_file,
@@ -104,9 +121,6 @@ pub async fn download_file(
 
     if let Err(e) = io_result {
         let _ = child.kill().await;
-        if !decision.use_append_mode {
-            let _ = tokio::fs::remove_file(local_dst).await;
-        }
         return Err(e);
     }
 
@@ -118,23 +132,20 @@ pub async fn download_file(
             let _ = pipe.read_to_end(&mut buf).await;
             stderr_buf = String::from_utf8_lossy(&buf).to_string();
         }
-        if !decision.use_append_mode {
-            let _ = tokio::fs::remove_file(local_dst).await;
-        }
         return Err(BcmrError::InvalidInput(ssh_error_message(
             &stderr_buf,
             &format!("Download failed for '{}'", remote),
         )));
     }
 
+    dst_file.flush().await?;
     if opts.sync {
-        dst_file.flush().await?;
         crate::core::io::durable_sync_async(&dst_file).await?;
     }
     drop(dst_file);
 
     if opts.verify {
-        let local_path = local_dst.to_path_buf();
+        let local_path = transfer_path.clone();
         let local_hash =
             tokio::task::spawn_blocking(move || crate::core::checksum::calculate_hash(&local_path))
                 .await
@@ -150,7 +161,10 @@ pub async fn download_file(
     }
 
     if opts.preserve {
-        apply_remote_attrs_locally(remote, local_dst).await?;
+        apply_remote_attrs_locally(remote, &transfer_path).await?;
+    }
+    if let Some(stage) = staging {
+        stage.commit(opts.sync)?;
     }
 
     Ok(())
@@ -262,8 +276,20 @@ pub async fn upload_file(
     }
 
     let cat_op = if decision.use_append_mode { ">>" } else { ">" };
+    // A pre-transfer existence check cannot protect against a new remote file
+    // appearing before redirection. POSIX noclobber makes that open exclusive.
+    let no_clobber = if opts.force || opts.resume || opts.strict || opts.append {
+        ""
+    } else {
+        "set -C; "
+    };
     let mut child = ssh_command(&remote.ssh_target())
-        .arg(format!("cat {} '{}'", cat_op, shell_escape(&remote.path)))
+        .arg(format!(
+            "{}cat {} '{}'",
+            no_clobber,
+            cat_op,
+            shell_escape(&remote.path)
+        ))
         .stdin(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
@@ -346,7 +372,7 @@ pub async fn download_directory(
 
     for (rel_path, _, is_dir) in &entries {
         if *is_dir {
-            let dir_path = local_dst.join(rel_path);
+            let dir_path = crate::core::destination::remote_entry_path(local_dst, rel_path)?;
             if !dir_path.exists() {
                 tokio::fs::create_dir_all(&dir_path).await?;
             }
@@ -362,7 +388,7 @@ pub async fn download_directory(
             host: remote.host.clone(),
             path: format!("{}/{}", remote.path, rel_path),
         };
-        let local_file = local_dst.join(rel_path);
+        let local_file = crate::core::destination::remote_entry_path(local_dst, rel_path)?;
         download_file(
             &file_remote,
             &local_file,
@@ -383,10 +409,16 @@ pub async fn download_directory(
 pub async fn ensure_remote_tree(local_src: &Path, remote: &RemotePath) -> Result<(), BcmrError> {
     use crate::core::traversal;
 
-    ssh_command(&remote.ssh_target())
+    let output = ssh_command(&remote.ssh_target())
         .arg(format!("mkdir -p '{}'", shell_escape(&remote.path)))
         .output()
         .await?;
+    if !output.status.success() {
+        return Err(BcmrError::InvalidInput(ssh_error_message(
+            &String::from_utf8_lossy(&output.stderr),
+            &format!("Failed to create remote directory '{}'", remote),
+        )));
+    }
 
     let excludes: Vec<regex::Regex> = Vec::new();
     let mut dirs = Vec::new();
@@ -413,10 +445,16 @@ pub async fn ensure_remote_tree(local_src: &Path, remote: &RemotePath) -> Result
             .collect::<Vec<_>>()
             .join(" ");
 
-        ssh_command(&remote.ssh_target())
+        let output = ssh_command(&remote.ssh_target())
             .arg(format!("mkdir -p {}", mkdir_cmd))
             .output()
             .await?;
+        if !output.status.success() {
+            return Err(BcmrError::InvalidInput(ssh_error_message(
+                &String::from_utf8_lossy(&output.stderr),
+                &format!("Failed to create remote directory tree '{}'", remote),
+            )));
+        }
     }
 
     Ok(())

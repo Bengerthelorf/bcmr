@@ -42,3 +42,32 @@ integrity guarantees of `bcmr copy`.
 
 Use `-r` for directories. `--json` selects structured output; add
 `--background` to submit a job instead of waiting for completion.
+
+
+## Source stars
+
+Source paths support `*` locally and remotely. For example:
+
+```bash
+bcmr move 'host:reports/report*' ./downloads/
+```
+
+Quote patterns for direct bcmr calls. Initialized zsh copy/move wrappers accept
+unquoted stars through command-specific `noglob` aliases. Stars do not cross
+`/`, hidden names require a leading dot, and directories still require `-r`.
+No matches is an error before writes; exact existing paths and destinations
+remain literal. Only `*` is expanded. Fan-out resolves matches once, and move
+removes only that resolved source set after every target succeeds.
+
+
+## Destination paths
+
+Existing directories and paths ending in `/` are parent directories, including
+missing ones: `bcmr move report.pdf new/parent/` creates `new/parent/report.pdf`.
+A single bare missing destination names the new file or directory. Multiple
+sources require an existing directory or an explicit trailing `/`.
+Dry-run uses the same mapping without creating directories.
+
+Remote and fan-out moves currently reject `--exclude`: removing the original
+whole tree could delete excluded files that were never copied. Use copy with
+excludes, verify the result, then remove only the intended sources.

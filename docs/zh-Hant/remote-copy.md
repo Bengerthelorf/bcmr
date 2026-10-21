@@ -9,6 +9,19 @@ BCMR 支援使用 SCP 風格語法透過 SSH 複製檔案到遠端主機或從�
 
 ## 語法
 
+### 來源路徑中的星號
+
+複製和移動支援本機及遠端來源路徑中的 `*`。直接呼叫 bcmr 時請加引號，讓 Shell 將模式原樣傳入：
+
+```bash
+bcmr copy 'mini_m2:/Users/snaix/Downloads/deecamp中期检查*' ~/Downloads/
+bcmr copy 'host:~/reports/report*' ./downloads/
+```
+
+執行 `eval "$(bcmr init zsh --cmd b)"` 後，`bcp`、`bmv` 也支援不加引號的星號。產生的 `noglob` 別名只作用於這兩個包裝命令，不改變 zsh 的 `NOMATCH` 設定或其他命令。升級後需要重新初始化。
+
+`*` 比對單一路徑層級內的零個或多個字元，不跨 `/`。隱藏檔案需明確以點號開頭；比對到目錄仍需 `-r`。無符合項目時在複製前報錯。已存在的精確路徑優先按字面處理，包括名稱本身含 `*` 的檔案；目的路徑一律按字面處理。僅 `*` 有模式含義，`?`、方括號和遞迴 `**` 不作為額外運算子。多目的地操作共用一次展開的來源清單。
+
 ```bash
 # 上傳：本機 → 遠端
 bcmr copy local_file.txt user@host:/remote/path/
@@ -57,7 +70,7 @@ BCMR 有**兩套獨立**的壓縮層，請區分：
 
 ### SSH 層（傳統 SCP 路徑）
 
-遠端沒有安裝 bcmr，傳輸回退到 SCP 時，SSH 傳輸層可以用 zlib 壓縮。在 `[scp]` 中設定：
+遠端沒有安裝 bcmr，傳輸回退到傳統 SSH 通道時，SSH 傳輸層可以用 zlib 壓縮。在 `[scp]` 中設定：
 
 | 值 | 行為 |
 |----|------|

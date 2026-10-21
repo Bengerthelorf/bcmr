@@ -4,5 +4,6 @@ pub(crate) mod completions;
 pub(crate) mod installation;
 pub(crate) mod prompts;
 pub(crate) mod runners;
+pub(crate) mod source_patterns;
 pub(crate) mod status;
 pub(crate) mod updates;

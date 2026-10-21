@@ -323,6 +323,10 @@ jobs:
           python3 tests/config_doctor_test.py
           python3 tests/managed_update_test.py
           python3 tests/deploy_test.py
+          python3 tests/star_copy_test.py
+          python3 tests/destination_semantics_test.py
+          python3 tests/remote_listing_test.py
+          python3 tests/remote_overwrite_test.py
 
   publish-crate:
     name: Publish to crates.io
@@ -413,3 +417,7 @@ jobs:
           python3 tests/config_doctor_test.py
           python3 tests/managed_update_test.py
           python3 tests/deploy_test.py
+          python3 tests/star_copy_test.py
+          python3 tests/destination_semantics_test.py
+          python3 tests/remote_listing_test.py
+          python3 tests/remote_overwrite_test.py
