@@ -4,7 +4,7 @@ section: guide
 order: 9
 ---
 
-本文说明正式发布的 0.7.0 之后的开发源码，对照 [OpenSSH scp 手册](https://man.openbsd.org/scp)。
+本文说明 bcmr 0.7.1 的能力，对照 [OpenSSH scp 手册](https://man.openbsd.org/scp)。
 
 | 能力 | bcmr 行为 |
 |---|---|
@@ -24,4 +24,4 @@ order: 9
 
 默认不覆盖、覆盖确认，以及拒绝远程 `..` 和裸文件系统根目录，是有意保留的差异。普通 `-p` 不承诺复制硬链接拓扑或任意 ACL/xattr。
 
-示例与边界见 [SSH 参数](./ssh-options.md)、[传输后端](./transfer-backends.md) 和 [本地/远程语义](./local-remote-semantics.md)。这些源码修改不会改变已经安装的 Homebrew 0.7.0 二进制内容。
+示例与边界见 [SSH 参数](./ssh-options.md)、[传输后端](./transfer-backends.md) 和 [本地/远程语义](./local-remote-semantics.md)。已经安装 0.7.0 的用户需要升级到 0.7.1，才能使用本文新增的能力。

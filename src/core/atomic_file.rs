@@ -300,6 +300,7 @@ fn snapshot_from_file(file: &File) -> Result<EntrySnapshot, BcmrError> {
     })
 }
 
+#[cfg(not(unix))]
 fn open_snapshot_file(path: &Path) -> Result<File, BcmrError> {
     #[cfg(unix)]
     {
@@ -332,6 +333,7 @@ fn open_snapshot_file(path: &Path) -> Result<File, BcmrError> {
     }
 }
 
+#[cfg(not(unix))]
 fn snapshot_from_path(path: &Path) -> Result<EntrySnapshot, BcmrError> {
     snapshot_from_file(&open_snapshot_file(path)?)
 }
@@ -447,8 +449,13 @@ struct ExistingDestination {
 }
 
 impl ExistingDestination {
+    #[cfg(not(unix))]
     fn capture(path: &Path) -> Result<Self, BcmrError> {
         let source = open_snapshot_file(path)?;
+        Self::capture_file(path, source)
+    }
+
+    fn capture_file(path: &Path, source: File) -> Result<Self, BcmrError> {
         let snapshot = snapshot_from_file(&source).map_err(|error| {
             BcmrError::InvalidInput(format!(
                 "atomic receive destination '{}' must remain a regular file: {error}",
@@ -487,6 +494,7 @@ impl ExistingDestination {
         }
     }
 
+    #[cfg(not(unix))]
     fn matches_path(&self, path: &Path) -> Result<bool, BcmrError> {
         let snapshot = match snapshot_from_path(path) {
             Ok(snapshot) => snapshot,
@@ -505,6 +513,36 @@ enum DestinationObservation {
 }
 
 impl DestinationObservation {
+    #[cfg(unix)]
+    fn capture_at(parent: &BoundDirectory, name: &OsStr, path: &Path) -> Result<Self, BcmrError> {
+        match open_snapshot_at(parent, name) {
+            Ok(file) => Ok(Self::Existing(ExistingDestination::capture_file(
+                path, file,
+            )?)),
+            Err(BcmrError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(Self::Missing)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    #[cfg(unix)]
+    fn matches_at(&self, parent: &BoundDirectory, name: &OsStr) -> Result<bool, BcmrError> {
+        let actual = match snapshot_at(parent, name) {
+            Ok(actual) => Some(actual),
+            Err(BcmrError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        Ok(match (self, actual) {
+            (Self::Missing, None) => true,
+            (Self::Existing(expected), Some(actual)) => {
+                actual.identity == expected.identity && actual.fingerprint == expected.fingerprint
+            }
+            _ => false,
+        })
+    }
+
+    #[cfg(not(unix))]
     fn capture(path: &Path) -> Result<Self, BcmrError> {
         match std::fs::symlink_metadata(path) {
             Ok(metadata) if metadata.file_type().is_file() => {
@@ -519,6 +557,7 @@ impl DestinationObservation {
         }
     }
 
+    #[cfg(not(unix))]
     fn matches_path(&self, path: &Path) -> Result<bool, BcmrError> {
         match self {
             Self::Missing => match std::fs::symlink_metadata(path) {
@@ -799,7 +838,7 @@ fn validate_private_transaction(
 }
 
 #[cfg(target_os = "macos")]
-fn macos_extended_acl_is_empty(file: &File) -> Result<bool, BcmrError> {
+pub(crate) fn macos_extended_acl_is_empty(file: &File) -> Result<bool, BcmrError> {
     use std::os::fd::AsRawFd;
 
     type Acl = *mut std::ffi::c_void;
@@ -1291,6 +1330,11 @@ fn c_name(name: &OsStr) -> Result<std::ffi::CString, BcmrError> {
 
 #[cfg(unix)]
 fn snapshot_at(directory: &BoundDirectory, name: &OsStr) -> Result<EntrySnapshot, BcmrError> {
+    snapshot_from_file(&open_snapshot_at(directory, name)?)
+}
+
+#[cfg(unix)]
+fn open_snapshot_at(directory: &BoundDirectory, name: &OsStr) -> Result<File, BcmrError> {
     use std::os::fd::AsRawFd;
     use std::os::fd::FromRawFd;
 
@@ -1305,8 +1349,7 @@ fn snapshot_at(directory: &BoundDirectory, name: &OsStr) -> Result<EntrySnapshot
     if fd < 0 {
         return Err(BcmrError::Io(std::io::Error::last_os_error()));
     }
-    let file = unsafe { File::from_raw_fd(fd) };
-    snapshot_from_file(&file)
+    Ok(unsafe { File::from_raw_fd(fd) })
 }
 
 #[cfg(not(unix))]
@@ -1724,11 +1767,74 @@ fn exchange(
     ))
 }
 
+// Unix cleanup is implemented below with retained directory handles. This
+// object carries only the recovery spelling; it must never remove by pathname.
+#[cfg(unix)]
+struct TransactionPath(PathBuf);
+
+#[cfg(unix)]
+impl TransactionPath {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+    fn disable_cleanup(&mut self, _disable: bool) {}
+}
+
+#[cfg(unix)]
+fn create_transaction_at(
+    parent: &BoundDirectory,
+) -> Result<(TransactionPath, BoundDirectory), BcmrError> {
+    use ring::rand::{SecureRandom, SystemRandom};
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let random = SystemRandom::new();
+    for _ in 0..128 {
+        let mut nonce = [0u8; 16];
+        random
+            .fill(&mut nonce)
+            .map_err(|_| BcmrError::InvalidInput("cannot create atomic receive nonce".into()))?;
+        let name = format!(
+            ".bcmr.receive.{}",
+            nonce.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        );
+        let name_c = c_name(OsStr::new(&name))?;
+        if unsafe { libc::mkdirat(parent.handle.as_file().as_raw_fd(), name_c.as_ptr(), 0o700) }
+            != 0
+        {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                continue;
+            }
+            return Err(error.into());
+        }
+        let fd = unsafe {
+            libc::openat(
+                parent.handle.as_file().as_raw_fd(),
+                name_c.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let path = parent.path.join(name);
+        let binding = BoundDirectory {
+            path: path.clone(),
+            handle: same_file::Handle::from_file(unsafe { File::from_raw_fd(fd) })?,
+        };
+        return Ok((TransactionPath(path), binding));
+    }
+    Err(BcmrError::InvalidInput(
+        "cannot allocate unique atomic receive directory".into(),
+    ))
+}
+
 pub(crate) struct AtomicFile {
     destination: PathBuf,
     destination_name: std::ffi::OsString,
     parent: BoundDirectory,
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    transaction: TransactionPath,
+    #[cfg(not(any(unix, windows)))]
     transaction: tempfile::TempDir,
     #[cfg(not(windows))]
     transaction_binding: BoundDirectory,
@@ -1760,8 +1866,42 @@ impl AtomicFile {
         allow_overwrite: bool,
     ) -> Result<Self, BcmrError> {
         let parent_path = destination_parent(destination)?;
-        let destination_name = file_name(destination)?.to_os_string();
         let parent = BoundDirectory::capture(&parent_path)?;
+        Self::new_in_parent(destination, allow_overwrite, parent)
+    }
+
+    /// The caller has already traversed this parent from its access-boundary
+    /// directory handle. Never reopen it from the diagnostic destination path.
+    #[cfg(unix)]
+    #[allow(dead_code)] // Used by the command binary's rooted serve filesystem.
+    pub(crate) fn new_at(
+        destination: &Path,
+        parent_file: File,
+        allow_overwrite: bool,
+    ) -> Result<Self, BcmrError> {
+        if !parent_file.metadata()?.is_dir() {
+            return Err(BcmrError::InvalidInput(
+                "atomic receive parent is not a directory".into(),
+            ));
+        }
+        let parent = BoundDirectory {
+            path: destination_parent(destination)?,
+            handle: same_file::Handle::from_file(parent_file)?,
+        };
+        Self::new_in_parent(destination, allow_overwrite, parent)
+    }
+
+    fn new_in_parent(
+        destination: &Path,
+        allow_overwrite: bool,
+        parent: BoundDirectory,
+    ) -> Result<Self, BcmrError> {
+        #[cfg(not(unix))]
+        let parent_path = destination_parent(destination)?;
+        let destination_name = file_name(destination)?.to_os_string();
+        #[cfg(unix)]
+        let observed = DestinationObservation::capture_at(&parent, &destination_name, destination)?;
+        #[cfg(not(unix))]
         let observed = DestinationObservation::capture(destination)?;
         #[cfg(target_os = "macos")]
         let inherited_file_acl = if matches!(&observed, DestinationObservation::Missing) {
@@ -1780,7 +1920,9 @@ impl AtomicFile {
             ));
         }
 
-        #[cfg(not(windows))]
+        #[cfg(unix)]
+        let (mut transaction, transaction_binding) = create_transaction_at(&parent)?;
+        #[cfg(not(any(unix, windows)))]
         let mut transaction = tempfile::Builder::new()
             .prefix(".bcmr.receive.")
             .tempdir_in(&parent_path)?;
@@ -1795,16 +1937,16 @@ impl AtomicFile {
             // same group inheritance as a direct child of the destination.
             #[allow(clippy::useless_conversion)]
             let transaction_mode = 0o700 | (parent_mode & u32::from(libc::S_ISGID));
-            std::fs::set_permissions(
-                transaction.path(),
-                std::fs::Permissions::from_mode(transaction_mode),
-            )?;
+            transaction_binding
+                .handle
+                .as_file()
+                .set_permissions(std::fs::Permissions::from_mode(transaction_mode))?;
             transaction_mode
         };
         if !parent.matches_path()? {
             return Err(BcmrError::DestinationChanged(destination.to_path_buf()));
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(unix, windows)))]
         let transaction_binding = BoundDirectory::capture(transaction.path())?;
         #[cfg(unix)]
         validate_private_transaction(
@@ -1948,6 +2090,18 @@ impl AtomicFile {
         #[cfg(not(windows))]
         let directory = &self.transaction_binding;
         Ok(snapshot_at(directory, &self.staging_name)?.identity == self.staging_identity)
+    }
+
+    fn destination_matches(&self) -> Result<bool, BcmrError> {
+        #[cfg(unix)]
+        {
+            self.observed
+                .matches_at(&self.parent, &self.destination_name)
+        }
+        #[cfg(not(unix))]
+        {
+            self.observed.matches_path(&self.destination)
+        }
     }
 
     fn apply_security_metadata(&self) -> Result<(), BcmrError> {
@@ -2256,7 +2410,7 @@ impl AtomicFile {
                 "the destination parent, transaction directory, or staged entry changed before metadata and durability processing",
             ));
         }
-        if !self.observed.matches_path(&self.destination)? {
+        if !self.destination_matches()? {
             return Err(BcmrError::DestinationChanged(self.destination.clone()));
         }
 
@@ -2288,7 +2442,7 @@ impl AtomicFile {
                 "the destination parent, transaction directory, or staged entry changed at the final pre-publish check",
             ));
         }
-        if !self.observed.matches_path(&self.destination)? {
+        if !self.destination_matches()? {
             return Err(BcmrError::DestinationChanged(self.destination.clone()));
         }
         let existing_state = match &self.observed {

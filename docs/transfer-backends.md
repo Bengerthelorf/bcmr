@@ -4,8 +4,8 @@ section: guide
 order: 12
 ---
 
-Development source after 0.7.0 supports temporary connections, mixed sources,
-client-mediated relay and subsystem-only SFTP accounts.
+bcmr 0.7.1 supports temporary connections, mixed sources, client-mediated
+relay and subsystem-only SFTP accounts.
 
 ```bash
 bcmr copy --ssh-port 2222 --ssh-identity ~/.ssh/temp file 'host:~/new/'

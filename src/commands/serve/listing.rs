@@ -10,39 +10,20 @@ pub(super) struct Observation {
     pub children: Vec<OsString>,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 pub(super) use unix::BoundListing;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 mod unix {
     use super::*;
     use anyhow::bail;
-    use std::ffi::{CStr, CString, OsStr};
+    use std::ffi::CStr;
     use std::fs::File;
-    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
-    use std::os::unix::ffi::{OsStrExt, OsStringExt};
-    use std::path::{Component, PathBuf};
+    use std::os::fd::IntoRawFd;
+    use std::os::unix::ffi::OsStringExt;
 
     pub(in crate::commands::serve) struct BoundListing {
-        root: File,
-        path: PathBuf,
-    }
-
-    fn search_flags() -> i32 {
-        #[cfg(target_os = "linux")]
-        let access = libc::O_PATH;
-        #[cfg(target_os = "macos")]
-        let access = libc::O_SEARCH;
-        access | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC
-    }
-
-    fn open_at(parent: RawFd, name: &OsStr, flags: i32) -> Result<File> {
-        let name = CString::new(name.as_bytes())?;
-        let descriptor = unsafe { libc::openat(parent, name.as_ptr(), flags) };
-        if descriptor < 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        Ok(unsafe { File::from_raw_fd(descriptor) })
+        filesystem: super::super::filesystem::RootFs,
     }
 
     struct DirectoryStream(*mut libc::DIR);
@@ -68,7 +49,7 @@ mod unix {
             unsafe {
                 *libc::__errno_location() = 0
             };
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "freebsd"))]
             unsafe {
                 *libc::__error() = 0
             };
@@ -90,56 +71,26 @@ mod unix {
     }
 
     impl BoundListing {
+        #[cfg(test)]
         pub(in crate::commands::serve) fn new(root: &Path) -> Result<Self> {
-            Ok(Self {
-                root: open_at(libc::AT_FDCWD, root.as_os_str(), search_flags())?,
-                path: root.to_owned(),
-            })
+            Ok(Self::from_filesystem(
+                super::super::filesystem::RootFs::new(root)?,
+            ))
+        }
+
+        pub(in crate::commands::serve) fn from_filesystem(
+            filesystem: super::super::filesystem::RootFs,
+        ) -> Self {
+            Self { filesystem }
         }
 
         pub(in crate::commands::serve) fn observe(&self, physical: &Path) -> Result<Observation> {
-            let relative = physical.strip_prefix(&self.path)?;
-            let components = relative
-                .components()
-                .map(|component| match component {
-                    Component::Normal(name) => Ok(name),
-                    _ => anyhow::bail!("invalid canonical LIST component"),
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let (last, ancestors) = components
-                .split_last()
-                .map(|(last, ancestors)| (*last, ancestors))
-                .unwrap_or((OsStr::new("."), &[]));
-            let mut parent = self.root.try_clone()?;
-            for component in ancestors {
-                parent = open_at(parent.as_raw_fd(), component, search_flags())?;
-            }
-            let name = CString::new(last.as_bytes())?;
-            let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
-            if unsafe {
-                libc::fstatat(
-                    parent.as_raw_fd(),
-                    name.as_ptr(),
-                    metadata.as_mut_ptr(),
-                    libc::AT_SYMLINK_NOFOLLOW,
-                )
-            } != 0
-            {
-                return Err(std::io::Error::last_os_error().into());
-            }
-            let mut metadata = unsafe { metadata.assume_init() };
-            let is_dir = metadata.st_mode & libc::S_IFMT == libc::S_IFDIR;
-            let names = if is_dir {
-                let directory = open_at(
-                    parent.as_raw_fd(),
-                    last,
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                )?;
-                if unsafe { libc::fstat(directory.as_raw_fd(), &mut metadata) } != 0 {
-                    return Err(std::io::Error::last_os_error().into());
-                }
+            let mut info = self.filesystem.info(physical)?;
+            let names = if info.is_dir {
+                let directory = self.filesystem.open_directory(physical)?;
+                info = super::super::filesystem::FileInfo::from_metadata(&directory.metadata()?);
                 children(directory)?
-            } else if metadata.st_mode & libc::S_IFMT == libc::S_IFREG {
+            } else if info.is_file {
                 Vec::new()
             } else {
                 bail!(
@@ -147,12 +98,10 @@ mod unix {
                     physical.display()
                 );
             };
-            #[allow(clippy::unnecessary_cast)]
-            let mtime = metadata.st_mtime as i64;
             Ok(Observation {
-                size: u64::try_from(metadata.st_size)?,
-                mtime,
-                is_dir,
+                size: info.size,
+                mtime: info.mtime,
+                is_dir: info.is_dir,
                 children: names,
             })
         }
@@ -200,24 +149,26 @@ mod unix {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(super) struct BoundListing;
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
+pub(super) struct BoundListing {
+    filesystem: super::filesystem::RootFs,
+}
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
 impl BoundListing {
-    pub(super) fn new(_root: &Path) -> Result<Self> {
-        Ok(Self)
+    pub(super) fn from_filesystem(filesystem: super::filesystem::RootFs) -> Self {
+        Self { filesystem }
     }
 
     pub(super) fn observe(&self, physical: &Path) -> Result<Observation> {
-        let metadata = std::fs::symlink_metadata(physical)?;
-        if !metadata.is_dir() && !metadata.is_file() {
+        let info = self.filesystem.info(physical)?;
+        if !info.is_dir && !info.is_file {
             anyhow::bail!(
                 "LIST target changed or is unsupported: '{}'",
                 physical.display()
             );
         }
-        let children = if metadata.is_dir() {
+        let children = if info.is_dir {
             std::fs::read_dir(physical)?
                 .map(|entry| entry.map(|entry| entry.file_name()))
                 .collect::<std::io::Result<Vec<_>>>()?
@@ -225,14 +176,9 @@ impl BoundListing {
             Vec::new()
         };
         Ok(Observation {
-            size: metadata.len(),
-            mtime: metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|duration| duration.as_secs() as i64)
-                .unwrap_or(0),
-            is_dir: metadata.is_dir(),
+            size: info.size,
+            mtime: info.mtime,
+            is_dir: info.is_dir,
             children,
         })
     }

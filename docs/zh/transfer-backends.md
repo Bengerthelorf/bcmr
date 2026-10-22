@@ -4,7 +4,7 @@ section: guide
 order: 12
 ---
 
-正式版 0.7.0 之后的开发源码新增临时连接参数、聚合限速、混合来源、客户端中转和 SFTP-only 后端。
+bcmr 0.7.1 新增临时连接参数、聚合限速、混合来源、客户端中转和 SFTP-only 后端。
 
 ```bash
 bcmr copy --ssh-port 2222 --ssh-identity ~/.ssh/temp file 'host:~/new/'

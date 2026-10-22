@@ -1,6 +1,6 @@
+use super::filesystem::RootFs;
 use crate::core::protocol::{self, Message, AUTH_HELLO_TAG};
 use anyhow::Result;
-use std::path::{Path, PathBuf};
 
 const RENDEZVOUS_ACCEPT_TIMEOUT_SECS: u64 = 30;
 
@@ -69,7 +69,7 @@ fn rendezvous_bind_ip() -> std::net::IpAddr {
 }
 
 pub(super) fn handle_open_direct_channel(
-    root: PathBuf,
+    filesystem: RootFs,
 ) -> Result<(Message, tokio::task::JoinHandle<()>)> {
     use ring::rand::{SecureRandom, SystemRandom};
     use zeroize::Zeroizing;
@@ -86,7 +86,7 @@ pub(super) fn handle_open_direct_channel(
         .map_err(|_| anyhow::anyhow!("ring::rand failed to produce session key"))?;
     let key_out = *session_key;
 
-    let handle = tokio::spawn(run_rendezvous(listener, session_key, root));
+    let handle = tokio::spawn(run_rendezvous(listener, session_key, filesystem));
 
     Ok((
         Message::DirectChannelReady {
@@ -104,7 +104,7 @@ const MAX_PARALLEL_AUTH: usize = 64;
 async fn run_rendezvous(
     listener: tokio::net::TcpListener,
     session_key: zeroize::Zeroizing<[u8; 32]>,
-    root: PathBuf,
+    filesystem: RootFs,
 ) {
     let deadline = tokio::time::Instant::now() + rendezvous_accept_timeout();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<tokio::net::TcpStream>(1);
@@ -144,7 +144,7 @@ async fn run_rendezvous(
     auth_tasks.shutdown().await;
 
     if let Some(stream) = authed {
-        if let Err(e) = run_direct_session(stream, &session_key, &root).await {
+        if let Err(e) = run_direct_session(stream, &session_key, filesystem).await {
             eprintln!("serve: direct-tcp session error: {e}");
         }
     }
@@ -191,14 +191,14 @@ pub(crate) fn expected_auth_mac(session_key: &[u8; 32], nonce: &[u8; 32]) -> bla
 async fn run_direct_session(
     stream: tokio::net::TcpStream,
     session_key: &[u8; 32],
-    root: &Path,
+    filesystem: RootFs,
 ) -> Result<()> {
     let (mut reader, mut writer) = stream.into_split();
 
-    Box::pin(super::session::run_session(
+    Box::pin(super::session::run_session_bound(
         &mut reader,
         &mut writer,
-        root,
+        filesystem,
         false,
         false,
         Some(session_key),

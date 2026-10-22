@@ -214,6 +214,13 @@ only asks for the blocks it doesn't already have in its local
 content-addressed store (CAS). The CAS path is governed by
 [`BCMR_CAS_DIR` / `BCMR_CAS_CAP_MB`](/guide/configuration#environment-variables).
 
+In 0.7.1, Linux/macOS serve caches are private and scoped to the captured root directory
+identity. Different roots cannot reuse each other's blocks, and all served-root
+namespaces share one capacity budget, separate from the local CAS. The first
+upload after upgrading warms this scoped cache. Other platforms, including FreeBSD and Windows, request all
+blocks without caching them. Unavailable or unsafe cache storage disables this
+optional acceleration while ordinary transfers continue.
+
 This fires automatically on every PUT of a large enough file —
 no flag is needed to enable it. The benefit is obvious only on
 repeat uploads of the same artifact (dev-loop style): the second

@@ -1,4 +1,3 @@
-use crate::core::atomic_file::AtomicFile;
 use crate::core::cas;
 use crate::core::compress;
 use crate::core::framing::Framing;
@@ -8,41 +7,43 @@ use std::path::Path;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
+use super::filesystem::RootFs;
 use super::session::CHUNK_SIZE;
-use super::write_open;
 
-pub(super) async fn handle_stat(path: &str) -> Result<Message> {
-    let meta = fs::metadata(path).await?;
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|t| {
-            t.duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .map(|d| d.as_secs() as i64)
-        })
-        .unwrap_or(0);
+pub(super) async fn handle_stat(filesystem: &RootFs, path: &str) -> Result<Message> {
+    let info = filesystem.info(Path::new(path))?;
     Ok(Message::StatResponse {
-        size: meta.len(),
-        mtime,
-        is_dir: meta.is_dir(),
+        size: info.size,
+        mtime: info.mtime,
+        is_dir: info.is_dir,
     })
 }
 
-pub(super) async fn handle_list(path: &str, root: &Path) -> Result<Message> {
+pub(super) async fn handle_list(filesystem: &RootFs, path: &str) -> Result<Message> {
     let base = Path::new(path).to_path_buf();
-    let root = root.to_path_buf();
+    let filesystem = filesystem.clone();
     let entries =
-        tokio::task::spawn_blocking(move || collect_list(base, root, |_, _| {})).await??;
+        tokio::task::spawn_blocking(move || collect_list_bound(base, filesystem, |_, _| {}))
+            .await??;
     Ok(Message::ListResponse { entries })
 }
 
+#[cfg(all(test, unix))]
 fn collect_list(
     base: std::path::PathBuf,
     root: std::path::PathBuf,
+    before_read: impl FnMut(&Path, &Path),
+) -> Result<Vec<ListEntry>> {
+    collect_list_bound(base, RootFs::new(&root)?, before_read)
+}
+
+fn collect_list_bound(
+    base: std::path::PathBuf,
+    filesystem: RootFs,
     mut before_read: impl FnMut(&Path, &Path),
 ) -> Result<Vec<ListEntry>> {
-    let binding = super::listing::BoundListing::new(&root)?;
+    let root = filesystem.path();
+    let binding = super::listing::BoundListing::from_filesystem(filesystem.clone());
     let mut out = Vec::new();
     let mut pending = vec![(base.clone(), Vec::<std::path::PathBuf>::new())];
     while let Some((path, mut ancestors)) = pending.pop() {
@@ -50,7 +51,7 @@ fn collect_list(
         // Checking only the initial LIST root permits descendant symlinks
         // to disclose names and metadata outside the server jail.
         let physical = std::fs::canonicalize(&path)?;
-        if !physical.starts_with(&root) {
+        if !physical.starts_with(root) {
             bail!(
                 "LIST path '{}' escapes server root '{}'",
                 path.display(),
@@ -88,11 +89,15 @@ fn collect_list(
     Ok(out)
 }
 
-pub(super) async fn handle_hash(path: &str, offset: u64, limit: Option<u64>) -> Result<Message> {
-    let path = path.to_owned();
+pub(super) async fn handle_hash(
+    filesystem: &RootFs,
+    path: &str,
+    offset: u64,
+    limit: Option<u64>,
+) -> Result<Message> {
+    let mut file = filesystem.read(Path::new(path))?;
     let hash = tokio::task::spawn_blocking(move || -> Result<String> {
         use std::io::Read;
-        let mut file = std::fs::File::open(&path)?;
         if offset > 0 {
             use std::io::Seek;
             file.seek(std::io::SeekFrom::Start(offset))?;
@@ -122,7 +127,9 @@ pub(super) async fn handle_hash(path: &str, offset: u64, limit: Option<u64>) -> 
     Ok(Message::HashResponse { hash })
 }
 
+#[allow(clippy::too_many_arguments)] // Carry the filesystem capability alongside existing wire options.
 pub(super) async fn handle_get<W>(
+    filesystem: &RootFs,
     path: &str,
     offset: u64,
     algo: CompressionAlgo,
@@ -134,19 +141,20 @@ pub(super) async fn handle_get<W>(
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
+    let file = filesystem.read(Path::new(path))?;
     // splice(2) hardcodes STDOUT_FILENO and bypasses userspace, so it
     // can't run with compression or AEAD.
     #[cfg(target_os = "linux")]
     {
         if fast && algo == CompressionAlgo::None && allow_splice && !framing.is_aead() {
-            return handle_get_splice_linux(path, offset, out).await;
+            return handle_get_splice_linux(file, offset, out).await;
         }
     }
     let _ = allow_splice;
 
     use tokio::io::AsyncReadExt;
 
-    let mut file = fs::File::open(path).await?;
+    let mut file = fs::File::from_std(file);
     if offset > 0 {
         use tokio::io::AsyncSeekExt;
         file.seek(std::io::SeekFrom::Start(offset)).await?;
@@ -172,7 +180,11 @@ where
 }
 
 #[cfg(target_os = "linux")]
-pub(super) async fn handle_get_splice_linux<W>(path: &str, offset: u64, out: &mut W) -> Result<()>
+pub(super) async fn handle_get_splice_linux<W>(
+    mut std_file: std::fs::File,
+    offset: u64,
+    out: &mut W,
+) -> Result<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
@@ -182,9 +194,7 @@ where
 
     out.flush().await?;
 
-    let path = path.to_owned();
     let result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        let mut std_file = std::fs::File::open(&path)?;
         if offset > 0 {
             std_file.seek(std::io::SeekFrom::Start(offset))?;
         }
@@ -329,6 +339,8 @@ pub(super) struct PutOptions {
 }
 
 pub(super) async fn handle_put<W, R>(
+    filesystem: &RootFs,
+    store: &cas::Store,
     path: &str,
     options: PutOptions,
     out: &mut W,
@@ -354,23 +366,16 @@ where
             declared_size
         );
     }
-    ensure_parent_dir(path).await?;
-
     // A fresh PUT is written through a handle-bound transaction. The
     // overwrite policy is enforced both at staging time and again by the
     // atomic commit, so a concurrent creator cannot slip between a preflight
     // check and publication. offset>0 is a content-proved resume.
     let (mut file, transaction) = if offset == 0 {
-        let destination = Path::new(path);
-        let transaction = if overwrite {
-            AtomicFile::new(destination)?
-        } else {
-            AtomicFile::new_no_replace(destination)?
-        };
+        let transaction = filesystem.atomic_file(Path::new(path), overwrite, sync)?;
         let file = fs::File::from_std(transaction.try_clone_file()?);
         (file, Some(transaction))
     } else {
-        let mut f = write_open(path, false).await?;
+        let mut f = fs::File::from_std(filesystem.write(Path::new(path), false, sync)?);
         f.seek(std::io::SeekFrom::Start(offset)).await?;
         (f, None)
     };
@@ -396,12 +401,13 @@ where
                 );
             }
             if let Some(cap) = cas::cap_bytes() {
-                let _ = tokio::task::spawn_blocking(move || cas::evict_to_cap(cap)).await;
+                let store = store.clone();
+                let _ = tokio::task::spawn_blocking(move || store.evict_to_cap(cap)).await;
             }
 
             let mut bits = vec![0u8; hashes.len().div_ceil(8)];
             for (i, h) in hashes.iter().enumerate() {
-                if !cas::has(h) {
+                if !store.has(h) {
                     bits[i / 8] |= 1 << (i % 8);
                 }
             }
@@ -410,6 +416,7 @@ where
                 .await?;
             out.flush().await?;
             dedup_state = Some(DedupState {
+                store: store.clone(),
                 hashes,
                 bits,
                 cursor: 0,
@@ -478,6 +485,7 @@ where
 }
 
 struct DedupState {
+    store: cas::Store,
     hashes: Vec<[u8; 32]>,
     bits: Vec<u8>,
     cursor: usize,
@@ -499,7 +507,7 @@ async fn consume_block(
 ) -> Result<()> {
     if let Some(state) = dedup {
         while state.cursor < state.hashes.len() && !state.is_missing(state.cursor) {
-            let cached = cas::read(&state.hashes[state.cursor])?;
+            let cached = state.store.read(&state.hashes[state.cursor])?;
             enforce_write_bound(*written, cached.len(), declared_size)?;
             if let Some(h) = hasher.as_mut() {
                 h.update(&cached);
@@ -515,7 +523,7 @@ async fn consume_block(
         if state.cursor < state.hashes.len() && state.is_missing(state.cursor) {
             let mut h = [0u8; 32];
             h.copy_from_slice(blake3::hash(block).as_bytes());
-            let _ = cas::write(&h, block);
+            let _ = state.store.write(&h, block);
             state.cursor += 1;
         }
     }
@@ -542,7 +550,7 @@ async fn flush_remaining_cas_blocks(
                 state.cursor
             ));
         }
-        let cached = cas::read(&state.hashes[state.cursor])?;
+        let cached = state.store.read(&state.hashes[state.cursor])?;
         enforce_write_bound(*written, cached.len(), declared_size)?;
         if let Some(h) = hasher.as_mut() {
             h.update(&cached);
@@ -561,6 +569,7 @@ fn enforce_write_bound(written: u64, incoming: usize, declared: u64) -> Result<(
 }
 
 pub(super) async fn handle_put_chunked<R>(
+    filesystem: &RootFs,
     path: &str,
     offset: u64,
     length: u64,
@@ -573,8 +582,7 @@ where
 {
     use tokio::io::{AsyncSeekExt, AsyncWriteExt as _};
 
-    ensure_parent_dir(path).await?;
-    let mut file = write_open(path, false).await?;
+    let mut file = fs::File::from_std(filesystem.write(Path::new(path), false, sync)?);
     file.seek(std::io::SeekFrom::Start(offset)).await?;
 
     let mut written: u64 = 0;
@@ -611,6 +619,7 @@ where
 }
 
 pub(super) async fn handle_get_chunked<W>(
+    filesystem: &RootFs,
     path: &str,
     offset: u64,
     length: u64,
@@ -623,7 +632,7 @@ where
 {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-    let mut file = fs::File::open(path).await?;
+    let mut file = fs::File::from_std(filesystem.read(Path::new(path))?);
     let metadata = file.metadata().await?;
     if !metadata.is_file() {
         bail!("get_chunked: source is not a regular file");
@@ -661,43 +670,42 @@ where
     Ok(())
 }
 
-pub(super) async fn handle_mkdir(path: &str, sync: bool) -> Result<Message> {
+pub(super) async fn handle_mkdir(filesystem: &RootFs, path: &str, sync: bool) -> Result<Message> {
+    filesystem.create_directories(Path::new(path), sync)?;
+    Ok(Message::Ok { hash: None })
+}
+
+pub(super) async fn handle_truncate(
+    filesystem: &RootFs,
+    path: &str,
+    size: u64,
+    sync: bool,
+) -> Result<Message> {
+    let file = filesystem.write(Path::new(path), true, sync)?;
+    file.set_len(size)?;
     if sync {
-        crate::core::io::create_dir_all_durable_async(Path::new(path)).await?;
-    } else {
-        fs::create_dir_all(path).await?;
+        file.sync_all()?;
     }
     Ok(Message::Ok { hash: None })
 }
 
-async fn ensure_parent_dir(path: &str) -> Result<()> {
-    if let Some(parent) = Path::new(path).parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).await?;
-        }
-    }
-    Ok(())
-}
-
-pub(super) async fn handle_truncate(path: &str, size: u64) -> Result<Message> {
-    ensure_parent_dir(path).await?;
-    let f = write_open(path, true).await?;
-    f.set_len(size).await?;
-    Ok(Message::Ok { hash: None })
-}
-
-pub(super) async fn handle_resume(path: &str) -> Result<Message> {
-    let meta = match fs::metadata(path).await {
-        Ok(m) => m,
-        Err(_) => {
+pub(super) async fn handle_resume(filesystem: &RootFs, path: &str) -> Result<Message> {
+    let mut file = match filesystem.read(Path::new(path)) {
+        Ok(file) => file,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
             return Ok(Message::ResumeResponse {
                 size: 0,
                 block_hash: None,
             });
         }
+        Err(error) => return Err(error),
     };
 
-    let size = meta.len();
+    let size = file.metadata()?.len();
     if size < CHUNK_SIZE as u64 {
         return Ok(Message::ResumeResponse {
             size,
@@ -706,10 +714,8 @@ pub(super) async fn handle_resume(path: &str) -> Result<Message> {
     }
 
     let block_start = (size / CHUNK_SIZE as u64 - 1) * CHUNK_SIZE as u64;
-    let path = path.to_owned();
     let block_hash = tokio::task::spawn_blocking(move || -> Result<String> {
         use std::io::{Read, Seek};
-        let mut file = std::fs::File::open(&path)?;
         file.seek(std::io::SeekFrom::Start(block_start))?;
         let mut buf = vec![0u8; CHUNK_SIZE];
         let mut hasher = blake3::Hasher::new();
@@ -730,6 +736,177 @@ mod tests {
     #[cfg(unix)]
     use super::collect_list;
     use super::handle_mkdir;
+
+    #[cfg(unix)]
+    struct ReplacedAncestor {
+        _temporary: tempfile::TempDir,
+        root: std::path::PathBuf,
+        checked: std::path::PathBuf,
+        outside: std::path::PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl ReplacedAncestor {
+        fn new() -> Self {
+            let temporary = tempfile::tempdir().unwrap();
+            let root = temporary.path().join("root");
+            std::fs::create_dir_all(root.join("ancestor/inner")).unwrap();
+            let root = root.canonicalize().unwrap();
+            let outside = temporary.path().join("outside");
+            std::fs::create_dir_all(outside.join("inner")).unwrap();
+            let checked = root.join("ancestor/inner/payload");
+            std::fs::write(&checked, b"inside").unwrap();
+            std::fs::write(outside.join("inner/payload"), b"outside").unwrap();
+            Self {
+                _temporary: temporary,
+                root,
+                checked,
+                outside,
+            }
+        }
+
+        fn replace(&self) {
+            std::fs::rename(self.root.join("ancestor"), self.root.join("retained")).unwrap();
+            std::os::unix::fs::symlink(&self.outside, self.root.join("ancestor")).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn root_boundary_atomic_put_cannot_target_root_or_leave_staging() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let filesystem = super::RootFs::new(&root).unwrap();
+        let wire = crate::core::protocol::encode_message(&crate::core::protocol::Message::Done);
+        let result = super::handle_put(
+            &filesystem,
+            &crate::core::cas::Store::disabled(),
+            root.to_str().unwrap(),
+            super::PutOptions {
+                declared_size: 0,
+                offset: 0,
+                overwrite: false,
+                sync: false,
+            },
+            &mut Vec::new(),
+            &mut wire.as_slice(),
+            &mut crate::core::framing::Framing::plain(),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "the server root is a directory, not a file destination"
+        );
+        assert_eq!(
+            std::fs::read_dir(&root).unwrap().count(),
+            0,
+            "a refused root PUT must not leave a transaction directory"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn root_boundary_get_rejects_a_replaced_ancestor() {
+        let fixture = ReplacedAncestor::new();
+        let checked =
+            crate::commands::serve::validate_path(fixture.checked.to_str().unwrap(), &fixture.root)
+                .unwrap();
+        let filesystem = super::RootFs::new(&fixture.root).unwrap();
+        fixture.replace();
+        let mut output = Vec::new();
+        let result = super::handle_get(
+            &filesystem,
+            checked.to_str().unwrap(),
+            0,
+            crate::core::protocol::CompressionAlgo::None,
+            false,
+            false,
+            &mut output,
+            &mut crate::core::framing::Framing::plain(),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "GET must not reopen a changed ancestor outside the captured root"
+        );
+        assert!(
+            output.is_empty(),
+            "a refused GET must not emit outside content"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn root_boundary_truncate_rejects_a_replaced_ancestor() {
+        let fixture = ReplacedAncestor::new();
+        let checked =
+            crate::commands::serve::validate_path(fixture.checked.to_str().unwrap(), &fixture.root)
+                .unwrap();
+        let filesystem = super::RootFs::new(&fixture.root).unwrap();
+        fixture.replace();
+        let result = super::handle_truncate(&filesystem, checked.to_str().unwrap(), 1, false).await;
+        assert!(
+            result.is_err(),
+            "TRUNCATE must not reopen a changed ancestor outside the captured root"
+        );
+        assert_eq!(
+            std::fs::read(fixture.outside.join("inner/payload")).unwrap(),
+            b"outside"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn root_boundary_mkdir_rejects_a_replaced_ancestor() {
+        let fixture = ReplacedAncestor::new();
+        let target = fixture.checked.with_file_name("new/empty");
+        let checked =
+            crate::commands::serve::validate_path(target.to_str().unwrap(), &fixture.root).unwrap();
+        let filesystem = super::RootFs::new(&fixture.root).unwrap();
+        fixture.replace();
+        let result = super::handle_mkdir(&filesystem, checked.to_str().unwrap(), false).await;
+        assert!(result.is_err(), "MKDIR must stay below the captured root");
+        assert!(!fixture.outside.join("inner/new").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn root_boundary_atomic_put_rejects_a_replaced_ancestor() {
+        let fixture = ReplacedAncestor::new();
+        let target = fixture.checked.with_file_name("new");
+        let checked =
+            crate::commands::serve::validate_path(target.to_str().unwrap(), &fixture.root).unwrap();
+        let filesystem = super::RootFs::new(&fixture.root).unwrap();
+        fixture.replace();
+        let mut output = Vec::new();
+        let wire = [
+            crate::core::protocol::encode_message(&crate::core::protocol::Message::Data {
+                payload: b"new".to_vec(),
+            }),
+            crate::core::protocol::encode_message(&crate::core::protocol::Message::Done),
+        ]
+        .concat();
+        let result = super::handle_put(
+            &filesystem,
+            &crate::core::cas::Store::disabled(),
+            checked.to_str().unwrap(),
+            super::PutOptions {
+                declared_size: 3,
+                offset: 0,
+                overwrite: false,
+                sync: false,
+            },
+            &mut output,
+            &mut wire.as_slice(),
+            &mut crate::core::framing::Framing::plain(),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "atomic PUT must capture its parent relative to the root"
+        );
+        assert!(!fixture.outside.join("inner/new").exists());
+    }
 
     #[cfg(unix)]
     #[test]
@@ -768,12 +945,23 @@ mod tests {
     #[tokio::test]
     async fn synced_mkdir_creates_nested_empty_directories_through_existing_link_prefix() {
         let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let filesystem = super::RootFs::new(&root).unwrap();
         let real = directory.path().join("real");
         std::fs::create_dir(&real).unwrap();
         let link = directory.path().join("linked-prefix");
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let target = link.join("parent/empty");
-        handle_mkdir(target.to_str().unwrap(), true).await.unwrap();
+        handle_mkdir(
+            &filesystem,
+            crate::commands::serve::validate_path(target.to_str().unwrap(), &root)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            true,
+        )
+        .await
+        .unwrap();
         assert!(real.join("parent/empty").is_dir());
         assert_eq!(
             std::fs::read_dir(real.join("parent/empty"))
@@ -786,11 +974,20 @@ mod tests {
     #[tokio::test]
     async fn synced_mkdir_reports_creation_failure_without_replacing_blocker() {
         let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let filesystem = super::RootFs::new(&root).unwrap();
         let blocker = directory.path().join("blocker");
         std::fs::write(&blocker, b"existing bytes").unwrap();
-        let error = handle_mkdir(blocker.join("child").to_str().unwrap(), true)
-            .await
-            .expect_err("durability/creation failures must not become successful MKDIR replies");
+        let error = handle_mkdir(
+            &filesystem,
+            crate::commands::serve::validate_path(blocker.join("child").to_str().unwrap(), &root)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            true,
+        )
+        .await
+        .expect_err("durability/creation failures must not become successful MKDIR replies");
         let io_error = error.downcast_ref::<std::io::Error>().unwrap();
         #[cfg(unix)]
         assert_eq!(io_error.kind(), std::io::ErrorKind::NotADirectory);
@@ -803,10 +1000,19 @@ mod tests {
     #[tokio::test]
     async fn unsupported_synced_mkdir_refuses_before_creating_any_directory() {
         let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let filesystem = super::RootFs::new(&root).unwrap();
         let target = directory.path().join("missing/empty");
-        handle_mkdir(target.to_str().unwrap(), true)
-            .await
-            .expect_err("unsupported durable namespace creation must fail closed");
+        handle_mkdir(
+            &filesystem,
+            crate::commands::serve::validate_path(target.to_str().unwrap(), &root)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            true,
+        )
+        .await
+        .expect_err("unsupported durable namespace creation must fail closed");
         assert!(!directory.path().join("missing").exists());
     }
 }

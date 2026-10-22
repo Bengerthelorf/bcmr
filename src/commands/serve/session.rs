@@ -12,7 +12,7 @@ use super::handlers::{
     handle_put_chunked, handle_resume, handle_stat, handle_truncate, PutOptions,
 };
 use super::rendezvous::{handle_open_direct_channel, RendezvousTasks, MAX_RENDEZVOUS_PER_SESSION};
-use super::{validate_path, SERVER_CAPS};
+use super::{filesystem::RootFs, validate_path, SERVER_CAPS};
 
 pub(super) const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
@@ -28,6 +28,35 @@ where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
+    run_session_bound(
+        reader,
+        writer,
+        RootFs::new(root)?,
+        allow_splice,
+        allow_direct_tcp,
+        direct_tcp_key,
+    )
+    .await
+}
+
+pub(super) async fn run_session_bound<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    filesystem: RootFs,
+    allow_splice: bool,
+    allow_direct_tcp: bool,
+    direct_tcp_key: Option<&[u8; 32]>,
+) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let root = filesystem.path();
+    let store = crate::core::cas::Store::for_serve_root_at(root, filesystem.root_file())
+        .unwrap_or_else(|error| {
+            eprintln!("serve: dedup cache unavailable, continuing without cached blocks: {error}");
+            crate::core::cas::Store::disabled()
+        });
     let mut offered_caps = SERVER_CAPS;
     #[cfg(not(unix))]
     {
@@ -125,6 +154,7 @@ where
                 match validate_path(&path, root) {
                     Ok(p) => {
                         if let Err(e) = handle_get(
+                            &filesystem,
                             p.to_str().unwrap_or(&path),
                             offset,
                             algo,
@@ -161,11 +191,11 @@ where
                 continue;
             }
             Message::Stat { path } => match validate_path(&path, root) {
-                Ok(p) => handle_stat(p.to_str().unwrap_or(&path)).await,
+                Ok(p) => handle_stat(&filesystem, p.to_str().unwrap_or(&path)).await,
                 Err(e) => Err(e),
             },
             Message::List { path } => match validate_path(&path, root) {
-                Ok(p) => handle_list(p.to_str().unwrap_or(&path), root).await,
+                Ok(p) => handle_list(&filesystem, p.to_str().unwrap_or(&path)).await,
                 Err(e) => Err(e),
             },
             Message::Hash {
@@ -173,7 +203,7 @@ where
                 offset,
                 limit,
             } => match validate_path(&path, root) {
-                Ok(p) => handle_hash(p.to_str().unwrap_or(&path), offset, limit).await,
+                Ok(p) => handle_hash(&filesystem, p.to_str().unwrap_or(&path), offset, limit).await,
                 Err(e) => Err(e),
             },
             Message::Put {
@@ -184,6 +214,8 @@ where
             } => match validate_path(&path, root) {
                 Ok(p) => {
                     handle_put(
+                        &filesystem,
+                        &store,
                         p.to_str().unwrap_or(&path),
                         PutOptions {
                             declared_size: size,
@@ -206,6 +238,7 @@ where
             } => match validate_path(&path, root) {
                 Ok(p) => {
                     handle_put_chunked(
+                        &filesystem,
                         p.to_str().unwrap_or(&path),
                         offset,
                         length,
@@ -225,6 +258,7 @@ where
                 match validate_path(&path, root) {
                     Ok(p) => {
                         if let Err(e) = handle_get_chunked(
+                            &filesystem,
                             p.to_str().unwrap_or(&path),
                             offset,
                             length,
@@ -260,15 +294,17 @@ where
                 continue;
             }
             Message::Mkdir { path } => match validate_path(&path, root) {
-                Ok(p) => handle_mkdir(p.to_str().unwrap_or(&path), sync).await,
+                Ok(p) => handle_mkdir(&filesystem, p.to_str().unwrap_or(&path), sync).await,
                 Err(e) => Err(e),
             },
             Message::Truncate { path, size } => match validate_path(&path, root) {
-                Ok(p) => handle_truncate(p.to_str().unwrap_or(&path), size).await,
+                Ok(p) => {
+                    handle_truncate(&filesystem, p.to_str().unwrap_or(&path), size, sync).await
+                }
                 Err(e) => Err(e),
             },
             Message::Resume { path } => match validate_path(&path, root) {
-                Ok(p) => handle_resume(p.to_str().unwrap_or(&path)).await,
+                Ok(p) => handle_resume(&filesystem, p.to_str().unwrap_or(&path)).await,
                 Err(e) => Err(e),
             },
             Message::OpenDirectChannel => {
@@ -282,7 +318,7 @@ where
                          on this session (limit {MAX_RENDEZVOUS_PER_SESSION})"
                     ))
                 } else {
-                    match handle_open_direct_channel(root.to_path_buf()) {
+                    match handle_open_direct_channel(filesystem.clone()) {
                         Ok((msg, handle)) => {
                             rendezvous_tasks.push(handle);
                             Ok(msg)

@@ -132,6 +132,97 @@ class SymlinkParityTests(unittest.TestCase):
                 self.assertFalse(tree.exists())
                 self.assertEqual(external.read_text(), "never removed")
 
+    def test_source_separators_preserve_directory_link_identity(self):
+        # A terminal separator must not turn lstat/rename into operations on
+        # the referent, including the copy plus cleanup paths used by SSH.
+        for mode in self.MODES:
+            for operation in ("copy", "move"):
+                with self.subTest(mode=mode, operation=operation):
+                    src, out, source, target = self.route(mode + "-" + operation)
+                    # route suffixes above label fixtures; transport follows mode.
+                    host = "legacy" if mode.endswith("legacy") else "fixture"
+                    source = lambda path: f"{host}:{path}" if mode.startswith("download") else str(path)
+                    target = lambda path: f"{host}:{path}" if mode.startswith("upload") else str(path)
+                    referent = src / "referent"
+                    payload = self.put(referent, "payload", "link target must survive")
+                    link = src / "link"
+                    link.symlink_to(referent, target_is_directory=True)
+                    options = ["--no-deref"] if operation == "copy" else []
+                    result = self.run_bcmr(operation, "-r", *options,
+                                           source(link) + "///", target(out))
+                    self.assert_ok(result)
+                    landed = out / "link"
+                    self.assertTrue(landed.is_symlink(), result.stdout + result.stderr)
+                    self.assertEqual(os.readlink(landed), str(referent))
+                    self.assertEqual(payload.read_text(), "link target must survive")
+                    self.assertEqual(link.is_symlink(), operation == "copy")
+
+    def test_source_separators_preserve_dangling_link_without_recursion(self):
+        for operation in ("copy", "move"):
+            with self.subTest(operation=operation):
+                link = self.local / operation / "link"
+                link.parent.mkdir()
+                link.symlink_to("missing-target")
+                destination = self.dest / operation
+                options = ["--no-deref"] if operation == "copy" else []
+                self.assert_ok(self.run_bcmr(operation, *options, str(link) + "/", destination))
+                self.assertEqual(os.readlink(destination), "missing-target")
+                self.assertEqual(link.is_symlink(), operation == "copy")
+
+    def test_fan_out_source_separators_preserve_link_target(self):
+        for remote_source in (False, True):
+            with self.subTest(remote_source=remote_source):
+                label = "remote" if remote_source else "local"
+                root = (self.home if remote_source else self.local) / label
+                payload = self.put(root, "referent/payload", "fan-out referent survives")
+                link = root / "link"
+                link.symlink_to(root / "referent", target_is_directory=True)
+                source = f"fixture:{link}/" if remote_source else str(link) + "/"
+                local_target = self.dest / label
+                remote_target = self.second / label
+                self.assert_ok(self.run_bcmr("move", "-r", source,
+                                             "--to", str(local_target) + "/",
+                                             "--to", f"second:{remote_target}/"))
+                for destination in (local_target / "link", remote_target / "link"):
+                    self.assertTrue(destination.is_symlink(), str(destination))
+                    self.assertEqual(os.readlink(destination), str(root / "referent"))
+                self.assertFalse(link.is_symlink())
+                self.assertEqual(payload.read_text(), "fan-out referent survives")
+
+    def test_source_separator_exclusion_uses_original_spelling(self):
+        payload = self.put(self.local, "referent/payload", "excluded referent")
+        link = self.local / "link"
+        link.symlink_to(self.local / "referent", target_is_directory=True)
+        self.assert_ok(self.run_bcmr("move", "-r", "--exclude", r"/link/$",
+                                     str(link) + "/", self.dest))
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(payload.read_text(), "excluded referent")
+        self.assertEqual(list(self.dest.iterdir()), [])
+
+    def test_source_separator_trimming_keeps_colon_link_local(self):
+        for operation in ("copy", "move"):
+            with self.subTest(operation=operation):
+                payload = self.put(self.local, operation + "-target/payload", "local colon link")
+                link = self.local / ("fixture:" + operation + "-link")
+                link.symlink_to(payload.parent, target_is_directory=True)
+                options = ["--no-deref"] if operation == "copy" else []
+                destination = self.dest / operation
+                self.assert_ok(self.run_bcmr(operation, "-r", *options,
+                                             "./" + link.name + "/", destination))
+                self.assertTrue(destination.is_symlink())
+                self.assertEqual(os.readlink(destination), str(payload.parent))
+                self.assertEqual(payload.read_text(), "local colon link")
+
+    def test_ordinary_directory_source_separators_keep_basename_rules(self):
+        for operation in ("copy", "move"):
+            with self.subTest(operation=operation):
+                directory = self.local / operation / "tree"
+                self.put(directory, "payload", "ordinary directory")
+                destination = self.dest / operation
+                self.assert_ok(self.run_bcmr(operation, "-r", str(directory) + "///",
+                                             str(destination) + "/"))
+                self.assertEqual((destination / "tree/payload").read_text(), "ordinary directory")
+
     def test_serve_list_rejects_a_followed_target_outside_its_root(self):
         jail = self.root / "jail"
         jail.mkdir()

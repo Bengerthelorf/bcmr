@@ -4,7 +4,7 @@ section: guide
 order: 10
 ---
 
-This describes development source as of 2026-10-21, after published 0.7.0.
+This describes the local and remote behavior available in bcmr 0.7.1.
 
 ## Destination paths
 
@@ -37,7 +37,7 @@ copy. Source stars resolve once, before destination planning.
 - `-p` finalizes root, nested and empty directory permissions and times after content, deepest first.
 - Exclusions match source spellings and source-relative paths, prune ancestor subtrees, and apply to totals, preview, directory creation, payloads and move cleanup.
 - Copy follows file and directory links by default; `--no-deref` preserves links locally and in both remote directions, including dangling links. When following links, dangling targets and cycles fail explicitly; excluded links are not followed. Serve root confinement applies to followed descendants.
-- Move preserves link identity and never removes link targets. Existing directory targets merge with the same leaf overwrite rules. Native no-replace rename protects concurrent local targets.
+- Move preserves link identity and never removes link targets, even when the source spelling ends in directory separators. Existing directory targets merge with the same leaf overwrite rules. Native no-replace rename protects concurrent local targets.
 - Forced overwrite requires the same approval locally and remotely. Use `-f -y` for unattended replacement. Declining cancels move cleanup; dry-run never requests overwrite approval.
 - Fresh legacy SSH uploads and downloads stage content before publication. Size, verification and attributes complete before replacing the final file. Serve `-p`/`-V` uploads also finalize a private stage first.
 - Remote and fan-out moves support exclusions. Cleanup removes only the captured selected entries, retains excluded/new content, checks source identity and metadata, and reports a retained recovery object if an unsafe restoration cannot be completed.
@@ -51,7 +51,7 @@ copy. Source stars resolve once, before destination planning.
 - The portable copy phase does not reproduce source hardlink topology; native rename retains it. This requires an archive-style feature rather than changing ordinary copy semantics.
 - Remote inventory/download names and preserved link-target strings require UTF-8. Selected unrepresentable remote entries fail explicitly, while excluded entries are pruned before name validation. Raw byte-name portability is not promised by the existing upload path interfaces.
 - Windows names and symlink privileges cannot represent every Unix source. Unsafe native components are rejected rather than silently renamed.
-- An explicit serve `--root` remains an access boundary for followed links. Linux/macOS LIST binds checked targets through directory handles; other platforms retain path-based checks and do not promise immunity to hostile concurrent ancestor replacement.
+- An explicit serve `--root` remains an access boundary for followed links. Unix file reads/writes, metadata and directory creation use a retained root directory handle; Linux/macOS/FreeBSD LIST uses that same capability. Other platforms retain path-based checks and do not promise immunity to hostile concurrent ancestor replacement.
 - Link-preserving remote operations use SSH auxiliary operations and exact-path ordinary payloads for compatibility. Their throughput and durability capabilities differ from serve.
 
 Unsupported `--sync` combinations refuse before writes; see the remote-copy guide. SSH CLI, relay and SFTP capabilities and their protocol limits are documented in [transfer backends](./transfer-backends.md).

@@ -4,8 +4,7 @@ section: guide
 order: 9
 ---
 
-This describes development source after the published 0.7.0 package, compared
-with the [OpenSSH scp manual](https://man.openbsd.org/scp).
+This describes bcmr 0.7.1, compared with the [OpenSSH scp manual](https://man.openbsd.org/scp).
 
 | Capability | bcmr behavior |
 |---|---|
@@ -31,5 +30,5 @@ arbitrary ACL/xattr replication are outside portable `-p` semantics.
 
 See [SSH options](./ssh-options.md), [transfer backends](./transfer-backends.md)
 and [local/remote behavior](./local-remote-semantics.md) for examples and exact
-limits. These source changes do not change the contents of an existing 0.7.0
-Homebrew installation.
+limits. Users with an existing 0.7.0 installation must upgrade to 0.7.1
+to use the additions described here.

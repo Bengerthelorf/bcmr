@@ -65,6 +65,40 @@ class CompositeTransferTests(unittest.TestCase):
         self.assertEqual((self.dest / 'remote').read_text(), 'remote')
         self.assertTrue(source.is_symlink())
 
+    def test_relay_source_separators_preserve_directory_link(self):
+        for operation in ('copy', 'move'):
+            with self.subTest(operation=operation):
+                root = self.home / operation
+                payload = self.put(root, 'referent/payload', 'relay referent survives')
+                source = root / 'link'
+                source.symlink_to(root / 'referent', target_is_directory=True)
+                options = ['--no-deref'] if operation == 'copy' else []
+                self.assert_ok(self.run_bcmr(operation, '-r', *options,
+                                            f'fixture:{source}///', f'second:{operation}-link'))
+                landed = self.second / (operation + '-link')
+                self.assertTrue(landed.is_symlink())
+                self.assertEqual(os.readlink(landed), str(root / 'referent'))
+                self.assertEqual(payload.read_text(), 'relay referent survives')
+                self.assertEqual(source.is_symlink(), operation == 'copy')
+
+    def test_mixed_source_separators_preserve_local_directory_link(self):
+        for operation in ('copy', 'move'):
+            with self.subTest(operation=operation):
+                root = self.local / operation
+                payload = self.put(root, 'referent/payload', 'mixed referent survives')
+                source = root / 'link'
+                source.symlink_to(root / 'referent', target_is_directory=True)
+                remote = self.put(self.home, operation + '-remote', 'remote companion')
+                destination = self.dest / operation
+                options = ['--no-deref'] if operation == 'copy' else []
+                self.assert_ok(self.run_bcmr(operation, '-r', *options, str(source) + '/',
+                                            f'fixture:{remote}', str(destination) + '/'))
+                self.assertTrue((destination / 'link').is_symlink())
+                self.assertEqual(os.readlink(destination / 'link'), str(root / 'referent'))
+                self.assertEqual(payload.read_text(), 'mixed referent survives')
+                self.assertEqual((destination / remote.name).read_text(), 'remote companion')
+                self.assertEqual(source.is_symlink(), operation == 'copy')
+
     def test_late_invalid_mixed_source_leaves_earlier_destination_absent(self):
         local = self.put(self.local, 'one', 'one')
         result = self.run_bcmr('copy', local, 'fixture:missing', self.dest)

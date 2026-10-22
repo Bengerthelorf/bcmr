@@ -5,6 +5,7 @@ use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 use tokio::io;
 
+mod filesystem;
 mod handlers;
 mod listing;
 mod rendezvous;
@@ -59,15 +60,6 @@ pub(super) fn validate_path(raw: &str, root: &Path) -> Result<PathBuf> {
         );
     }
     Ok(canonical)
-}
-
-// O_NOFOLLOW closes the TOCTOU window between validate_path and this open.
-pub(super) async fn write_open(path: &str, truncate: bool) -> Result<tokio::fs::File> {
-    let mut opts = tokio::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(truncate);
-    #[cfg(unix)]
-    opts.custom_flags(libc::O_NOFOLLOW);
-    Ok(opts.open(path).await?)
 }
 
 fn canonicalize_with_ancestor(path: &Path) -> Result<PathBuf> {

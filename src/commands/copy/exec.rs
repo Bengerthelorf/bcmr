@@ -187,8 +187,14 @@ pub(crate) async fn preserve_attributes(
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        let atime = filetime::FileTime::from_unix_time(src_metadata.atime(), 0);
-        let mtime = filetime::FileTime::from_unix_time(src_metadata.mtime(), 0);
+        let atime = filetime::FileTime::from_unix_time(
+            src_metadata.atime(),
+            src_metadata.atime_nsec() as u32,
+        );
+        let mtime = filetime::FileTime::from_unix_time(
+            src_metadata.mtime(),
+            src_metadata.mtime_nsec() as u32,
+        );
         filetime::set_file_times(dst, atime, mtime)?;
     }
 
