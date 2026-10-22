@@ -268,7 +268,13 @@ impl JsonProgress {
 
         let speed_mib = self.data.calculate_speed();
         let speed_bps = (speed_mib * 1024.0 * 1024.0) as u64;
-        let percent = if self.data.total_bytes > 0 {
+        let percent = if let Some(total) = self.data.items_total {
+            if total == 0 {
+                100.0
+            } else {
+                self.data.items_processed as f64 / total as f64 * 100.0
+            }
+        } else if self.data.total_bytes > 0 {
             self.data.current_bytes as f64 / self.data.total_bytes as f64 * 100.0
         } else {
             0.0
@@ -359,6 +365,10 @@ impl ProgressRenderer for JsonProgress {
         if self.finished {
             return Ok(());
         }
+        // A throttled last tick can precede the final item or byte update.
+        // Publish the completed snapshot before the terminal result.
+        self.last_emit = None;
+        self.emit_progress();
         self.finished = true;
 
         let elapsed = self.data.elapsed();

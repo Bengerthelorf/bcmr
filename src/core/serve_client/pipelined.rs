@@ -31,7 +31,7 @@ impl ServeClient {
 
     async fn pipelined_put_files_imp<FChunk, FComplete>(
         &mut self,
-        files: Vec<FileTransfer>,
+        mut files: Vec<FileTransfer>,
         overwrite: bool,
         on_chunk: FChunk,
         mut on_complete: FComplete,
@@ -45,6 +45,7 @@ impl ServeClient {
             return Ok(Vec::new());
         }
 
+        self.normalize_transfer_paths(&mut files).await?;
         let (mut wire, mut tx) = self.take_writer()?;
         let algo = self.algo;
         let progress: Vec<(std::path::PathBuf, u64)> =
@@ -169,7 +170,7 @@ impl ServeClient {
 
     async fn pipelined_get_files_imp<FStart, FChunk>(
         &mut self,
-        files: Vec<FileTransfer>,
+        mut files: Vec<FileTransfer>,
         sync_after_each: bool,
         verify_before_publish: bool,
         overwrite: bool,
@@ -185,6 +186,7 @@ impl ServeClient {
             return Ok(());
         }
 
+        self.normalize_transfer_paths(&mut files).await?;
         let (mut wire, mut tx) = self.take_writer()?;
 
         let request_paths: Vec<String> = files.iter().map(|f| f.remote.clone()).collect();

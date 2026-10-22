@@ -18,6 +18,9 @@ pub(super) async fn handle_remote_upload(
     let plan = collect_upload_plan(sources, rdest, args.is_recursive(), excludes)?;
     crate::core::interrupt::check()?;
     if args.is_dry_run() {
+        if crate::config::is_json_mode() {
+            return super::finish_json_operation("Uploading (dry run)");
+        }
         println!(
             "Dry-run: would upload {} to {}",
             format_bytes(plan.total_size as f64),
@@ -90,6 +93,9 @@ pub(super) async fn handle_remote_download(
     let plan = collect_download_plan(sources, dest_local, args.is_recursive(), excludes).await?;
     crate::core::interrupt::check()?;
     if args.is_dry_run() {
+        if crate::config::is_json_mode() {
+            return super::finish_json_operation("Downloading (dry run)");
+        }
         println!(
             "Dry-run: would download {} to {}",
             format_bytes(plan.total_size as f64),

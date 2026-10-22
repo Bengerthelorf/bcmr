@@ -321,7 +321,7 @@ async fn handle_copy_one(args: &Commands, dest_override: Option<&std::path::Path
                     format_bytes(plan.total_size as f64)
                 );
             }
-            return Ok(());
+            return commands::remote_copy::finish_json_operation("Copying (dry run)");
         }
 
         crate::core::interrupt::check()?;
@@ -421,9 +421,11 @@ async fn handle_move_command_inner(args: &Commands) -> Result<()> {
         if cm.paths.len() < 2 {
             bail!("missing destination — pass at least <SRC> <DEST> or use --to <DEST>");
         }
+        validate_named_move_sources(&cm.paths[..cm.paths.len() - 1])?;
         return handle_move_one(args).await;
     }
 
+    validate_named_move_sources(&cm.paths)?;
     let excludes = args.compile_excludes()?;
     let sources = select_transfer_sources(&cm.paths, &excludes);
     if sources.is_empty() {
@@ -461,6 +463,49 @@ async fn handle_move_command_inner(args: &Commands) -> Result<()> {
 
     if let Some(cleanup) = cleanup {
         cleanup.remove().await?;
+    }
+    Ok(())
+}
+
+fn validate_named_move_sources(sources: &[std::path::PathBuf]) -> Result<()> {
+    for source in sources {
+        let spelling = source.to_string_lossy();
+        let remote = crate::core::remote::parse_remote_path(&spelling);
+        let path = remote
+            .as_ref()
+            .map_or(spelling.as_ref(), |remote| remote.path.as_str());
+        let separator = |character| {
+            if remote.is_some() {
+                character == '/'
+            } else {
+                std::path::is_separator(character)
+            }
+        };
+        // Path::components normalizes a trailing '.', so inspect the spelling.
+        let last = path
+            .trim_end_matches(separator)
+            .rsplit(separator)
+            .next()
+            .unwrap_or_default();
+        #[cfg(windows)]
+        let last = if remote.is_none() && last.len() >= 2 && last.as_bytes()[1] == b':' {
+            &last[2..]
+        } else {
+            last
+        };
+        let unnamed_root = remote.is_none()
+            && source.components().all(|component| {
+                matches!(
+                    component,
+                    std::path::Component::RootDir | std::path::Component::Prefix(_)
+                )
+            });
+        if last.is_empty() || matches!(last, "." | "..") || unnamed_root {
+            bail!(
+                "move requires a named source, not '{}'; no paths were moved",
+                source.display()
+            );
+        }
     }
     Ok(())
 }
@@ -641,12 +686,33 @@ pub(crate) async fn handle_remove_command(args: &Commands) -> Result<()> {
         match parse_remote_path(&p.to_string_lossy()) {
             Some(mut r) => {
                 r.reject_unsafe()?;
+                if matches!(
+                    r.path.trim_end_matches('/').rsplit('/').next(),
+                    Some("." | "..")
+                ) {
+                    bail!("Cannot remove '{}': refusing a path ending in '.' or '..'; name the directory itself; no paths were removed", r.display());
+                }
                 r.expand_tilde().await?;
                 remote_paths.push(r);
             }
             None => local_paths.push(p.clone()),
         }
     }
+
+    if !remote_paths.is_empty() {
+        if !excludes.is_empty() {
+            anyhow::bail!("--exclude is not supported for remote removal; no paths were removed");
+        }
+        if args.is_interactive() && !args.is_force() && !args.is_yes() && !args.is_dry_run() {
+            anyhow::bail!("--interactive is not supported for remote removal; omit -i for a single confirmation, or use -y/--yes; no paths were removed");
+        }
+    }
+
+    // Validate the entire local selection before deleting any remote operand.
+    // Reuse this plan below, so mixed operations cannot mutate a remote and then
+    // discover an invalid or unreadable local path.
+    let files_to_remove =
+        commands::remove::check_removes(&local_paths, args.is_recursive(), args, &excludes).await?;
 
     if !remote_paths.is_empty() {
         if args.is_dry_run() {
@@ -668,11 +734,11 @@ pub(crate) async fn handle_remove_command(args: &Commands) -> Result<()> {
             let dir_only = args.is_dir_only();
             for r in &remote_paths {
                 remote_remove(r, recursive, force, dir_only).await?;
-                if args.is_verbose() && !is_json_mode() {
+                if args.is_verbose() && !args.is_quiet() && !is_json_mode() {
                     println!("removed {}", r.display());
                 }
             }
-            if !is_json_mode() {
+            if !is_json_mode() && !args.is_quiet() {
                 println!(
                     "Removed {} remote path{}",
                     remote_paths.len(),
@@ -682,25 +748,16 @@ pub(crate) async fn handle_remove_command(args: &Commands) -> Result<()> {
         }
 
         if local_paths.is_empty() {
-            return Ok(());
+            return commands::remote_copy::finish_json_operation(if args.is_dry_run() {
+                "Removing (dry run)"
+            } else {
+                "Removing"
+            });
         }
     }
 
     let first_display = first_display_name(&local_paths);
     let early = start_scanning_runner(args, "Removing", first_display.as_deref())?;
-
-    let files_to_remove =
-        match commands::remove::check_removes(&local_paths, args.is_recursive(), args, &excludes)
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                if let Some(r) = early {
-                    r.finish_with_error(&e.to_string());
-                }
-                return Err(e.into());
-            }
-        };
 
     if args.is_dry_run() {
         if !is_json_mode() && remote_paths.is_empty() {
@@ -754,7 +811,7 @@ pub(crate) async fn handle_remove_command(args: &Commands) -> Result<()> {
     if !files_to_remove.is_empty()
         && !args.is_force()
         && !args.is_yes()
-        && (!args.is_interactive() || files_to_remove.len() > 1)
+        && !args.is_interactive()
         && !confirm_removal(&files_to_remove)?
     {
         if let Some(r) = early {
@@ -770,7 +827,7 @@ pub(crate) async fn handle_remove_command(args: &Commands) -> Result<()> {
         "Removing",
         first_display.as_deref(),
         total_size,
-        args.is_quiet(),
+        args.is_quiet() || (args.is_interactive() && !args.is_force() && !args.is_yes()),
     )?;
 
     let result = commands::remove::remove_paths(
@@ -822,5 +879,69 @@ pub(crate) fn handle_init_command(args: &Commands) -> Result<()> {
             Ok(())
         }
         _ => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_named_move_sources;
+    use std::path::PathBuf;
+
+    #[test]
+    fn move_source_validation_rejects_unnamed_operands_without_filesystem_access() {
+        for path in [
+            "/",
+            "////",
+            ".",
+            "..",
+            "tree/.",
+            "tree/.///",
+            "tree/../",
+            "host:/",
+            "host:tree/.",
+            "host:tree/../",
+        ] {
+            let sources = [PathBuf::from("earlier-named-source"), PathBuf::from(path)];
+            assert!(validate_named_move_sources(&sources).is_err(), "{path}");
+        }
+        #[cfg(windows)]
+        for path in [
+            "C:",
+            "C:\\",
+            "C:.",
+            "C:..",
+            "tree\\.\\",
+            "\\\\server\\share\\",
+        ] {
+            assert!(
+                validate_named_move_sources(&[PathBuf::from(path)]).is_err(),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn move_source_validation_allows_named_entries() {
+        for path in [
+            "../named",
+            "./named/",
+            "tree/../named",
+            "/tmp/named/",
+            ".hidden",
+            "host:../named",
+            "host:/tmp/named/",
+        ] {
+            assert!(
+                validate_named_move_sources(&[PathBuf::from(path)]).is_ok(),
+                "{path}"
+            );
+        }
+        #[cfg(not(windows))]
+        for path in ["C:", "C:.", "C:.."] {
+            assert!(
+                validate_named_move_sources(&[PathBuf::from(path)]).is_ok(),
+                "{path}"
+            );
+        }
     }
 }

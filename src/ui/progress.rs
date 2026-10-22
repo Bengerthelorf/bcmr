@@ -68,6 +68,23 @@ impl ProgressRenderer for PlainTextProgress {
         Ok(())
     }
 
+    fn finish_err(&mut self, _msg: &str) -> io::Result<()> {
+        println!("{}", self.data.stopped_summary_line());
+        Ok(())
+    }
+
+    fn set_total_items(&mut self, total: usize) {
+        self.data.items_total = Some(total);
+    }
+
+    fn inc_items_processed(&mut self) {
+        self.data.items_processed += 1;
+    }
+
+    fn inc_skipped(&mut self, delta: u64) {
+        self.data.inc_skipped(delta);
+    }
+
     fn set_verify_mode(&mut self, on: bool) {
         self.data.verify_mode = on;
     }
@@ -132,7 +149,7 @@ fn select_renderer(
                 RendererKind::Plain
             }
         }
-        ProgressMode::Tui | ProgressMode::Auto if tui_fits && !no_color => RendererKind::Tui,
+        ProgressMode::Tui if tui_fits && !no_color => RendererKind::Tui,
         ProgressMode::Tui | ProgressMode::Auto if inline_fits => RendererKind::Inline,
         ProgressMode::Tui | ProgressMode::Auto => RendererKind::Plain,
         ProgressMode::Off => RendererKind::Silent,
@@ -210,7 +227,7 @@ mod tests {
                 false,
                 (80, 24)
             ),
-            RendererKind::Tui
+            RendererKind::Inline
         );
         assert_eq!(
             select_renderer(

@@ -1,3 +1,4 @@
+use super::endpoint::Endpoint;
 use super::{resolve_download_local, resolve_upload_remote};
 use crate::app::prompts::confirm_overwrite;
 use crate::cli::Commands;
@@ -31,7 +32,7 @@ fn local_existing_kind(path: &Path) -> Result<Option<bool>> {
     }
 }
 
-/// Obtain one approval for the selected leaves before any destination writes.
+/// Reject self-overwrites and obtain one approval before any destination writes.
 /// Cancellation is an error, as for local copy, so move cleanup cannot run.
 pub(super) async fn confirm_remote_overwrites(
     args: &Commands,
@@ -39,7 +40,9 @@ pub(super) async fn confirm_remote_overwrites(
     dest: &Path,
     excludes: &[regex::Regex],
 ) -> Result<()> {
-    if !args.should_prompt_for_overwrite() || args.is_dry_run() {
+    let overwrite = args.is_force() || args.is_resume() || args.is_append() || args.is_strict();
+    let prompt = args.should_prompt_for_overwrite() && !args.is_dry_run();
+    if !overwrite && !prompt {
         return Ok(());
     }
     let preserve_links = args.is_no_deref() || matches!(args, Commands::Move { .. });
@@ -71,10 +74,19 @@ pub(super) async fn confirm_remote_overwrites(
                     base.join(&relative)
                 };
                 if let Some(is_dir) = remote_existing_kind(&target).await? {
-                    overwrites.push(FileToOverwrite {
-                        path: PathBuf::from(target.display()),
-                        is_dir,
-                    });
+                    if !is_dir && entry.file_type().is_file() {
+                        super::composite::validate_regular_file_pair(
+                            &Endpoint::Local(entry.path().to_owned()),
+                            &Endpoint::Ssh(target.clone()),
+                        )
+                        .await?;
+                    }
+                    if prompt {
+                        overwrites.push(FileToOverwrite {
+                            path: PathBuf::from(target.display()),
+                            is_dir,
+                        });
+                    }
                 }
             }
         }
@@ -96,10 +108,24 @@ pub(super) async fn confirm_remote_overwrites(
                     crate::core::destination::remote_entry_path(&base, &entry.path)?
                 };
                 if let Some(is_dir) = local_existing_kind(&target)? {
-                    overwrites.push(FileToOverwrite {
-                        path: target,
-                        is_dir,
-                    });
+                    if !is_dir && entry.link_target.is_none() {
+                        let selected = if entry.path.is_empty() {
+                            remote_source.clone()
+                        } else {
+                            remote_source.join(&entry.path)
+                        };
+                        super::composite::validate_regular_file_pair(
+                            &Endpoint::Ssh(selected),
+                            &Endpoint::Local(target.clone()),
+                        )
+                        .await?;
+                    }
+                    if prompt {
+                        overwrites.push(FileToOverwrite {
+                            path: target,
+                            is_dir,
+                        });
+                    }
                 }
             }
         }

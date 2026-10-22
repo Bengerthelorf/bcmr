@@ -38,6 +38,12 @@ bcmr copy -r local_dir/ user@host:/remote/path/
 bcmr copy -r user@host:/remote/dir/ ./local/
 ```
 
+## 家目录之外的路径
+
+普通 SSH 传输按 SSH 登录用户的文件权限访问路径，包括挂载磁盘上的绝对路径，以及从家目录指向这些磁盘的软链接，无需额外复制参数或安装配置。相对路径（`host:file`、`host:.`、`host:`）仍以远端家目录为基准，`~/` 的含义保持不变。
+
+客户端连接 POSIX 主机时会启动 `bcmr serve --root /`，并在协议请求中将相对路径解析为远端家目录下的路径。要使用这一行为，需要更新**执行 `bcmr copy` / `bcp` 的电脑**；仅更新远端程序不会改变旧客户端的启动命令。独立启动的 `bcmr serve`（包括 `--listen`）仍默认限制在家目录；显式 `serve --root DIR` 仍会拒绝越界路径和软链接。`--root` 是每次启动 serve 的参数，不是安装配置，也不会提升用户权限。
+
 ## 并行传输
 
 使用 `-P` 参数同时传输多个文件：
@@ -218,7 +224,7 @@ bcmr copy --fast -V user@host:/big.bin ./local.bin
 
 - 使用现有的 SSH 配置（`~/.ssh/config`、密钥等）
 - 在开始传输前验证 SSH 连接
-- **Serve 模式**：通过 SSH 启动远端 `bcmr serve`，通过 stdin/stdout 的二进制协议通信
+- **Serve 模式**：通过 SSH 启动远端 `bcmr serve --root /`，通过 stdin/stdout 的二进制协议通信
 - **传统模式**：默认通过 ControlMaster 复用 SSH 连接；设置 `BCMR_SSH_NO_MULTIPLEX=1` 可关闭
 - **Serve 会话池**：显式禁用 ControlMaster，使并行成员使用相互独立的 TCP/加密流
 - 每 15 秒探测无流量的 SSH 会话，连续 20 次无响应后关闭；持续有流量的慢连接不会被误判

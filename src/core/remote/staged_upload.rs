@@ -242,7 +242,14 @@ fi
         let publish = if self.allow_overwrite {
             // The payload basename is the FINAL basename. The destination is
             // always the pinned cwd, never a user path reinterpreted as a dir.
-            "mv -f \"$payload\" . || exit 1\n"
+            if self.prepared_symlink {
+                // Darwin's directory-form mv compares link referents in
+                // unix2003 mode. Legacy mode retains the exact-target rename
+                // while allowing distinct links to the same live referent.
+                "if [ \"$(uname -s)\" = Darwin ]; then\n    COMMAND_MODE=legacy /bin/mv -f \"$payload\" . || exit 1\nelse\n    mv -f \"$payload\" . || exit 1\nfi\n"
+            } else {
+                "mv -f \"$payload\" . || exit 1\n"
+            }
         } else if self.prepared_symlink {
             // BSD link(2) follows source links. ln -P explicitly links the
             // staged link object; the pinned cwd fixes the destination once.

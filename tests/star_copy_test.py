@@ -51,7 +51,7 @@ if host == 'denied-list':
 if host not in ('fixture', 'second', 'legacy'):
     sys.exit('unexpected SSH host: ' + host)
 home = os.environ['STAR_SECOND_HOME' if host == 'second' else 'STAR_FIXTURE_HOME']
-if host == 'legacy' and words == ['bcmr', 'serve']:
+if host == 'legacy' and words[:2] == ['bcmr', 'serve']:
     sys.stderr.write('bcmr: protocol version mismatch: client=2 server=1\\n')
     sys.exit(1)
 os.chdir(home)

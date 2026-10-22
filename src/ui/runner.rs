@@ -172,9 +172,7 @@ impl ProgressRunner {
         let log = crate::config::log_file();
         let mut renderer = progress::create_renderer(total_size, mode, silent, json, log.as_ref())?;
         let cancellation = ProgressCancellation::default();
-        if on_interrupt.is_none() {
-            renderer.set_cancellation(cancellation.clone());
-        }
+        renderer.set_cancellation(cancellation.clone());
         let handle = ProgressHandle::new(renderer);
 
         let ticker = handle.clone();
@@ -188,12 +186,15 @@ impl ProgressRunner {
 
         let signal_handle = on_interrupt.map(|on_interrupt| {
             let signal = handle.clone();
+            let key_cancellation = cancellation.clone();
             tokio::spawn(async move {
-                if let Ok(()) = ctrl_c().await {
-                    on_interrupt();
-                    let _ = signal.finish_err("interrupted");
-                    std::process::exit(130);
+                tokio::select! {
+                    result = ctrl_c() => if result.is_err() { return; },
+                    () = key_cancellation.cancelled() => {},
                 }
+                on_interrupt();
+                let _ = signal.finish_err("interrupted");
+                std::process::exit(130);
             })
         });
 

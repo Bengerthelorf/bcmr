@@ -109,7 +109,7 @@ if len(words) == 1 and shlex.split(words[0]) == ['cat', %r]:
         source, destination, src, dst = self.route("download-serve")
         source.write_bytes(os.urandom(1024 * 1024))
         self.inject_transport_before_exec('''
-if words == ['bcmr', 'serve']:
+if words[:2] == ['bcmr', 'serve']:
     import subprocess
     child = subprocess.Popen(['/bin/sh', '-c', ' '.join(words)], stdout=subprocess.PIPE)
     remaining = 32768

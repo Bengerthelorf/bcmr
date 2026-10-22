@@ -45,6 +45,23 @@ bcmr copy -r local_dir/ user@host:/remote/path/
 bcmr copy -r user@host:/remote/dir/ ./local/
 ```
 
+## Paths outside the home directory
+
+Ordinary SSH transfers access files using the SSH login user's filesystem
+permissions, including absolute paths on mounted disks and symlinks from the
+home directory to those disks. No extra copy option or installation setting is
+needed. Relative paths (`host:file`, `host:.`, `host:`) still refer to the remote
+home directory; `~/` keeps its usual meaning.
+
+The client starts `bcmr serve --root /` for SSH transfers to POSIX hosts and
+resolves relative protocol paths against the remote home directory. Update the
+computer running `bcmr copy` / `bcp` to receive this behavior; updating only the
+remote executable does not change an older client's launch command. Standalone
+`bcmr serve` (including `--listen`) still defaults to the home directory, and an
+explicit `serve --root DIR` still rejects paths and symlinks outside `DIR`.
+`--root` is a per-process serve option, not an installation setting or elevated
+permission. Filesystem permissions continue to apply.
+
 ## Parallel Transfers
 
 Transfer multiple files concurrently with the `-P` flag:
@@ -263,7 +280,7 @@ server-side integrity verification.
 
 - Uses your existing SSH configuration (`~/.ssh/config`, keys, etc.)
 - Validates SSH connectivity before starting transfers
-- **Serve mode**: launches `bcmr serve` on remote via SSH, communicates via binary protocol over stdin/stdout
+- **Serve mode**: launches `bcmr serve --root /` on remote via SSH, communicates via binary protocol over stdin/stdout
 - **Legacy mode**: reuses SSH connections via ControlMaster by
   default; `BCMR_SSH_NO_MULTIPLEX=1` opts out when the remote sshd is
   tuned for independent connection bursts

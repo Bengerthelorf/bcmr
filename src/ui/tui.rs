@@ -77,7 +77,7 @@ impl TuiProgress {
                 if let Some(cancellation) = &self.cancellation {
                     cancellation.request();
                 } else {
-                    self.finish()?;
+                    self.finish_err("interrupted")?;
                     std::process::exit(130);
                 }
                 Ok(true)
@@ -690,6 +690,21 @@ impl ProgressRenderer for TuiProgress {
         println!("{}", self.data.done_summary_line());
 
         self.finished = true;
+        Ok(())
+    }
+
+    fn finish_err(&mut self, _msg: &str) -> io::Result<()> {
+        // Drop restores the screen and terminal mode without claiming success.
+        if self.alternate_screen_enabled {
+            execute!(stdout(), Show, LeaveAlternateScreen)?;
+            self.alternate_screen_enabled = false;
+        }
+        if self.raw_mode_enabled {
+            disable_raw_mode()?;
+            self.raw_mode_enabled = false;
+        }
+        self.finished = true;
+        println!("{}", self.data.stopped_summary_line());
         Ok(())
     }
 }

@@ -46,7 +46,7 @@ compression = "auto"     # "auto"（默认）、"force" 或 "off"
 
 | 值 | 说明 |
 |----|------|
-| `"auto"` | 根据终端能力选择 TUI、无色 inline 或管道安全的 plain（默认） |
+| `"auto"` | 在终端的命令下方刷新 inline，管道中使用 plain（默认） |
 | `"tui"` | 带渐变进度条、ETA、速度和逐文件状态的 TUI |
 | `"inline"` | 无颜色、实时刷新的 3 行显示 |
 | `"plain"` | 不使用光标控制、适合日志的最终摘要 |
@@ -209,9 +209,9 @@ BCMR_PROFILE=home bcmr copy ./report.pdf host:dst/
 # 解析为：bcmr copy -p ./report.pdf host:dst/
 ```
 
-**优先级（左侧胜出）：** `显式用户参数 > 主机默认 > profile 默认 > 内置默认`。注入顺序为 `profile、host、用户参数`，全部从左到右；clap 后解析的参数覆盖先解析的，因此用户参数胜出。
+**优先级（左侧胜出）：** `显式用户参数 > 主机默认 > profile 默认 > 内置默认`。解析前会移除被覆盖的默认参数；同一选项的短参数与长参数具有相同优先级。允许重复的选项会保留用户显式提供的各个值。
 
-未知的 `--profile <name>`（没有对应的 `[profile.<name>]` 表）是静默 no-op — 命令其余部分照常执行。
+未知的 `--profile <name>`（没有对应的 `[profile.<name>]` 表）会在操作开始前报错。
 
 ## 环境变量
 

@@ -122,17 +122,21 @@ where
 
         refuse_same_file_move(src, &dst_path)?;
 
-        if dst_path.symlink_metadata().is_ok() && !cli.is_force() {
-            return Err(BcmrError::TargetExists(dst_path));
-        }
-
+        let destination_exists = dst_path.symlink_metadata().is_ok();
         if cli.is_dry_run() {
             print_dry_run(
-                ActionType::Move,
+                if destination_exists {
+                    ActionType::Overwrite
+                } else {
+                    ActionType::Move
+                },
                 &src.to_string_lossy(),
                 Some(&dst_path.to_string_lossy()),
             );
             return Ok(());
+        }
+        if destination_exists && !cli.is_force() {
+            return Err(BcmrError::TargetExists(dst_path));
         }
 
         let file_size = source_metadata.len();

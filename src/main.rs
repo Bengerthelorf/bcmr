@@ -83,6 +83,9 @@ fn maybe_detach(cli: &cli::Cli) -> Result<bool> {
 }
 
 fn validate_noninteractive_confirmation(cli: &cli::Cli) -> Result<()> {
+    if cli.command.is_dry_run() {
+        return Ok(());
+    }
     match &cli.command {
         Commands::Copy { args, .. } | Commands::Move { args, .. } if args.force && !args.yes => {
             anyhow::bail!("non-interactive overwrite requires -y/--yes in addition to -f/--force");
@@ -94,7 +97,7 @@ fn validate_noninteractive_confirmation(cli: &cli::Cli) -> Result<()> {
             dry_run,
             ..
         } => {
-            if *interactive {
+            if *interactive && !*force && !*yes {
                 anyhow::bail!("--interactive cannot be used with JSON or background execution");
             }
             if !*dry_run && !*force && !*yes {

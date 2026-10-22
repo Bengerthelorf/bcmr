@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::core::remote::parse_remote_path;
-use std::collections::HashSet;
+use clap::CommandFactory;
+use std::collections::{HashMap, HashSet};
 
 const SUBCOMMANDS_THAT_TAKE_DEFAULTS: &[&str] = &["copy", "move", "check", "remove"];
 
@@ -30,11 +31,14 @@ pub fn inject_defaults(argv: Vec<String>, config: &Config) -> Result<Vec<String>
         Vec::new()
     };
 
-    let host_args: Vec<String> = first_matching_host_args(&argv[sub_idx + 1..], config);
-
-    let user_long_flags = collect_user_long_flags(&argv[1..]);
-    let profile_args = drop_overridden_flags(profile_args, &user_long_flags);
-    let host_args = drop_overridden_flags(host_args, &user_long_flags);
+    let schema = FlagSchema::new(&argv[sub_idx]);
+    let host_args = first_matching_host_args(&schema.split(&argv[sub_idx + 1..]), config);
+    let user_flags = option_names(&schema.split(&argv[1..]));
+    let host_options = schema.split(&host_args);
+    let mut profile_overrides = user_flags.clone();
+    profile_overrides.extend(option_names(&host_options));
+    let profile_args = drop_overridden_flags(schema.split(&profile_args), &profile_overrides);
+    let host_args = drop_overridden_flags(host_options, &user_flags);
 
     if profile_args.is_empty() && host_args.is_empty() {
         return Ok(argv);
@@ -48,37 +52,139 @@ pub fn inject_defaults(argv: Vec<String>, config: &Config) -> Result<Vec<String>
     Ok(out)
 }
 
-fn collect_user_long_flags(after_sub: &[String]) -> HashSet<&str> {
-    after_sub
-        .iter()
-        .take_while(|a| a.as_str() != "--")
-        .filter_map(|a| {
-            let rest = a.strip_prefix("--")?;
-            if rest.is_empty() {
-                return None;
+struct FlagSpec {
+    name: String,
+    takes_value: bool,
+}
+
+struct FlagSchema {
+    long: HashMap<String, FlagSpec>,
+    short: HashMap<char, FlagSpec>,
+}
+
+struct OptionTokens {
+    name: Option<String>,
+    tokens: Vec<String>,
+}
+
+impl FlagSchema {
+    fn new(subcommand: &str) -> Self {
+        let command = crate::cli::Cli::command();
+        let subcommand = command
+            .get_subcommands()
+            .find(|command| command.get_name() == subcommand)
+            .expect("defaulted subcommand is declared in the CLI");
+        let mut schema = Self {
+            long: HashMap::new(),
+            short: HashMap::new(),
+        };
+        for argument in command.get_arguments().chain(subcommand.get_arguments()) {
+            let spec = || FlagSpec {
+                name: argument.get_id().as_str().to_owned(),
+                takes_value: argument.get_action().takes_values(),
+            };
+            if let Some(long) = argument.get_long() {
+                schema.long.insert(long.to_owned(), spec());
             }
-            Some(rest.split('=').next().unwrap())
-        })
+            if let Some(short) = argument.get_short() {
+                schema.short.insert(short, spec());
+            }
+        }
+        schema
+    }
+
+    // Split short groups so overriding -p in a default -rp keeps -r. Preserve
+    // every occurrence within a layer, including repeatable --to/--ssh-identity.
+    // Option values and everything after -- must never become override flags.
+    fn split(&self, arguments: &[String]) -> Vec<OptionTokens> {
+        let mut out = Vec::new();
+        let mut index = 0;
+        while index < arguments.len() {
+            let token = &arguments[index];
+            if token == "--" {
+                out.push(OptionTokens {
+                    name: None,
+                    tokens: arguments[index..].to_vec(),
+                });
+                break;
+            }
+            if let Some(long) = token.strip_prefix("--") {
+                let name = long.split('=').next().unwrap_or(long);
+                let spec = self.long.get(name);
+                let mut tokens = vec![token.clone()];
+                if !long.contains('=') && spec.is_some_and(|spec| spec.takes_value) {
+                    take_option_value(arguments, &mut index, &mut tokens);
+                }
+                out.push(OptionTokens {
+                    name: Some(spec.map_or_else(|| name.to_owned(), |spec| spec.name.clone())),
+                    tokens,
+                });
+            } else if let Some(shorts) = token.strip_prefix('-').filter(|value| !value.is_empty()) {
+                for (offset, short) in shorts.char_indices() {
+                    let Some(spec) = self.short.get(&short) else {
+                        out.push(OptionTokens {
+                            name: None,
+                            tokens: vec![format!("-{}", &shorts[offset..])],
+                        });
+                        break;
+                    };
+                    let mut tokens = vec![format!("-{short}")];
+                    if spec.takes_value {
+                        let attached = &shorts[offset + short.len_utf8()..];
+                        if attached.is_empty() {
+                            take_option_value(arguments, &mut index, &mut tokens);
+                        } else {
+                            tokens[0].push_str(attached);
+                        }
+                    }
+                    out.push(OptionTokens {
+                        name: Some(spec.name.clone()),
+                        tokens,
+                    });
+                    if spec.takes_value {
+                        break;
+                    }
+                }
+            } else {
+                out.push(OptionTokens {
+                    name: None,
+                    tokens: vec![token.clone()],
+                });
+            }
+            index += 1;
+        }
+        out
+    }
+}
+
+fn take_option_value(arguments: &[String], index: &mut usize, tokens: &mut Vec<String>) {
+    if let Some(value) = arguments
+        .get(*index + 1)
+        .filter(|value| !value.starts_with('-'))
+    {
+        tokens.push(value.clone());
+        *index += 1;
+    }
+}
+
+fn option_names(options: &[OptionTokens]) -> HashSet<String> {
+    options
+        .iter()
+        .filter_map(|option| option.name.clone())
         .collect()
 }
 
-// Also drop the value token when the form is `--flag value` (no `=`).
-fn drop_overridden_flags(injected: Vec<String>, user_flags: &HashSet<&str>) -> Vec<String> {
-    let mut out = Vec::with_capacity(injected.len());
-    let mut i = 0;
-    while i < injected.len() {
-        let a = &injected[i];
-        let name = a.strip_prefix("--").map(|s| s.split('=').next().unwrap());
-        if name.is_some_and(|n| user_flags.contains(n)) {
-            let consumes_value =
-                !a.contains('=') && i + 1 < injected.len() && !injected[i + 1].starts_with('-');
-            i += if consumes_value { 2 } else { 1 };
-        } else {
-            out.push(a.clone());
-            i += 1;
-        }
-    }
-    out
+fn drop_overridden_flags(options: Vec<OptionTokens>, overrides: &HashSet<String>) -> Vec<String> {
+    options
+        .into_iter()
+        .filter(|option| {
+            !option
+                .name
+                .as_ref()
+                .is_some_and(|name| overrides.contains(name))
+        })
+        .flat_map(|option| option.tokens)
+        .collect()
 }
 
 fn find_subcommand(argv: &[String]) -> Option<usize> {
@@ -152,36 +258,27 @@ fn strip_profile_flag(argv: Vec<String>) -> Vec<String> {
     out
 }
 
-fn first_matching_host_args(after_sub: &[String], config: &Config) -> Vec<String> {
+fn first_matching_host_args(options: &[OptionTokens], config: &Config) -> Vec<String> {
     if config.host.is_empty() {
         return Vec::new();
     }
-    let mut tokens = after_sub.iter();
-    while let Some(token) = tokens.next() {
-        if global_option_takes_value(token) {
-            tokens.next();
-            continue;
-        }
-        if token
-            .strip_prefix("--")
-            .and_then(|token| token.split_once('='))
-            .is_some_and(|(name, _)| global_option_takes_value(&format!("--{name}")))
-        {
-            continue;
-        }
-        let candidate: &str =
-            if let Some(eq) = token.strip_prefix("--").and_then(|s| s.split_once('=')) {
-                eq.1
-            } else if token.starts_with('-') {
-                continue;
-            } else {
-                token
-            };
-        let Some(rp) = parse_remote_path(candidate) else {
-            continue;
+    for option in options {
+        let candidates: Vec<&str> = match option.name.as_deref() {
+            None => option.tokens.iter().map(String::as_str).collect(),
+            Some("to") => option.tokens[0]
+                .strip_prefix("--to=")
+                .or_else(|| option.tokens.get(1).map(String::as_str))
+                .into_iter()
+                .collect(),
+            _ => continue,
         };
-        if let Some(defaults) = config.host.get(&rp.host) {
-            return defaults.default_args.clone();
+        for candidate in candidates {
+            let Some(rp) = parse_remote_path(candidate) else {
+                continue;
+            };
+            if let Some(defaults) = config.host.get(&rp.host) {
+                return defaults.default_args.clone();
+            }
         }
     }
     Vec::new()
@@ -403,6 +500,94 @@ mod tests {
         assert_eq!(
             out,
             s(&["bcmr", "copy", "-p", "--compress=lz4", "src", "dst"])
+        );
+    }
+
+    #[test]
+    fn cli_short_and_long_spellings_override_grouped_profile_options() {
+        let cfg = cfg_with(&[], &[("work", &["-rpj4"])]);
+        let argv = s(&[
+            "bcmr",
+            "--profile",
+            "work",
+            "copy",
+            "--preserve",
+            "-j1",
+            "src",
+            "dst",
+        ]);
+        assert_eq!(
+            inject_defaults(argv, &cfg).unwrap(),
+            s(&["bcmr", "copy", "-r", "--preserve", "-j1", "src", "dst"]),
+        );
+    }
+
+    #[test]
+    fn host_defaults_override_profile_in_either_flag_spelling() {
+        let cfg = cfg_with(&[("lab", &["-j2"])], &[("work", &["--jobs", "4", "-p"])]);
+        let argv = s(&["bcmr", "--profile", "work", "copy", "src", "lab:dst"]);
+        assert_eq!(
+            inject_defaults(argv, &cfg).unwrap(),
+            s(&["bcmr", "copy", "-p", "-j2", "src", "lab:dst"]),
+        );
+    }
+
+    #[test]
+    fn overriding_repeatable_defaults_keeps_every_explicit_value() {
+        let cfg = cfg_with(&[], &[("work", &["--ssh-identity", "default-key"])]);
+        let argv = s(&[
+            "bcmr",
+            "--profile",
+            "work",
+            "copy",
+            "--ssh-identity",
+            "first-key",
+            "--ssh-identity",
+            "second-key",
+            "src",
+            "dst",
+        ]);
+        assert_eq!(
+            inject_defaults(argv, &cfg).unwrap(),
+            s(&[
+                "bcmr",
+                "copy",
+                "--ssh-identity",
+                "first-key",
+                "--ssh-identity",
+                "second-key",
+                "src",
+                "dst"
+            ]),
+        );
+    }
+
+    #[test]
+    fn option_values_and_literal_paths_do_not_override_defaults() {
+        let cfg = cfg_with(&[], &[("work", &["--jobs", "4", "-p"])]);
+        let argv = s(&[
+            "bcmr",
+            "--profile",
+            "work",
+            "copy",
+            "--exclude=--jobs",
+            "--",
+            "-p",
+            "dst",
+        ]);
+        assert_eq!(
+            inject_defaults(argv, &cfg).unwrap(),
+            s(&[
+                "bcmr",
+                "copy",
+                "--jobs",
+                "4",
+                "-p",
+                "--exclude=--jobs",
+                "--",
+                "-p",
+                "dst"
+            ]),
         );
     }
 }

@@ -45,7 +45,7 @@ fallback_warning = true  # warn on stderr when serve fast path fails
 
 | Value | Description |
 |-------|-------------|
-| `"auto"` | TUI on a capable terminal; inline with `NO_COLOR` or limited space; plain in pipes (default) |
+| `"auto"` | Inline below the command on a capable terminal; plain in pipes (default) |
 | `"tui"` | TUI box with gradient bar, ETA, speed, and per-file status |
 | `"inline"` | Uncolored, live 3-line display |
 | `"plain"` | Log-safe final summary without cursor control |
@@ -208,9 +208,9 @@ BCMR_PROFILE=home bcmr copy ./report.pdf host:dst/
 # resolves to: bcmr copy -p ./report.pdf host:dst/
 ```
 
-**Precedence (left wins):** `explicit user flags > host defaults > profile defaults > built-in defaults`. The injection ordering is `profile, host, user`, all left-to-right; clap parses earlier-then-later, so user flags win.
+**Precedence (left wins):** `explicit user flags > host defaults > profile defaults > built-in defaults`. Overridden defaults are removed before parsing; short and long spellings of an option have the same priority. Repeated explicit values remain intact for repeatable options.
 
-Unknown `--profile <name>` (no matching `[profile.<name>]` table) is a silent no-op — the rest of the command runs unchanged.
+An unknown `--profile <name>` (no matching `[profile.<name>]` table) is an error before the operation starts.
 
 ## Environment Variables
 

@@ -895,11 +895,11 @@ fn e2e_failed_active_modes_preserve_the_old_destination_and_resume_proof() {
         }
 
         assert!(
-            stdout.contains("Done: 6.00 MiB"),
+            stdout.contains("Stopped: 6.00 MiB"),
             "{case} must report exactly the proved prefix plus one written suffix chunk: {stdout}"
         );
         assert!(
-            !stdout.contains("Done: 12.00 MiB"),
+            !stdout.contains("Stopped: 12.00 MiB"),
             "{case} must not publish completed progress after one suffix chunk: {stdout}"
         );
 

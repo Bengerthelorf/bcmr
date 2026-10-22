@@ -16,7 +16,7 @@ flags:
   - { f: "-e, --exclude",       t: "regex...",     d: "—",     x: "exclude paths matching regex" }
   - { f: "-n, --dry-run",       t: bool,           d: "false", x: "preview without making changes" }
   - { f: "--progress",          t: "auto|tui|inline|plain|off", d: "auto", x: "choose the progress display" }
-  - { f: "-q, --quiet",         t: bool,           d: "false", x: "suppress progress UI; errors only" }
+  - { f: "-q, --quiet",         t: bool,           d: "false", x: "suppress progress and per-file messages" }
   - { f: "--json",              t: bool,           d: "false", x: "emit NDJSON events and a terminal result; remain in foreground" }
   - { f: "-b, --background",    t: bool,           d: "false", x: "submit a background job; query with bcmr status" }
   - { f: "--config <PATH>",     t: path,           d: "—",     x: "layer this file over discovered configuration" }
@@ -28,5 +28,13 @@ example:
 ---
 
 JSON and background removal require explicit consent with `--yes` or
-`--force`, unless using `--dry-run`. `--interactive` cannot be combined
-with JSON or background execution.
+`--force`, unless using `--dry-run`. These consent flags override `--interactive`;
+an effective per-item prompt requires a terminal and cannot run in JSON or background mode.
+
+Local exclusions prune whole directory subtrees. Directory symlinks, including
+operands ending in `/`, are removed as links. `--dir` removes only an empty
+directory and fails if a file appears while confirmation is pending.
+
+Remote removal currently supports one aggregate confirmation, not `--interactive`
+per-item prompts or `--exclude`. Unsupported options are rejected before any
+selected path is removed. `--dry-run` previews without asking for confirmation.

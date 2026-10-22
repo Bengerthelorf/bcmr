@@ -15,6 +15,7 @@ use crate::core::protocol_aead::Direction;
 use crate::core::transport::ssh as ssh_transport;
 
 mod ops;
+mod paths;
 mod pipelined;
 mod pool;
 mod promote;
@@ -47,6 +48,7 @@ pub struct ServeClient {
     dedup_enabled: bool,
     effective_caps: u8,
     poisoned: bool,
+    remote_paths: Option<paths::RemotePaths>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +67,7 @@ impl ServeClient {
     pub async fn connect_with_caps(ssh_target: &str, caps: u8) -> Result<Self, BcmrError> {
         let spawn = ssh_transport::spawn_remote(ssh_target).await?;
         let mut client = Self::from_ssh_spawn(spawn);
+        client.remote_paths = Some(paths::RemotePaths::new(ssh_target));
         client.handshake(caps).await?;
         Ok(client)
     }
@@ -84,6 +87,7 @@ impl ServeClient {
             dedup_enabled: false,
             effective_caps: 0,
             poisoned: false,
+            remote_paths: None,
         }
     }
 
@@ -151,12 +155,13 @@ impl ServeClient {
                 "ServeClient poisoned after a prior pipelined error; drop and reconnect".into(),
             ));
         }
+        let msg = self.normalize_message(msg).await?;
         let w = self
             .writer
             .as_mut()
             .ok_or_else(|| BcmrError::InvalidInput("connection closed".into()))?;
         let tx = self.tx.as_mut().ok_or_else(BcmrError::send_framing_taken)?;
-        tx.write_message(w, msg).await?;
+        tx.write_message(w, &msg).await?;
         w.flush().await?;
         Ok(())
     }

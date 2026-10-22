@@ -377,7 +377,7 @@ pub struct CopyMoveArgs {
     #[arg(long, value_enum, default_value = "auto")]
     pub progress: ProgressMode,
 
-    /// Suppress progress UI; only errors print to stderr
+    /// Suppress progress and per-file messages
     #[arg(short = 'q', long)]
     pub quiet: bool,
 
@@ -663,7 +663,7 @@ pub enum Commands {
         #[arg(long, value_enum, default_value = "auto")]
         progress: ProgressMode,
 
-        /// Suppress progress UI; only errors print to stderr
+        /// Suppress progress and per-file messages
         #[arg(short = 'q', long)]
         quiet: bool,
 
@@ -909,8 +909,9 @@ impl Commands {
     }
 
     pub fn is_verbose(&self) -> bool {
-        self.copy_move_args().is_some_and(|a| a.verbose)
-            || matches!(self, Commands::Remove { verbose: true, .. })
+        !self.is_quiet()
+            && (self.copy_move_args().is_some_and(|a| a.verbose)
+                || matches!(self, Commands::Remove { verbose: true, .. }))
     }
 
     pub fn is_dir_only(&self) -> bool {

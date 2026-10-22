@@ -118,7 +118,7 @@ class TransferCleanupTests(unittest.TestCase):
         destination = self.home / "target.txt"
         marker = self.root / "changed-source-fault-reached"
         self.inject_transport_before_exec('''
-if (words == ['bcmr', 'serve'] or
+if (words[:2] == ['bcmr', 'serve'] or
         (len(words) == 1 and words[0].startswith('cat > '))) and not os.path.exists(%r):
     with open(%r, 'w') as stream:
         stream.write('payload transfer reached')
@@ -139,7 +139,7 @@ if (words == ['bcmr', 'serve'] or
                 marker = self.root / (mode + "-same-length-fault-reached")
                 original = source.stat()
                 self.inject_transport_before_exec('''
-if (words == ['bcmr', 'serve'] or
+if (words[:2] == ['bcmr', 'serve'] or
         (len(words) == 1 and words[0].startswith('cat > '))) and not os.path.exists(%r):
     with open(%r, 'w') as stream:
         stream.write('same-length source mutation reached')

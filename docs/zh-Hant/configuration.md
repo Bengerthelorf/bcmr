@@ -46,7 +46,7 @@ compression = "auto"     # "auto"（預設）、"force" 或 "off"
 
 | 值 | 說明 |
 |----|------|
-| `"auto"` | 依終端能力選擇 TUI、無色 inline 或管道安全的 plain（預設） |
+| `"auto"` | 在終端的命令下方更新 inline，管道中使用 plain（預設） |
 | `"tui"` | 帶漸變進度條、ETA、速度和逐檔案狀態的 TUI |
 | `"inline"` | 無顏色、即時更新的 3 行顯示 |
 | `"plain"` | 不使用游標控制、適合日誌的最終摘要 |

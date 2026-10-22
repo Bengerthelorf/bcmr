@@ -9,15 +9,17 @@ BCMR provides five explicit progress modes for all file operations. Select one w
 
 ## Auto Mode (Default)
 
-Auto chooses the richest renderer the output can safely support:
+Auto keeps live progress below the command, preserving the terminal screen and shell history:
 
-- TUI on a color-capable TTY with enough space
-- Uncolored inline progress when `NO_COLOR` is set or the terminal is smaller
+- Inline progress on a TTY with enough space, including when `NO_COLOR` is set
 - Plain final summaries for pipes, redirected output, and `TERM=dumb`
+
+Verbose (`-v`) operations use stable line output so per-file messages remain in
+scrollback. Interactive removal shows prompts without a live progress display.
 
 ## TUI Mode
 
-A TUI box with:
+Select `--progress=tui` explicitly for a full-screen TUI box with:
 
 - Total progress bar with color gradient
 - Transfer speed and ETA
@@ -41,7 +43,8 @@ File: largefile.zip [====----] 50%
 
 `plain` prints a stable final summary and never uses cursor controls, so it is safe
 for logs and pipelines. `off` suppresses progress entirely; `-q` / `--quiet` is the
-convenient shortcut.
+convenient shortcut and also takes precedence over `-v`. Dry-run previews and
+required confirmation prompts are still shown.
 
 ## Pipeline Scanning
 

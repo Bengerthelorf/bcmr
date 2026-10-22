@@ -33,6 +33,11 @@ pub(super) fn transfer_options_from_cli(cli: &Commands) -> remote::TransferOptio
 
 pub fn progress_mode(args: &Commands) -> ProgressMode {
     let requested = args.progress_mode();
+    // Per-file diagnostics share the terminal cursor with the live renderer.
+    // Keep verbose output in scrollback instead of redrawing over those lines.
+    if args.is_verbose() && requested != ProgressMode::Off {
+        return ProgressMode::Plain;
+    }
     if requested != ProgressMode::Auto {
         return requested;
     }
@@ -43,6 +48,17 @@ pub fn progress_mode(args: &Commands) -> ProgressMode {
         "off" => ProgressMode::Off,
         _ => ProgressMode::Auto,
     }
+}
+
+pub(crate) fn finish_json_operation(operation: &str) -> Result<()> {
+    if crate::config::is_json_mode() {
+        let log = crate::config::log_file();
+        let mut renderer =
+            crate::ui::progress::create_renderer(0, ProgressMode::Off, true, true, log.as_ref())?;
+        renderer.set_operation_type(operation);
+        renderer.finish()?;
+    }
+    Ok(())
 }
 
 pub(super) struct TransferItem {
@@ -397,7 +413,9 @@ pub(super) fn resolve_upload_remote(
     rdest: &RemotePath,
     multi_source: bool,
 ) -> RemotePath {
-    if multi_source || rdest.path == "." || rdest.path.ends_with('/') {
+    if crate::commands::copy::copies_directory_contents(src) {
+        rdest.clone()
+    } else if multi_source || rdest.path == "." || rdest.path.ends_with('/') {
         rdest.join(&src.file_name().unwrap_or_default().to_string_lossy())
     } else {
         rdest.clone()

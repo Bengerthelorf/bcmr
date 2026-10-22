@@ -184,6 +184,14 @@ impl ProgressData {
         Some(self.current_bytes as f64 / secs)
     }
 
+    pub fn stopped_summary_line(&self) -> String {
+        format!(
+            "Stopped: {} in {:.1}s",
+            crate::ui::utils::format_bytes(self.current_bytes as f64),
+            self.elapsed().as_secs_f64()
+        )
+    }
+
     pub fn done_summary_line(&self) -> String {
         use crate::ui::utils::format_bytes;
         let avg = self.average_bytes_per_sec().unwrap_or(0.0);
@@ -193,6 +201,12 @@ impl ProgressData {
             self.elapsed().as_secs_f64(),
             format_bytes(avg),
         );
+        if let Some(total) = self.items_total {
+            line.push_str(&format!(
+                " | {} items processed / {} items",
+                self.items_processed, total
+            ));
+        }
         if self.skipped_bytes > 0 {
             line.push_str(&format!(
                 " | skipped {}",

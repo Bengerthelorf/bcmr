@@ -11,6 +11,12 @@ mod plan;
 pub(super) use plan::required;
 use plan::Entry;
 
+/// Ordinary SSH transfers use the same host-qualified file identities as relay
+/// moves. Equal paths or inode numbers alone do not identify files across hosts.
+pub(super) async fn validate_regular_file_pair(source: &Endpoint, target: &Endpoint) -> Result<()> {
+    plan::validate_regular_file_pair(source, target).await
+}
+
 /// Ordinary link-preserving SSH paths share the same mutation-free guards as
 /// mixed/relay plans, including destination self-loops and move referents.
 pub(super) async fn validate_link_plan(
@@ -19,6 +25,7 @@ pub(super) async fn validate_link_plan(
     link: String,
     link_kind: crate::commands::copy::SymlinkKind,
     moving: bool,
+    overwrite: bool,
 ) -> Result<()> {
     let entry = Entry {
         source,
@@ -32,6 +39,8 @@ pub(super) async fn validate_link_plan(
     plan::validate_link_destination(&entry).await?;
     if moving {
         plan::validate_move_leaf(&entry).await?;
+    } else if overwrite && entry.target.kind().await?.is_some() {
+        plan::validate_copy_leaf(&entry).await?;
     }
     Ok(())
 }
@@ -332,7 +341,7 @@ pub(super) async fn copy(
                 );
             }
         }
-        return Ok(());
+        return super::finish_json_operation("Transferring (dry run)");
     }
     let total = entries
         .iter()

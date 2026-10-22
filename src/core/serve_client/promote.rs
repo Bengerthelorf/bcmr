@@ -164,6 +164,7 @@ impl ServeClient {
             dedup_enabled: false,
             effective_caps: 0,
             poisoned: false,
+            remote_paths: ssh_target.map(super::paths::RemotePaths::new),
         };
 
         let nonce = client

@@ -87,6 +87,63 @@ pub(crate) fn is_dst_self_or_under_src(src: &Path, dst: &Path) -> std::io::Resul
     Ok(dst_canon == src_canon || dst_canon.starts_with(&src_canon))
 }
 
+pub(crate) fn refuse_same_file_copy(
+    src: &Path,
+    dst: &Path,
+    preserve_link: bool,
+) -> Result<(), BcmrError> {
+    if symlink_entry_metadata(dst)?.is_none() {
+        return Ok(());
+    }
+    let same_entry = crate::core::move_file::same_entry(src, dst)?;
+    // Compare metadata without opening special destinations such as FIFOs.
+    // A normal forced copy may safely replace their directory entry.
+    let same_referent = if preserve_link {
+        false
+    } else {
+        match (src.metadata(), dst.metadata()) {
+            (Ok(source), Ok(destination)) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    source.dev() == destination.dev() && source.ino() == destination.ino()
+                }
+                #[cfg(not(unix))]
+                {
+                    source.is_file()
+                        && destination.is_file()
+                        && match (
+                            same_file::Handle::from_path(src),
+                            same_file::Handle::from_path(dst),
+                        ) {
+                            (Ok(source), Ok(destination)) => source == destination,
+                            _ => false,
+                        }
+                }
+            }
+            _ => false,
+        }
+    };
+    if same_entry || same_referent {
+        return Err(BcmrError::InvalidInput(format!(
+            "cannot copy '{}' onto the same file '{}'",
+            src.display(),
+            dst.display()
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn copies_directory_contents(src: &Path) -> bool {
+    // Path::file_name normalizes away a final '.', losing the user's explicit
+    // contents spelling. A plain trailing slash still retains the basename.
+    src.as_os_str()
+        .as_encoded_bytes()
+        .rsplit(|byte| *byte == b'/' || cfg!(windows) && *byte == b'\\')
+        .find(|component| !component.is_empty())
+        == Some(b".")
+}
+
 pub(super) fn scan_sources(
     sources: &[PathBuf],
     dst: &Path,
@@ -108,6 +165,14 @@ fn scan_sources_into(
     mut on_entry: impl FnMut(PlanEntry, u64) -> std::result::Result<(), BcmrError>,
 ) -> std::result::Result<(), BcmrError> {
     let dst_is_dir = !exact_destination && crate::core::destination::local_is_directory(dst)?;
+    let mut emit_entry = |entry, size| {
+        match &entry {
+            PlanEntry::CopyFile { src, dst } => refuse_same_file_copy(src, dst, false)?,
+            PlanEntry::Symlink { src, dst, .. } => refuse_same_file_copy(src, dst, true)?,
+            PlanEntry::CreateDir { .. } => {}
+        }
+        on_entry(entry, size)
+    };
 
     for src in sources {
         if traversal::is_copy_excluded(src, src, excludes) {
@@ -133,7 +198,7 @@ fn scan_sources_into(
             } else {
                 dst.to_path_buf()
             };
-            on_entry(
+            emit_entry(
                 PlanEntry::Symlink {
                     src: src.clone(),
                     dst: dst_path,
@@ -156,7 +221,7 @@ fn scan_sources_into(
             };
 
             let size = src.metadata()?.len();
-            on_entry(
+            emit_entry(
                 PlanEntry::CopyFile {
                     src: src.clone(),
                     dst: dst_path,
@@ -164,13 +229,17 @@ fn scan_sources_into(
                 size,
             )?;
         } else if recursive && src.is_dir() {
-            let src_name = src
-                .file_name()
-                .ok_or_else(BcmrError::invalid_source_dir_name)?;
-            let new_dst = if dst_is_dir {
-                dst.join(src_name)
+            let src_name = if copies_directory_contents(src) {
+                None
             } else {
-                dst.to_path_buf()
+                Some(
+                    src.file_name()
+                        .ok_or_else(BcmrError::invalid_source_dir_name)?,
+                )
+            };
+            let new_dst = match (dst_is_dir, src_name) {
+                (true, Some(name)) => dst.join(name),
+                _ => dst.to_path_buf(),
             };
 
             if is_dst_self_or_under_src(src, &new_dst)? {
@@ -181,7 +250,7 @@ fn scan_sources_into(
                 )));
             }
 
-            on_entry(
+            emit_entry(
                 PlanEntry::CreateDir {
                     src: src.clone(),
                     dst: new_dst.clone(),
@@ -205,7 +274,7 @@ fn scan_sources_into(
                     .filter(|metadata| metadata.file_type().is_symlink())
                 {
                     let link_target = std::fs::read_link(path).map_err(BcmrError::Io)?;
-                    on_entry(
+                    emit_entry(
                         PlanEntry::Symlink {
                             src: path.to_path_buf(),
                             dst: target,
@@ -215,7 +284,7 @@ fn scan_sources_into(
                         0,
                     )?;
                 } else if path.is_dir() {
-                    on_entry(
+                    emit_entry(
                         PlanEntry::CreateDir {
                             src: path.to_path_buf(),
                             dst: target,
@@ -224,7 +293,7 @@ fn scan_sources_into(
                     )?;
                 } else if path.is_file() {
                     let size = entry.metadata()?.len();
-                    on_entry(
+                    emit_entry(
                         PlanEntry::CopyFile {
                             src: path.to_path_buf(),
                             dst: target,

@@ -78,7 +78,7 @@ class RemoteSyncContractTests(unittest.TestCase):
     def remove_peer_sync_capability(self):
         marker = self.root / "sync-capability-removed"
         self.inject_transport_before_exec('''
-if words == ['bcmr', 'serve']:
+if words[:2] == ['bcmr', 'serve']:
     import struct
     import subprocess
     import threading

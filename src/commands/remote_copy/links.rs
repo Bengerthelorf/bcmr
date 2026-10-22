@@ -297,12 +297,20 @@ pub(super) async fn handle_link_copy(
                 target.clone(),
                 *kind,
                 moving,
+                args.is_force() || args.is_resume() || args.is_append() || args.is_strict(),
             )
             .await?;
         }
     }
     interrupt::check()?;
     if args.is_dry_run() {
+        if crate::config::is_json_mode() {
+            return super::finish_json_operation(if upload {
+                "Uploading (dry run)"
+            } else {
+                "Downloading (dry run)"
+            });
+        }
         for directory in &directories {
             println!(
                 "Dry-run: would create directory {}",

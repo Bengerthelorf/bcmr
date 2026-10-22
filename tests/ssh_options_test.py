@@ -57,7 +57,7 @@ if not args:
 target, *command = args
 if target not in ('fixture', 'user@fixture', '::1', 'user@::1'):
     sys.exit('unexpected SSH destination: ' + target)
-if command == ['bcmr', 'serve']:
+if command[:2] == ['bcmr', 'serve']:
     sys.stderr.write('bcmr: command not found\n')
     sys.exit(127)
 if not command:

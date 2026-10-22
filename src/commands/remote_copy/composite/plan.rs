@@ -535,7 +535,28 @@ async fn validate_relationship(
 }
 
 pub(super) async fn validate_move_leaf(entry: &Entry) -> Result<()> {
-    match (&entry.source, &entry.target) {
+    validate_same_file(&entry.source, &entry.target, entry.kind, "move").await
+}
+
+pub(super) async fn validate_regular_file_pair(source: &Endpoint, target: &Endpoint) -> Result<()> {
+    validate_same_file(source, target, Kind::File, "transfer").await
+}
+
+pub(super) async fn validate_copy_leaf(entry: &Entry) -> Result<()> {
+    if let (Endpoint::Local(source), Endpoint::Local(target)) = (&entry.source, &entry.target) {
+        crate::commands::copy::refuse_same_file_copy(source, target, entry.kind == Kind::Link)?;
+        return Ok(());
+    }
+    validate_same_file(&entry.source, &entry.target, entry.kind, "copy").await
+}
+
+async fn validate_same_file(
+    source: &Endpoint,
+    target: &Endpoint,
+    kind: Kind,
+    operation: &str,
+) -> Result<()> {
+    match (source, target) {
         (Endpoint::Local(source), Endpoint::Local(target)) => {
             crate::commands::r#move::refuse_same_file_move(source, target)?
         }
@@ -543,8 +564,7 @@ pub(super) async fn validate_move_leaf(entry: &Entry) -> Result<()> {
             let src = location(source).await?;
             let dst = location(target).await?;
             if same_location_namespace(source, target, &src, &dst).await {
-                let both_links =
-                    entry.kind == Kind::Link && target.kind().await? == Some(Kind::Link);
+                let both_links = kind == Kind::Link && target.kind().await? == Some(Kind::Link);
                 let same_leaf = src.leaf == dst.leaf;
                 let same_entry =
                     !both_links && src.entry_id.is_some() && src.entry_id == dst.entry_id;
@@ -553,7 +573,7 @@ pub(super) async fn validate_move_leaf(entry: &Entry) -> Result<()> {
                         || (src.referent_id.is_some() && src.referent_id == dst.referent_id));
                 if same_leaf || same_entry || same_referent {
                     bail!(
-                        "cannot move '{}' onto the same file '{}'",
+                        "cannot {operation} '{}' onto the same file '{}'",
                         source.display(),
                         target.display()
                     );
@@ -619,6 +639,13 @@ async fn preflight(entries: &[Entry], args: &Commands) -> Result<()> {
             validate_move_leaf(entry).await?;
         }
         let existing = entry.target.kind().await?;
+        if !matches!(args, Commands::Move { .. })
+            && overwrite
+            && existing.is_some()
+            && entry.kind != Kind::Directory
+        {
+            validate_copy_leaf(entry).await?;
+        }
         if matches!(entry.target, Endpoint::Sftp(_))
             && existing == Some(Kind::File)
             && entry.kind == Kind::File

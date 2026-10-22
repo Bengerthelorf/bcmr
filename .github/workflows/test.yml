@@ -84,6 +84,12 @@ jobs:
           python3 tests/transfer_cleanup_test.py
           python3 tests/remote_cleanup_test.py
           python3 tests/remote_sync_contract_test.py
+          python3 tests/remote_root_scope_test.py
+          python3 tests/terminal_ux_test.py
+          python3 tests/local_copy_move_ux_test.py
+          python3 tests/remove_ux_test.py
+          python3 tests/app_options_ux_test.py
+          python3 tests/mac_symlink_publish_ux_test.py
           python3 tests/ssh_options_test.py
           python3 tests/bandwidth_test.py
           python3 tests/composite_transfer_test.py

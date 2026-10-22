@@ -36,6 +36,10 @@ fn remote_args(ssh_target: &str) -> Vec<String> {
         crate::core::ssh_options::destination_arg(ssh_target),
         "bcmr".into(),
         "serve".into(),
+        // SSH already authenticates the account. Match its filesystem access,
+        // including mounted volumes and links outside the login directory.
+        "--root".into(),
+        "/".into(),
     ]);
     args
 }
