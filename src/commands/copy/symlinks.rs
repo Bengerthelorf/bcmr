@@ -377,20 +377,19 @@ fn should_map_noclobber_error_to_target_exists(
 }
 
 pub(super) fn is_target_exists_error(error: &std::io::Error) -> bool {
-    if error.kind() == std::io::ErrorKind::AlreadyExists {
-        return true;
-    }
+    let already_exists = error.kind() == std::io::ErrorKind::AlreadyExists;
     #[cfg(windows)]
     {
         const ERROR_FILE_EXISTS: i32 = 80;
         const ERROR_ALREADY_EXISTS: i32 = 183;
-        matches!(
-            error.raw_os_error(),
-            Some(ERROR_FILE_EXISTS) | Some(ERROR_ALREADY_EXISTS)
-        )
+        already_exists
+            || matches!(
+                error.raw_os_error(),
+                Some(ERROR_FILE_EXISTS) | Some(ERROR_ALREADY_EXISTS)
+            )
     }
     #[cfg(not(windows))]
-    false
+    already_exists
 }
 
 #[cfg(any(windows, test))]
