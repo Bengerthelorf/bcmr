@@ -59,7 +59,7 @@ require 'formulary'
 # Homebrew filters custom environment variables at startup. Set the fixture
 # inside Ruby so the actual completion-generation subprocess receives it.
 ENV['BCMR_CONFIG'] = ARGV.fetch(3)
-f = Formulary.factory(ARGV.fetch(0))
+f = Formulary::FromPathLoader.new(Pathname(ARGV.fetch(0))).get_formula(:stable)
 f.define_singleton_method(:prefix) { Pathname(ARGV.fetch(1)) }
 Dir.chdir(ARGV.fetch(2)) { f.install }
 """

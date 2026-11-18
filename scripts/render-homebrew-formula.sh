@@ -52,7 +52,7 @@ class Bcmr < Formula
 
   def install
     bin.install "bcmr"
-    generate_completions_from_executable(bin/"bcmr", "completions", shells: [:bash, :zsh, :fish])
+    generate_completions_from_executable(bin/"bcmr", "completions")
   end
 
   def caveats
