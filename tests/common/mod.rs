@@ -6,9 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 pub fn bcmr_bin() -> PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    let bin_name = if cfg!(windows) { "bcmr.exe" } else { "bcmr" };
-    exe.parent().unwrap().parent().unwrap().join(bin_name)
+    PathBuf::from(env!("CARGO_BIN_EXE_bcmr"))
 }
 
 pub struct ServeChild {

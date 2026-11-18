@@ -10,18 +10,7 @@ use bcmr::core::io as durable_io;
 use bcmr::core::session::Session;
 
 fn bcmr_bin() -> PathBuf {
-    let mut path = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    path.push("bcmr");
-    if cfg!(windows) {
-        path.set_extension("exe");
-    }
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_bcmr"))
 }
 
 fn run_bcmr(args: &[&str]) -> (bool, String, String) {

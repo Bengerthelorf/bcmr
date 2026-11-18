@@ -10,10 +10,8 @@ async fn serve_listen_tcp_handshake_and_put() {
     let dir = tempfile::tempdir().unwrap();
     let dst = dir.path().join("tcp_roundtrip.bin");
 
-    let exe = std::env::current_exe().unwrap();
-    let bin_name = if cfg!(windows) { "bcmr.exe" } else { "bcmr" };
-    let bin = exe.parent().unwrap().parent().unwrap().join(bin_name);
-    let mut child = Command::new(&bin)
+    let bin = env!("CARGO_BIN_EXE_bcmr");
+    let mut child = Command::new(bin)
         .args(["serve", "--listen", "127.0.0.1:0", "--root", "/"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -101,10 +99,8 @@ async fn serve_listen_does_not_offer_direct_tcp_cap() {
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::net::TcpStream;
 
-    let exe = std::env::current_exe().unwrap();
-    let bin_name = if cfg!(windows) { "bcmr.exe" } else { "bcmr" };
-    let bin = exe.parent().unwrap().parent().unwrap().join(bin_name);
-    let mut child = tokio::process::Command::new(&bin)
+    let bin = env!("CARGO_BIN_EXE_bcmr");
+    let mut child = tokio::process::Command::new(bin)
         .args(["serve", "--listen", "127.0.0.1:0", "--root", "/"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

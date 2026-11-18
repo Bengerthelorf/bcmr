@@ -41,6 +41,19 @@ impl ServeClient {
 
     #[allow(dead_code)]
     fn locate_bcmr_binary() -> Result<std::path::PathBuf, BcmrError> {
+        // Cargo's test executable layout can differ from the application layout.
+        // CI supplies the separately built CLI explicitly for loopback tests.
+        if let Some(path) = std::env::var_os("BCMR_TEST_BINARY") {
+            let path = std::path::PathBuf::from(path);
+            return if path.is_file() {
+                Ok(path)
+            } else {
+                Err(BcmrError::InvalidInput(format!(
+                    "BCMR_TEST_BINARY is not a file: {}",
+                    path.display()
+                )))
+            };
+        }
         let exe = std::env::current_exe()?;
         let bin_dir = exe
             .parent()

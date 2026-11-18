@@ -361,6 +361,7 @@ jobs:
 
   update-tap:
     name: Update Homebrew Formula
+    timeout-minutes: 40
     runs-on: ubuntu-latest
     needs: [release-gate, release, verify-install]
     if: needs.release-gate.outputs.prerelease == 'false'
@@ -368,43 +369,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Get Release Info
-        id: release
-        run: |
-          echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          TAG=${GITHUB_REF#refs/tags/}
-          echo "FORMULA_VERSION=${TAG#v}" >> $GITHUB_OUTPUT
-
-      - name: Download verified release checksum manifest
+      - name: Publish checked Homebrew update
+        env:
+          GH_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-          curl --fail --location --retry 5 --retry-all-errors \
-            --output sha256sums.txt \
-            "https://github.com/Bengerthelorf/bcmr/releases/download/${{ steps.release.outputs.VERSION }}/sha256sums.txt"
-
-      - name: Checkout Tap Repository
-        uses: actions/checkout@v6
-        with:
-          repository: Bengerthelorf/homebrew-tap
-          token: ${{ secrets.TAP_GITHUB_TOKEN }}
-          path: homebrew-tap
-
-      - name: Update Formula
-        shell: bash
-        run: |
-          set -euo pipefail
-          bash scripts/render-homebrew-formula.sh \
-            "${{ steps.release.outputs.VERSION }}" sha256sums.txt > bcmr.rb
-          mv bcmr.rb homebrew-tap/Formula/bcmr.rb
-          cd homebrew-tap
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          git add Formula/bcmr.rb
-          if ! git diff --cached --quiet; then
-            git commit -m "Update bcmr to ${{ steps.release.outputs.VERSION }}"
-            git push origin main
+          TAG="${GITHUB_REF#refs/tags/}"
+          if [[ "$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq .isPrerelease)" == true ]]; then
+            echo "Prereleases do not update the stable Homebrew tap"
+            exit 0
           fi
+          gh auth setup-git
+          TAP_DIR="$RUNNER_TEMP/homebrew-tap"
+          gh repo clone Bengerthelorf/homebrew-tap "$TAP_DIR"
+          bash "$TAP_DIR/scripts/publish-update.sh" bcmr "$TAG"
 
   verify-tap:
     name: Verify published Homebrew package
