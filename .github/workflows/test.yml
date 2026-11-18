@@ -456,6 +456,8 @@ jobs:
       - name: Test --json error event and status state machine
         if: runner.os != 'Windows'
         shell: bash
+        env:
+          BCMR: ${{ github.workspace }}/target/debug/bcmr
         run: |
           # Regression test for: errors after runner creation produced no
           # terminal event in the log, so bcmr status reported "done" for
@@ -471,20 +473,20 @@ jobs:
           rm -rf "$root/ok"
           mkdir -p "$root/ok"
           echo ok > "$root/ok/f.txt"
-          desc=$(cargo run --quiet -- remove -rfy --json --background "$root/ok")
+          desc=$("${BCMR}" remove -rfy --json --background "$root/ok")
           jid=$(echo "$desc" | python3 -c 'import json,sys;print(json.loads(sys.stdin.read())["job_id"])')
           log=$(echo "$desc" | python3 -c 'import json,sys;print(json.loads(sys.stdin.read())["log"])')
           for _ in $(seq 1 60); do
             if grep -q '"type":"result"' "$log" 2>/dev/null; then break; fi
             sleep 0.5
           done
-          cargo run --quiet -- status "$jid" --json | grep -q '"state":"done"' \
+          "${BCMR}" status "$jid" --json | grep -q '"state":"done"' \
             || { echo "FAIL: happy path not done"; cat "$log"; exit 1; }
 
           # --- error path: non-recursive remove of a non-empty dir ---
           # Must terminate the log with a status:"error" result and
           # status must report "failed".
-          desc=$(cargo run --quiet -- remove --json --background --yes "$root/sub" 2>&1 | head -1)
+          desc=$("${BCMR}" remove --json --background --yes "$root/sub")
           jid=$(echo "$desc" | python3 -c 'import json,sys;print(json.loads(sys.stdin.read())["job_id"])')
           log=$(echo "$desc" | python3 -c 'import json,sys;print(json.loads(sys.stdin.read())["log"])')
           for _ in $(seq 1 60); do
@@ -496,7 +498,7 @@ jobs:
             || { echo "FAIL: error path did not write error result"; exit 1; }
           grep -q '"error_kind":"is_directory"' "$log" \
             || { echo "FAIL: error result missing categorical error_kind"; exit 1; }
-          cargo run --quiet -- status "$jid" --json | grep -q '"state":"failed"' \
+          "${BCMR}" status "$jid" --json | grep -q '"state":"failed"' \
             || { echo "FAIL: status did not report failed"; exit 1; }
 
           echo "Error event + state machine tests passed"
