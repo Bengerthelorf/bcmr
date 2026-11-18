@@ -53,7 +53,12 @@ jobs:
       - name: Check compilation
         run: cargo check --verbose
 
+      - name: Build CLI for loopback integration tests
+        run: cargo build --locked --features test-support
+
       - name: Run all unit tests
+        env:
+          BCMR_TEST_BINARY: ${{ github.workspace }}/target/debug/bcmr${{ runner.os == 'Windows' && '.exe' || '' }}
         run: cargo test --verbose --features test-support
 
       - name: Clippy (deny warnings)
