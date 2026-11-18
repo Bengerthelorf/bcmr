@@ -29,7 +29,6 @@ cat <<EOF
 class Bcmr < Formula
   desc "Better Copy Move Remove - A modern, safe file operation tool"
   homepage "https://github.com/Bengerthelorf/bcmr"
-  version "${tag#v}"
   license "Apache-2.0"
 
   if OS.mac?
